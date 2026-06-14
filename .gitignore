@@ -1,0 +1,61 @@
+# ── Secrets & local config (NEVER commit) ─────────────────────────────
+config.yml
+config.yaml
+*.local.yml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+# Real candidate profile / CV / PII — only the sanitized sample is committed
+profile/real/
+profile/*.real.*
+*.private.*
+
+# ── Terraform ─────────────────────────────────────────────────────────
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!environments/*.tfvars.example
+crash.log
+override.tf
+override.tf.json
+
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ── dbt ───────────────────────────────────────────────────────────────
+target/
+dbt_packages/
+logs/
+.user.yml
+
+# ── Node (if any tooling/dashboard is added later) ────────────────────
+node_modules/
+
+# ── OS / editor ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ── Build artifacts / scratch ─────────────────────────────────────────
+*.zip
+/tmp/
+scratch/
