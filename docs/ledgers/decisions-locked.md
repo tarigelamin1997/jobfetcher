@@ -44,7 +44,7 @@
 | Data sources: JSearch + Adzuna; official APIs only, no scraping | Multi-source via a pluggable adapter; ToS-safe | journal §7 |
 | Scoring: keep 7-factor ATS framework (tune weights) | Encodes the trusted ATS framework | journal §7 |
 | Explainability critical (strengths/gaps/strategic assessment) | The reasoning is the value, not just a number | journal §7 |
-| Thresholds 75 / 55 / 10 (config-editable) | Active-but-selective bar | journal §7 |
+| Single threshold (default 60), runtime-editable per user, gates shortlist + CV; floor 50, near-miss 10 | One user-tunable knob; change without redeploy; active value stamped per run for measurement | journal §7 + plan §12 |
 | Lightweight scoring calibration loop + accuracy SLO | Reliability ROI; corrections tune the prompt | journal §7 |
 | Scam-gate + poster-type label (no hard company filter) | Surface context; user decides | journal §7 |
 | UI: email + Notion both first-class; status tracked in Notion | Email triage + Notion act/track | journal §7 |

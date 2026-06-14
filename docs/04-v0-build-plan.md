@@ -55,7 +55,7 @@ Implement the adapter: call the source API (pagination + basic rate-limit/backof
 - **FAILURE-MODE:** API shape drift → the contract catches it loudly; map the new field in the adapter.
 
 ### Step 5 — Scorer (Bedrock)
-Implement scoring: load profile, build the 7-factor ATS system prompt, call Bedrock (**temperature 0**) with structured-output enforcement, parse into the score contract (`score`, `fit_category`, `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified`), write `score` rows. Apply thresholds **75 / 55 / 10**.
+Implement scoring: load profile, build the 7-factor ATS system prompt, call Bedrock (**temperature 0**) with structured-output enforcement, parse into the score contract (`score`, `fit_category`, `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified`), write `score` rows. Apply the **single config threshold** (default **60**) + hard-floor **50** + near-miss band **10** — **read from the per-user `profile` config at runtime, never hardcoded.** This one threshold gates the email shortlist now (and CV writing from M1). Stamp the active threshold onto each run's records.
 - **WHY:** scoring is the core value; explainability is the value, not just the number.
 - **WAIT-FOR:** the same JD+profile scored twice lands within ±3 points (determinism check).
 - **FAILURE-MODE:** `ValidationException` → wrong model id/region; malformed JSON → tighten the output schema / add a single retry.
@@ -105,6 +105,7 @@ GitHub Actions: lint (`ruff`) → unit tests → `terraform validate`. Branch pr
 | **VG5 — Notification** | Daily email arrives with correct matches, scores, and working apply links. | Zero matches above threshold → a valid "no matches today" email (not a crash, not silence). |
 | **VG6 — Teardown** | `terraform destroy` removes everything; bill returns to ~$0. | (N/A — destroy is the negative of apply.) |
 | **VG7 — Secrets hygiene** | Secret scan passes; no secret in the repo or logs. | Plant a fake key in a staged file → pre-commit/secret-scan **blocks** it. |
+| **VG8 — Threshold is config** | Change `threshold` in the per-user config (no code change/redeploy) → the next run surfaces a different set of jobs accordingly. | Set threshold above every score → the run produces a valid "no matches" email; set it to 0 → all scored jobs surface. (Proves the gate reads config at runtime, not a hardcoded constant.) |
 
 All VGs must pass before tagging `v0.1.0`. Any failure → log an `ERR-NNN` in [ledgers/errors.md](ledgers/errors.md) (root cause + prevention + **detection**) before proceeding.
 

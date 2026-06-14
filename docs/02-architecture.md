@@ -123,8 +123,8 @@ erDiagram
   PROFILE {
     text user_id PK "single-user now; the multi-user seam"
     jsonb profile "skills, certs, projects, prefs — source of truth"
-    int threshold "default 75"
-    int hard_floor "default 55"
+    int threshold "default 60 — gates shortlist + CV"
+    int hard_floor "default 50"
     int near_miss_band "default 10"
   }
 ```
@@ -164,7 +164,7 @@ Config (`search_config`, sanitized sample profile) ships in-repo; **real profile
 
 - **7-factor ATS framework** (core-skill match, tool/tech alignment, achievement relevance, seniority/scope, ATS-keyword, formatting/clarity, realistic fit). Weights tunable; refined during the scoring migration.
 - **Explainability is the value:** structured output includes `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified` — not just a number. Bedrock, **temperature 0** for stability.
-- **Thresholds (config-editable):** **threshold 75** (active-but-selective), **hard floor 55**, **near-miss band 10** (→ near-miss = 65–74). Below floor → analytics only.
+- **Threshold (single, user-configurable, runtime):** **one `threshold`** (default **60**) gates **both** the daily shortlist **and** CV writing — read from the per-user `profile` config on every run, so changing it is editing one value (no redeploy). **Hard floor 50** + **near-miss band 10** remain the watch/honesty band *below* the threshold (→ near-miss = 50–59). Below floor → analytics only. The *active* threshold is stamped on each run's records for measurement. (One knob, not two — see [ADR/journal §12 amendment](01-session-decision-journal.md).)
 - **Calibration loop (lightweight):** the human-review gate captures `score_override` corrections as structured data → used to tune the scoring prompt and to drive a **"scoring accuracy" SLO** (% of scores that needed override). High reliability ROI, low complexity. *A labeled reliability showcase.*
 - **Legitimacy gate** (scam detection, hard) + **poster-type label** (informational — direct employer / staffing / consulting / etc.; user decides). No hard-filter by company type.
 
