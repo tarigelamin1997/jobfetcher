@@ -23,11 +23,17 @@ EventBridge (daily) → **one Lambda**: fetch from **one source** → land raw i
 
 ## Sub-decisions to resolve at build start (flagged, not pre-locked)
 - **D-v0-1 — Postgres flavor.** *Recommendation:* **Aurora Serverless v2 + RDS Data API** — no VPC/NAT for the Lambda (HTTP data access), fewer moving parts ⇒ more reliable, scales toward $0 idle. *Alternative:* **RDS `db.t4g.micro`** (cheaper sticker price, but Lambda-in-VPC + VPC endpoints to avoid a NAT gateway). Decide on the simplicity-vs-cost tradeoff at build start; record an ADR.
-- **D-v0-2 — Which single source.** Pick JSearch *or* Adzuna for v0 based on which gives better KSA/GCC DE coverage in a quick manual probe. Record why.
+- **D-v0-2 — Source: ✅ resolved → JSearch** ([ADR-0010](adr/0010-job-source-jsearch.md)). Single source for v0. **Step 0 probes JSearch's free tier first**, then upgrades to Pro ($25/mo). Adzuna deferred.
 
 ---
 
 ## Apply sequence
+
+### Step 0 — Coverage probe (resolve the source on evidence, at $0)
+Before building, validate the source. Register a RapidAPI key, subscribe to **JSearch's free tier (200 req/mo)**, and run real queries for the target market — e.g. `query="Data Engineer in Riyadh", country="sa"` and `query="Data Platform Engineer", country="ae"`, with a `date_posted` window. Eyeball: how many relevant DE roles/day, and do the **descriptions come through complete?**
+- **WHY:** "is coverage good enough" is the bottleneck that justifies paying — settle it with data, not a guess. The free tier is plenty for the probe.
+- **WAIT-FOR:** a clear yes/no on GCC depth + full JD text. If yes → subscribe **Pro ($25/mo)** and proceed. If thin → record it and reconsider (probe Adzuna / a regional board) before building.
+- **FAILURE-MODE:** sparse results → widen queries (titles × cities) before concluding the source is weak; truncated JDs → that source is disqualified for scoring.
 
 ### Step 1 — Scaffold the project + resolve sub-decisions
 Create the Python package layout (ports-&-adapters from day one, so M1+ stay clean), the Terraform skeleton, and resolve D-v0-1/D-v0-2 with a short ADR each.
@@ -37,7 +43,7 @@ Create the Python package layout (ports-&-adapters from day one, so M1+ stay cle
 - **FAILURE-MODE:** import path tangles → fix the package layout before writing logic, not after.
 
 ### Step 2 — Data contract + v0 schema
-Define **Pydantic** models for the normalized posting + the Bedrock score output (the data-contract boundary). Write the **Alembic** migration for the v0 tables: `posting`, `cluster` (trivial 1:1 in v0), `score`, `profile`.
+Define **Pydantic** models for the normalized posting + the Bedrock score output (the data-contract boundary). Write the **Alembic** migration for the v0 tables: **`bronze_posting`** (immutable raw landing), `posting` (silver — normalized), `cluster` (trivial 1:1 in v0), `score`, `profile`.
 - **WHY:** contracts at the boundary prevent "assumed-from-inspection" bugs; Alembic from day one makes schema evolution first-class.
 - **WAIT-FOR:** `alembic upgrade head` creates the tables; a round-trip insert/select of a sample posting works.
 - **FAILURE-MODE:** validation errors on real API payloads → tighten the adapter's normalization, not the contract.
@@ -48,14 +54,20 @@ Modules/resources: S3 bucket (`force_destroy = true`), Secrets Manager entries (
 - **WAIT-FOR:** `terraform apply` clean; `terraform destroy` proven to return to $0 on a throwaway run.
 - **FAILURE-MODE:** IAM `AccessDenied` at runtime → the role is missing a specific permission; add exactly that one, not `*`.
 
-### Step 4 — Source adapter (one source)
-Implement the adapter: call the source API (pagination + basic rate-limit/backoff), normalize each result through the Pydantic contract, write raw JSON to S3 `raw/{source}/{date}/`, upsert `posting` rows (exact-id dedup on re-fetch). Thread the **correlation `run_id`**.
-- **WHY:** the adapter is the seam that makes M2 (multi-source) a one-file add.
-- **WAIT-FOR:** a real call returns ≥1 normalized posting persisted to Postgres + S3.
-- **FAILURE-MODE:** API shape drift → the contract catches it loudly; map the new field in the adapter.
+### Step 4 — JSearch adapter + bronze→silver landing
+Implement the **JSearch adapter** behind the source-port interface: call per query (keywords + `country` + `date_posted`), **paginate to a config page-cap**, with rate-limit/backoff + **quota-header awareness** (stop gracefully near quota, landing what you have). **Bronze:** write each raw result *untouched* to S3 `raw/jsearch/{date}/` + a `bronze_posting` row (immutable). **Silver:** normalize through the Pydantic contract into `posting`; exact-id dedup on re-fetch. Thread the **correlation `run_id`**. Request-budget knobs (queries, page-cap, date window) live in config.
+- **WHY:** bronze-first = the land-daily guarantee + replay; the adapter is the seam that makes M2 (multi-source) a one-file add.
+- **WAIT-FOR:** a real call lands raw to S3 + `bronze_posting`, and ≥1 normalized `posting` in silver; re-running the same day adds no duplicate bronze rows for the same source-id.
+- **FAILURE-MODE:** API shape drift → the contract catches it loudly (map the field in the adapter); quota exhausted → land what you got + log, never crash the run.
+
+### Step 4b — Gold filter (cheap, before the LLM)
+Apply the **deterministic profile filter** over silver → mark the **gold candidate** subset (`posting.status = gold_candidate`): location in target set, title matches target roles, seniority band, exclude keywords/companies. Filter rules are config.
+- **WHY:** the LLM is the expensive step — only score likely fits. Below-bar rows stay in bronze/silver for later analytics.
+- **WAIT-FOR:** an obviously-irrelevant posting (wrong location/title) is **excluded** from gold while a matching one is included.
+- **FAILURE-MODE:** filter too aggressive → real fits dropped before scoring. Keep it *coarse* (the LLM does the fine judgment); log filtered counts.
 
 ### Step 5 — Scorer (Bedrock)
-Implement scoring: load profile, build the 7-factor ATS system prompt, call Bedrock (**temperature 0**) with structured-output enforcement, parse into the score contract (`score`, `fit_category`, `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified`), write `score` rows. Apply the **single config threshold** (default **60**) + hard-floor **50** + near-miss band **10** — **read from the per-user `profile` config at runtime, never hardcoded.** This one threshold gates the email shortlist now (and CV writing from M1). Stamp the active threshold onto each run's records.
+Implement scoring **over the gold candidates only**: load profile, build the 7-factor ATS system prompt, call Bedrock (**temperature 0**) with structured-output enforcement, parse into the score contract (`score`, `fit_category`, `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified`), write `score` rows. Apply the **single config threshold** (default **60**) + hard-floor **50** + near-miss band **10** — **read from the per-user `profile` config at runtime, never hardcoded.** This one threshold gates the email shortlist now (and CV writing from M1). Stamp the active threshold onto each run's records.
 - **WHY:** scoring is the core value; explainability is the value, not just the number.
 - **WAIT-FOR:** the same JD+profile scored twice lands within ±3 points (determinism check).
 - **FAILURE-MODE:** `ValidationException` → wrong model id/region; malformed JSON → tighten the output schema / add a single retry.

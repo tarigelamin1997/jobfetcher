@@ -41,7 +41,10 @@
 ## Pipeline behavior
 | Decision | Why | Owner |
 |---|---|---|
-| Data sources: JSearch + Adzuna; official APIs only, no scraping | Multi-source via a pluggable adapter; ToS-safe | journal §7 |
+| Source = **JSearch** (probe free 200-req → Pro $25/mo); single-source for v0; Adzuna deferred; official APIs only, no scraping | Coverage + full JD text from one API (Google-for-Jobs, supports GCC); single source ⇒ no cross-source dedup in v0; pay only on evidence | [ADR-0010] |
+| **Ingestion = medallion landing** — bronze (land-all-raw, immutable) → silver (clean+dedup) → gold (profile-filter) → score | Land-daily guarantee + cheap filter before the LLM | journal §13 · [02-architecture] |
+| **Immutable bronze ⇒ replay** — silver/gold/score are pure functions over bronze | Reprocess history with zero new API calls when filters/profile change | journal §13 |
+| **Quota/request-budget** — charged per request; query (keywords + `country` + date) = source-side pre-filter; page-cap + date-window are config | API quota is the real cap, not storage | [ADR-0010] |
 | Scoring: keep 7-factor ATS framework (tune weights) | Encodes the trusted ATS framework | journal §7 |
 | Explainability critical (strengths/gaps/strategic assessment) | The reasoning is the value, not just a number | journal §7 |
 | Single threshold (default 60), runtime-editable per user, gates shortlist + CV; floor 50, near-miss 10 | One user-tunable knob; change without redeploy; active value stamped per run for measurement | journal §7 + plan §12 |

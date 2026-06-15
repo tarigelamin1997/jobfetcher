@@ -37,7 +37,7 @@ The order reflects: value-first · dependency-respecting · capability-arrives-w
 |---|---|---|
 | **v0.1** | One Lambda: 1 source → S3 + Postgres → Bedrock score → **daily email**. Terraform, Secrets Manager, tests, minimal CI. | "I have no automated scored shortlist at all." The irreducible working loop. |
 | **M1 · v0.2** | **CV tailoring** (reliable renderer, one master CV, draft→review). | "I see good matches but still hand-tailor every CV." (Tarig's chosen first migration.) |
-| **M2 · v0.3** | **Multi-source + clustering dedup + Suspected-Duplicates.** | "One source misses jobs" → add source #2 → *which creates the duplicate problem* → clustering dedup. Capability + its justification arrive together. |
+| **M2 · v0.3** | **Multi-source + clustering dedup + Suspected-Duplicates.** | "One source misses jobs" → add source #2 (**Adzuna** is the candidate) → *which creates the cross-source duplicate problem* → clustering dedup. Capability + its justification arrive together. (v0 is JSearch-only, so v0 needs only exact-id dedup — [ADR-0010](adr/0010-job-source-jsearch.md).) |
 | **M3 · v0.4** | **Single Lambda → Step Functions.** | "The one Lambda now does fetch-multi→dedup→score→CV→email — too big to retry/observe cleanly." Orchestration is *earned*. |
 | **M4 · v0.5** | **Notion workspace + near-miss/graduation.** | "Email alone can't track status or watch near-misses." Adds Status/Suspected-Dup/Near-Miss DBs + watch→re-score→graduate; stands up the calibration-correction surface. |
 | **M5 · v0.6** | **dbt marts on Postgres** (staging→marts, tests/lineage/incremental). | "I can't answer market/skill questions over accumulated data." DE-depth headliner — after data has accumulated. |

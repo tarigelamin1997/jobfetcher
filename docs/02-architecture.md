@@ -56,18 +56,45 @@ Each component is a single responsibility with an explicit **Consumes → Produc
 
 ---
 
+## Ingestion — medallion landing (the operational medallion)
+
+The operational pipeline *is* a medallion. Landing the raw data is the **first-order daily guarantee** — everything else is derived from it.
+
+- **Bronze — land everything, immutable.** The fetch adapter pulls raw results from the source API (paginated) and writes them **untouched**: raw JSON to **S3 `raw/{source}/{date}/…`** + one row per raw posting to a thin **`bronze_posting`** table. No filtering. The guarantee: *whatever the API returned today is captured and replayable.*
+- **Silver — conform + clean + dedup.** Normalize each source's payload into the common schema (the data-contract `posting`), parse/typecast, then dedup ([cluster-and-surface](#deduplication--cluster-and-surface-adr-0005)).
+- **Gold — filter to candidates.** A cheap, deterministic **profile filter** (location in target set, title matches target roles, seniority band, exclude keywords/companies) selects the "likely-fit" subset. *Only gold reaches the expensive LLM.* Below-bar rows stay in bronze/silver for analytics.
+- **Score** — Bedrock runs on gold only.
+
+**Immutable bronze ⇒ replay.** Because bronze is never mutated, silver/gold/score are *pure functions over bronze*. Change a filter, tighten the threshold, or update your profile → **re-run silver→gold→score over existing bronze with zero new API calls.** Bronze is precious + append-only; silver/gold are disposable and rebuildable — which also makes a bad deploy recoverable (reprocess and you're whole).
+
+**Quota is the real cap, not storage.** Sources charge per *request* (~a page of results), so ingestion is *prioritization under a request budget*: `requests/run = queries × pages × sources ≤ monthly_quota ÷ 30`. The query itself (keywords + `country` + `date_posted` window) is the cheap source-side pre-filter; page-depth and the date window are config knobs. (Source decision: [ADR-0010](adr/0010-job-source-jsearch.md).)
+
+> **Two medallions, don't conflate them:** this **operational medallion** (bronze→silver→gold→score, on Postgres + S3) is the *ingestion/serving* path. The **analytical medallion** ([dbt marts](#analytical-plane--dbt-marts-adr-0004)) is a *separate* set of models for skill/sector analytics. Same pattern, different consumers.
+
+---
+
 ## Data model (Postgres) — the operational store
 
-Relational data → relational store ([ADR-0003](adr/0003-postgres-over-dynamodb.md)). The dedup model is the interesting part: **postings** are raw per-platform listings; a **cluster** groups postings believed to be the same real job; scoring and CVs attach to the **cluster**, not the posting — so we do the expensive work once but keep every platform's apply-link.
+Relational data → relational store ([ADR-0003](adr/0003-postgres-over-dynamodb.md)). The pipeline is a medallion: **`bronze_posting`** is the immutable raw landing (mirrored in S3); **`posting`** is the cleaned/normalized **silver** record; **gold** is the profile-filtered subset that reaches scoring; a **cluster** groups postings believed to be the same real job, and scoring/CVs attach to the **cluster** — expensive work done once, every platform's apply-link kept.
 
 ```mermaid
 erDiagram
   PROFILE ||--o{ SCORE : "scored against"
+  BRONZE_POSTING ||--o| POSTING : "normalized into (silver)"
   CLUSTER ||--o{ POSTING : "groups"
   CLUSTER ||--o| SCORE : "has one"
   CLUSTER ||--o| CV : "has one"
   CLUSTER ||--o{ APPLICATION : "tracked by"
 
+  BRONZE_POSTING {
+    text bronze_id PK
+    text source "jsearch (v0)"
+    text source_job_id
+    jsonb raw_payload "untouched API JSON"
+    text s3_raw_key "mirror in S3 raw/"
+    text run_id "correlation id"
+    timestamptz fetched_at "immutable; append-only"
+  }
   POSTING {
     text posting_id PK
     text source "jsearch | adzuna | ..."
@@ -83,7 +110,7 @@ erDiagram
     text match_status "confirmed | suspected | rejected_by_user"
     float match_confidence
     timestamptz fetched_at
-    text status "fetched | clustered"
+    text status "silver | gold_candidate | scored"
   }
   CLUSTER {
     text cluster_id PK
