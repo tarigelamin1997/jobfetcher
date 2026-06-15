@@ -45,6 +45,11 @@
 | **Ingestion = medallion landing** — bronze (land-all-raw, immutable) → silver (clean+dedup) → gold (profile-filter) → score | Land-daily guarantee + cheap filter before the LLM | journal §13 · [02-architecture] |
 | **Immutable bronze ⇒ replay** — silver/gold/score are pure functions over bronze | Reprocess history with zero new API calls when filters/profile change | journal §13 |
 | **Quota/request-budget** — charged per request; query (keywords + `country` + date) = source-side pre-filter; page-cap + date-window are config | API quota is the real cap, not storage | [ADR-0010] |
+| **Silver text pipeline** — pure, versioned, ordered steps (clean → lang-detect → segment → fingerprint → embed) on job_description/title; rest is field-mapping | Most transforms are on text; pure+versioned ⇒ replayable | journal §14 |
+| **Origin-level lineage** — each silver row carries `bronze_id` + `pipeline_version`; field→source is a documented constant | Trace-to-origin + exact re-derive (replay-based) | journal §14 |
+| **Never-discard → dimensional modeling** — retain all (bronze lossless); model dims by *insight* not by *field*; grow a dim when a question needs it (retroactively via replay) | Compounding insight without table-per-field sprawl | [ADR-0011] · 00-philosophy |
+| **Analytical = constellation model** — facts (fct_job_posting · `fct_job_skill` bridge · fct_job_score · fct_application) over conformed dims (date/skill/title/company/sector/location) + point-in-time profile (SCD2); skills+title derived from text | Insights emerge from joins; the skill bridge is the linchpin | [ADR-0011] |
+| **Analytics priority order** — `dim_skill`+`fct_job_skill` first → point-in-time profile + score facts (trends) → `dim_sector`; title/company supporting; built at M5/M6 | Tarig's priority insights: skill-demand/gaps · progress trends · sector intel | [ADR-0011] |
 | Scoring: keep 7-factor ATS framework (tune weights) | Encodes the trusted ATS framework | journal §7 |
 | Explainability critical (strengths/gaps/strategic assessment) | The reasoning is the value, not just a number | journal §7 |
 | Single threshold (default 60), runtime-editable per user, gates shortlist + CV; floor 50, near-miss 10 | One user-tunable knob; change without redeploy; active value stamped per run for measurement | journal §7 + plan §12 |

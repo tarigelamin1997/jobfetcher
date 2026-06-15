@@ -47,6 +47,8 @@ This is the **engine of the roadmap** (see [roadmap](03-roadmap.md)). After each
 
 > **Add the minimum, and only to break the biggest real bottleneck → maximum capability per unit of complexity.**
 
+**Data corollary — never-discard → decompose-by-insight.** Retaining data is *not* the same as modeling it. **Never delete** — raw landing (bronze) is immutable, so nothing is ever lost. But **model into structured dimensions/facts only what compounds into a real insight** — decompose by *insight*, not by *field*. Because the raw is immutable, a new dimension can be modeled **retroactively over all history** via replay. This is P1/P2 applied to data: don't pre-build a table per field; grow the model one justified question at a time. (See [ADR-0011](adr/0011-dimensional-analytical-model.md).)
+
 ---
 
 ## Tool-minimalism wins (the gate) · DE-depth is the tiebreaker

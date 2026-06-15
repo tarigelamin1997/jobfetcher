@@ -69,6 +69,13 @@ The operational pipeline *is* a medallion. Landing the raw data is the **first-o
 
 **Quota is the real cap, not storage.** Sources charge per *request* (~a page of results), so ingestion is *prioritization under a request budget*: `requests/run = queries × pages × sources ≤ monthly_quota ÷ 30`. The query itself (keywords + `country` + `date_posted` window) is the cheap source-side pre-filter; page-depth and the date window are config knobs. (Source decision: [ADR-0010](adr/0010-job-source-jsearch.md).)
 
+### Source schema → silver (the text pipeline)
+JSearch returns a structured JSON job object per result (pinned exactly from the [Step-0 probe](04-v0-build-plan.md)), grouped: **identity** (`job_id`, `job_title`, `job_publisher`), **employer** (`employer_name/website/logo/company_type`), **apply** (`job_apply_link`, `apply_options[]` — multi-platform links), **text** (`job_description`, `job_highlights{Qualifications/Responsibilities/Benefits}`), **employment** (`job_employment_type(s)`, `job_is_remote`), **location** (`job_location/city/state/country/lat/long`), **time** (`job_posted_at_*`, expiration), **salary** (`min/max/period/currency` — often null in GCC), **misc** (`job_google_link`, `job_onet_*`).
+
+**Only one field is genuinely free-text and transformation-heavy: `job_description`** (`job_highlights` is semi-structured; the rest is clean metadata). So **silver is mostly field-mapping + one text pipeline** on `job_description`/`job_title`, modeled as ordered, **pure, versioned** steps: `whitelist → clean (strip html/entities, normalize unicode + whitespace) → language-detect (English filter) → segment (opt; prefer job_highlights) → fingerprint → embed (pgvector)`.
+
+**Returnability (origin-level lineage).** Every silver record carries `bronze_id` + `pipeline_version`; the field→source mapping is a documented constant (`posting.description ← raw.job_description`, …). Because bronze is immutable and the steps are pure, that triple is enough to **trace any value to its origin and re-derive it exactly** (replay). The verbatim raw always survives in `bronze_posting.raw_payload`.
+
 > **Two medallions, don't conflate them:** this **operational medallion** (bronze→silver→gold→score, on Postgres + S3) is the *ingestion/serving* path. The **analytical medallion** ([dbt marts](#analytical-plane--dbt-marts-adr-0004)) is a *separate* set of models for skill/sector analytics. Same pattern, different consumers.
 
 ---
@@ -209,8 +216,15 @@ Config (`search_config`, sanitized sample profile) ships in-repo; **real profile
 
 ## Analytical plane — dbt marts ([ADR-0004](adr/0004-warehouse-strategy.md))
 
-- **dbt on Postgres by default** — `staging → intermediate → marts`, with `not_null/unique/relationships/accepted_values` tests, lineage/docs, and incremental models. The medallion realized as *modeled SQL*, not just S3 folders. *This is the DE-depth headliner — labeled showcase.*
-- **Marts (illustrative):** `dim_company`, `dim_skill`, `dim_job`, `fct_job_score`, `fct_skill_demand`, `fct_sector_signal`, `fct_application_funnel`.
+- **dbt on Postgres by default** — `staging → intermediate → marts`, with `not_null/unique/relationships/accepted_values` tests, lineage/docs, incremental models. The medallion realized as *modeled SQL*. *This is the DE-depth headliner — labeled showcase.*
+
+**A dimensional (constellation) model.** The wide job listing is decomposed into **facts + conformed dimensions**; insights *emerge from joins* across them (skill × sector, title-trend over time, score-vs-time):
+- **Facts:** `fct_job_posting` (grain: posting/cluster) · **`fct_job_skill`** (bridge: posting × skill) · `fct_job_score` (posting × scoring-run) · `fct_application` (application events).
+- **Conformed dims:** `dim_date` · `dim_skill` · `dim_title` (raw → canonical + variants) · `dim_company` · `dim_sector` · `dim_location`; the **profile is point-in-time** (SCD2 / snapshot) so trends like *"my score as I learn Spark"* are answerable.
+- **The richest dims are *derived from the JD text*, not mapped from fields:** `dim_skill` + `fct_job_skill` (LLM **skill extraction** + canonicalizing "PySpark"≈"Spark") and the canonical `dim_title` are the highest-value, hardest text pipeline — so the text pipeline *is* the dimensional pipeline.
+
+**Insight-driven, grown per question** ([ADR-0011](adr/0011-dimensional-analytical-model.md)). Per [00-design-philosophy](00-design-philosophy.md) (never-discard → decompose-by-insight): bronze keeps every field losslessly, so we **model a dimension only when a real question needs it** — and, because bronze is immutable, *retroactively over all history* via replay. The model is the *target*; grown dimension-by-dimension, not built table-per-field. **Priority order** (Tarig's): `dim_skill` + `fct_job_skill` **first** (powers skill-demand/gaps *and* sector intel) → point-in-time profile + `dim_date` + `fct_job_score`/`fct_application` (progress trends) → `dim_sector`. `dim_title`/`dim_company` supporting. Built at the analytics migration (**M5/M6**), not v0.
+
 - **Consumers:** Skill-Demand tracker (Roles-Blocked, You-Have-It, ROI priority) + weekly **Sector Intelligence** (Bedrock summaries *grounded in mart data*) → written back to Notion (a small, named **reverse-ETL** step + a light metrics layer — *not* a heavy semantic-layer framework).
 - **Snowflake is conditional** — the documented scale-path if Postgres analytics ever becomes a real bottleneck. **Debezium CDC** is the documented scale-path for batch→streaming. Both deferred; both have a home in the roadmap.
 

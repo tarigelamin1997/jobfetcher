@@ -16,5 +16,6 @@ These are the **foundational** decisions made during the design session — the 
 | [0008](0008-region-us-east-1.md) | Region: us-east-1 | Accepted |
 | [0009](0009-batch-not-debezium-v0.md) | Batch EL now; Debezium CDC as a documented scale-path | Accepted |
 | [0010](0010-job-source-jsearch.md) | Job source: JSearch (probe-free → Pro), single-source for v0; Adzuna deferred | Accepted |
+| [0011](0011-dimensional-analytical-model.md) | Analytical model: insight-driven dimensional (constellation) schema; grow per question | Accepted |
 
 > Full reasoning narrative: [01-session-decision-journal](../01-session-decision-journal.md). Crisp decision list: [ledgers/decisions-locked](../ledgers/decisions-locked.md).

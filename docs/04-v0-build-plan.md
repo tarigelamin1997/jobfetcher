@@ -43,7 +43,7 @@ Create the Python package layout (ports-&-adapters from day one, so M1+ stay cle
 - **FAILURE-MODE:** import path tangles → fix the package layout before writing logic, not after.
 
 ### Step 2 — Data contract + v0 schema
-Define **Pydantic** models for the normalized posting + the Bedrock score output (the data-contract boundary). Write the **Alembic** migration for the v0 tables: **`bronze_posting`** (immutable raw landing), `posting` (silver — normalized), `cluster` (trivial 1:1 in v0), `score`, `profile`.
+Define **Pydantic** models for the normalized posting + the Bedrock score output (the data-contract boundary). Write the **Alembic** migration for the v0 tables: **`bronze_posting`** (immutable raw landing), `posting` (silver — normalized), `cluster` (trivial 1:1 in v0), `score`, `profile`. Silver `posting` **retains all source fields (lossless)** — v0 has no marts, but because nothing is dropped (and bronze is immutable), the analytics dimensions ([ADR-0011](adr/0011-dimensional-analytical-model.md), M5/M6) can be modeled retroactively over history.
 - **WHY:** contracts at the boundary prevent "assumed-from-inspection" bugs; Alembic from day one makes schema evolution first-class.
 - **WAIT-FOR:** `alembic upgrade head` creates the tables; a round-trip insert/select of a sample posting works.
 - **FAILURE-MODE:** validation errors on real API payloads → tighten the adapter's normalization, not the contract.
