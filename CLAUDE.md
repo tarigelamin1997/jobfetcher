@@ -25,6 +25,7 @@ JobFetcher is a personal-scale, serverless job-matching tool **and** a Data-Engi
 - **Decisions → ADRs** ([`docs/adr/`](docs/adr/)) with the rejected alternatives named. Errors → the error log ([`docs/ledgers/errors.md`](docs/ledgers/errors.md)) answering the Five Questions (what/why/how/fix/prevention+detection).
 - **Testing:** unit (logic) + integration (LocalStack/moto) + dbt tests (marts) + a live smoke run. Validation gates are **behavioral + carry a negative case** — a presence/liveness check is *no gate*.
 - **Correlation IDs** on every pipeline run (cheap observability). Guards/contracts where they earn their keep, not by rote.
+- **Diagrams:** Mermaid, in-repo ([`docs/diagrams.md`](docs/diagrams.md)) — renders on GitHub, versioned, never drifts. Eraser is an optional personal/portfolio view (diagram-as-code + visuals), **not committed**.
 
 ## The architecture in one breath
 Two planes (full detail in [`docs/02-architecture.md`](docs/02-architecture.md)):
@@ -42,6 +43,7 @@ Two planes (full detail in [`docs/02-architecture.md`](docs/02-architecture.md))
 | [`docs/03-roadmap.md`](docs/03-roadmap.md) | Directional roadmap + the migration-decision (bottleneck) protocol + end-state vision. |
 | [`docs/04-v0-build-plan.md`](docs/04-v0-build-plan.md) | Exhaustive, step-by-step v0 build plan + validation gate. The only fully-planned stage. |
 | [`docs/05-methodology.md`](docs/05-methodology.md) | How we adopt/right-size/cut the Master Project Implementation Plan. |
+| [`docs/diagrams.md`](docs/diagrams.md) | Mermaid visual index — full-stack architecture, roadmap, dimensional model. |
 | [`docs/adr/`](docs/adr/) | One ADR per foundational decision (rejected alternatives named). |
 | [`docs/ledgers/`](docs/ledgers/) | Live state: phase index · locked decisions · interface contracts · procedure registry · error log. |
 

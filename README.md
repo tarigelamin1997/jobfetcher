@@ -62,6 +62,7 @@ This project treats **documentation as infrastructure** — the repo is the memo
 - 🧩 [`docs/00-design-philosophy.md`](docs/00-design-philosophy.md) — the principles every decision obeys
 - 📓 [`docs/01-session-decision-journal.md`](docs/01-session-decision-journal.md) — *why* the design is what it is
 - 🏛️ [`docs/02-architecture.md`](docs/02-architecture.md) — the full design
+- 📊 [`docs/diagrams.md`](docs/diagrams.md) — all the Mermaid diagrams: architecture · roadmap · dimensional model
 - 🗺️ [`docs/03-roadmap.md`](docs/03-roadmap.md) — directional roadmap + how the next migration is chosen
 - 🔨 [`docs/04-v0-build-plan.md`](docs/04-v0-build-plan.md) — the v0 build, step by step
 - 🧱 [`docs/adr/`](docs/adr/) — architecture decision records (with the roads not taken)

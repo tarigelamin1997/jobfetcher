@@ -1,6 +1,6 @@
 # 02 · Architecture
 
-> This describes the **target shape** — the destination reached through migrations. **v0 is a deliberate subset** (see the "v0 subset" callout at the end and [04-v0-build-plan](04-v0-build-plan.md)). Every component here has passed the [defensibility rubric](00-design-philosophy.md#the-defensibility-rubric); showcases are labeled.
+> This describes the **target shape** — the destination reached through migrations. **v0 is a deliberate subset** (see the "v0 subset" callout at the end and [04-v0-build-plan](04-v0-build-plan.md)). Every component here has passed the [defensibility rubric](00-design-philosophy.md#the-defensibility-rubric); showcases are labeled. 📊 All diagrams are collected in [diagrams.md](diagrams.md).
 
 ## Two planes
 
