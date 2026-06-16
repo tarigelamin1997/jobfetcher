@@ -17,3 +17,4 @@ Deploy in **us-east-1**.
 - **Easier:** widest Bedrock model choice + most examples/docs; easy Snowflake co-location if/when conditional warehouse is adopted.
 - **Harder:** none material at this scale.
 - **Impact:** if residency ever becomes a requirement (e.g. a multi-user KSA pivot), this is revisited via a new ADR.
+- **⚠️ Gotcha (confirmed in-account):** the Claude 4.x models in us-east-1 are **inference-profile-only** — invoke with `us.anthropic.*` ids, never base ids (base ids → `ValidationException`). And the account needs a **> 0 daily token quota** to invoke at all. See [ERR-001](../ledgers/errors.md).

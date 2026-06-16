@@ -16,7 +16,7 @@ EventBridge (daily) → **one Lambda**: fetch from **one source** → land raw i
 ---
 
 ## Prerequisites (one-time, before the apply sequence)
-1. **AWS account** in **us-east-1**, with **Bedrock model access** enabled for the chosen Claude model (request in the Bedrock console). · *WAIT-FOR:* model shows "Access granted." · *FAILURE-MODE:* `AccessDeniedException` on invoke → access not granted / wrong region.
+1. **AWS account** in **us-east-1**, **Bedrock-ready for Anthropic Claude** — three things (all confirmed real in [ERR-001](ledgers/errors.md)): (a) **model access** enabled; (b) invoke via the **`us.anthropic.*` inference-profile id**, NOT the base model id (base id → `ValidationException`); (c) **per-day token quota > 0** — an account capped at 0 throttles every call with *"Too many tokens per day"* (fix billing/account standing, then raise the quota in Service Quotas). · *WAIT-FOR:* a 1-token `converse` against `us.anthropic.…` returns a completion. · *FAILURE-MODE:* `ValidationException` → base id used; `ThrottlingException`/0-quota → billing/quota; `AccessDeniedException` → access/region.
 2. **One job-source API key** — JSearch (RapidAPI) **or** Adzuna app id+key. (v0 uses exactly one; the second source is M2.)
 3. **SES**: verify the sender identity and the recipient (sandbox mode is fine for a single recipient). · *FAILURE-MODE:* `MessageRejected` → identity not verified.
 4. **Candidate profile**: real `profile.yml`/`profile.json` kept **locally + gitignored**; a **sanitized sample** committed so the repo is runnable by others.

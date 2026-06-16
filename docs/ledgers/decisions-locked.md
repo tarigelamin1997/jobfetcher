@@ -12,6 +12,9 @@
 | Self-hosted / open-source (not SaaS) | Goal is a tool + portfolio, not a company | [ADR-0007] |
 | Docs in-repo are canonical (Notion = operational DBs only) | Versioned with code; context survival | journal §6 |
 | Diagrams = Mermaid in-repo (canonical); Eraser = optional personal/portfolio view, not committed | Renders on GitHub, versioned, never drifts, no binary bloat | journal §15 |
+| AWS: `samareltayeb` profile dedicated to JobFetcher; region **us-east-1**; Bedrock via **`us.anthropic.*` inference-profile ids** (base ids fail) | Confirmed in-account; Claude 4.x are inference-profile-only | [ADR-0008] · [ERR-001] |
+| Bedrock prerequisite: account **daily token quota > 0** (billing/standing) | Account currently capped at 0 → every invoke throttles | [ERR-001] |
+| Non-root IAM identity = **deferred to hardening** (~M8); runtime Lambda roles stay least-privilege via Terraform | Root-vs-IAM isn't a bottleneck; root used in dev (solo personal account) | journal §16 |
 | Decision rights: Tarig approves arch/major; Claude drives rest | Co-design then build; confirm major only | journal §1, §6 |
 | Multi-user · feedback hub · BI dashboard = design-for, build-later | Seam-ready, not built in v1 | journal §6, roadmap |
 
