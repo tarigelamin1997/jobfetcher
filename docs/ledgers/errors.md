@@ -25,13 +25,13 @@
 1. **What happened?** "Can't use Anthropic models." Two distinct failures, observed via `bedrock-runtime converse`:
    - base model id → `ValidationException: Invocation of model ID anthropic.claude-haiku-4-5-20251001-v1:0 with on-demand throughput isn't supported. Retry your request with the ID or ARN of an inference profile that contains this model.`
    - `us.` inference-profile id → `ThrottlingException: Too many tokens per day, please wait before trying again.`
-2. **Why?** (a) Claude 4.x models in us-east-1 are **inference-profile-only** — base ids aren't invokable on-demand. (b) The account's **applied** Bedrock per-day token quota is **0 for every model** (AWS default is *billions*) → on-demand inference is blocked entirely. **NOT** a root/IAM problem (root reaches Bedrock fine — lists models + profiles).
-3. **How?** (a) The call used the base model id. (b) The account has Service-Quota overrides of `0.0` tokens/day across all models — the signature of an account whose **billing / standing isn't configured for paid Bedrock usage**.
-4. **How fixed?** (a) ✅ use the **`us.anthropic.*` cross-region inference-profile id** (e.g. `us.anthropic.claude-sonnet-4-6`). (b) ⏳ *Tarig:* enable billing / verify account standing, then raise **"Model invocation max tokens per day"** above 0 in Service Quotas. **Open until quota > 0.**
+2. **Why?** (a) Claude 4.x models in us-east-1 are **inference-profile-only** — base ids aren't invokable on-demand. (b) The account's per-day Bedrock token quota is **0 for every model AND `Adjustable = False`** (AWS default is *billions*) → on-demand inference is blocked entirely. **NOT** root/IAM (root reaches Bedrock fine), and **NOT** billing (Tarig confirmed a valid payment method + unused new-account credits).
+3. **How?** (a) The call used the base model id. (b) The account is **brand-new**: AWS gates new accounts with a **non-adjustable 0 daily-token quota** on Bedrock until the account matures — independent of billing. (Free credits are *spend*, not a *rate* quota — they can't buy past a 0 cap.)
+4. **How fixed?** (a) ✅ use the **`us.anthropic.*` inference-profile id** (e.g. `us.anthropic.claude-sonnet-4-6`). (b) ⏳ the daily quota is **non-adjustable**, so a Service-Quotas increase request doesn't apply — it lifts via **account maturity** (commonly days → ~2 weeks; re-test) and/or an **AWS Support case** asking to raise the new-account Bedrock daily-token quota. **Open until quota > 0.**
 5. **Prevention + Detection:** code must *always* use inference-profile ids (boundary/contract check); a **v0 readiness gate** runs a 1-token `converse` against the chosen `us.` profile and **fails loudly** on `ValidationException` (wrong id) or `ThrottlingException`/quota-0 (billing) *before* the pipeline runs.
 - **Blast radius:** the entire scoring + CV-tailoring pipeline (no LLM ⇒ no product) until resolved.
 - **Prevention implemented?** No — pre-build; tracked here + in [04-v0-build-plan](../04-v0-build-plan.md) prerequisites.
 
 | ID | Severity | Stage | Symptom | Status |
 |---|---|---|---|---|
-| ERR-001 | Critical | pre-build (Bedrock) | base-id ValidationException + account daily token quota = 0 | Open (needs billing/quota) |
+| ERR-001 | Critical | pre-build (Bedrock) | base-id ValidationException + new-account daily token quota = 0 (non-adjustable) | Open (awaiting account maturity / AWS Support) |
