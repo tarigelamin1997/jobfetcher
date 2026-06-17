@@ -69,6 +69,7 @@
 | Decision | Why | Owner |
 |---|---|---|
 | Secrets Manager, IAM-scoped per function | Zero secrets in code; security signal | journal §7 |
+| **AWS auth = no static keys anywhere** — local (CLI/Terraform) via **session-login temporary STS creds** (re-sign-in on expiry); runtime Lambdas via **IAM execution roles** (AWS injects creds at runtime) | Temporary creds > long-lived keys (nothing permanent on disk); an expired *local* session never affects the *running* pipeline | journal §18 |
 | Public repo PII-scrubbed; real profile gitignored → private S3 | Privacy + clone-and-runnable sample | [ADR-0007] |
 | Cost ceiling ~$50/mo OK; some credits; `terraform destroy` → $0 | Optimize for signal, stay cost-aware | journal §6 |
 | IaC: Terraform | Tarig's showcase + most-recognized | journal §6 |
