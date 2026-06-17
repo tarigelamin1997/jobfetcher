@@ -16,7 +16,7 @@
 | **Default AWS identity = `samareltayeb`** (account 198592435375), region **us-east-1** — **keyless** (session login; persistent user env vars `AWS_PROFILE`/`AWS_DEFAULT_REGION`) | New account auths via session, no static keys needed; **root access keys are an anti-pattern (never created)**; non-root IAM deferred (§16) | journal §18 |
 | Bedrock prerequisite: account **daily token quota > 0** | New account gated at 0 (**non-adjustable**); lifts via account maturity / AWS Support — billing is valid, credits unused | [ERR-001] |
 | **LLM is model-agnostic** — config-selected Bedrock model via **Converse** (model id per task); current candidate Kimi K2 Thinking, Claude when its quota lifts | Switching models is config, not code; routes around vendor quota/availability blocks | [ADR-0012] · [ERR-001] |
-| Non-root IAM identity = **deferred to hardening** (~M8); runtime Lambda roles stay least-privilege via Terraform | Root-vs-IAM isn't a bottleneck; root used in dev (solo personal account) | journal §16 |
+| Non-root IAM **admin user `jobfetcher-dev`** (acct 198592435375) created for human CLI + AWS-Toolkit auth (static key, `[jobfetcher]` profile) — brought forward from M8 because the Toolkit's session auth kept expiring; **root keys still never created**; runtime Lambda roles stay least-privilege via Terraform; full least-privilege of the human identity deferred | AWS "stop using root" best practice; reliable extension auth was the bottleneck | journal §16, §18 |
 | Decision rights: Tarig approves arch/major; Claude drives rest | Co-design then build; confirm major only | journal §1, §6 |
 | Multi-user · feedback hub · BI dashboard = design-for, build-later | Seam-ready, not built in v1 | journal §6, roadmap |
 
@@ -69,7 +69,7 @@
 | Decision | Why | Owner |
 |---|---|---|
 | Secrets Manager, IAM-scoped per function | Zero secrets in code; security signal | journal §7 |
-| **AWS auth = no static keys anywhere** — local (CLI/Terraform) via **session-login temporary STS creds** (re-sign-in on expiry); runtime Lambdas via **IAM execution roles** (AWS injects creds at runtime) | Temporary creds > long-lived keys (nothing permanent on disk); an expired *local* session never affects the *running* pipeline | journal §18 |
+| **AWS auth: deployed pipeline = no static keys** (Lambdas use **IAM execution roles**, AWS injects creds at runtime); **local** dev = session login (keyless) **or** a **non-root IAM user key** (`jobfetcher` profile) — **never root keys** | Temporary runtime creds > long-lived keys; the local method is the operator's choice, root keys are the one hard no | journal §18 |
 | Public repo PII-scrubbed; real profile gitignored → private S3 | Privacy + clone-and-runnable sample | [ADR-0007] |
 | Cost ceiling ~$50/mo OK; some credits; `terraform destroy` → $0 | Optimize for signal, stay cost-aware | journal §6 |
 | IaC: Terraform | Tarig's showcase + most-recognized | journal §6 |
