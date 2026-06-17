@@ -196,6 +196,8 @@ Config (`search_config`, sanitized sample profile) ships in-repo; **real profile
 
 ## Scoring — explainable, calibrated
 
+- **Model-agnostic LLM** ([ADR-0012](adr/0012-model-agnostic-llm.md)): the model is a **config-selected Bedrock model via the Converse API** — swap by editing config (current candidate **Kimi K2 Thinking**; `us.anthropic.*` Claude when its quota lifts). Everything below is model-independent.
+
 - **7-factor ATS framework** (core-skill match, tool/tech alignment, achievement relevance, seniority/scope, ATS-keyword, formatting/clarity, realistic fit). Weights tunable; refined during the scoring migration.
 - **Explainability is the value:** structured output includes `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified` — not just a number. Bedrock, **temperature 0** for stability.
 - **Threshold (single, user-configurable, runtime):** **one `threshold`** (default **60**) gates **both** the daily shortlist **and** CV writing — read from the per-user `profile` config on every run, so changing it is editing one value (no redeploy). **Hard floor 50** + **near-miss band 10** remain the watch/honesty band *below* the threshold (→ near-miss = 50–59). Below floor → analytics only. The *active* threshold is stamped on each run's records for measurement. (One knob, not two — see [ADR/journal §12 amendment](01-session-decision-journal.md).)

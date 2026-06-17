@@ -31,6 +31,7 @@
 5. **Prevention + Detection:** code must *always* use inference-profile ids (boundary/contract check); a **v0 readiness gate** runs a 1-token `converse` against the chosen `us.` profile and **fails loudly** on `ValidationException` (wrong id) or `ThrottlingException`/quota-0 (billing) *before* the pipeline runs.
 - **Blast radius:** the entire scoring + CV-tailoring pipeline (no LLM ⇒ no product) until resolved.
 - **Prevention implemented?** No — pre-build; tracked here + in [04-v0-build-plan](../04-v0-build-plan.md) prerequisites.
+- **Update (Kimi K2 / model-agnostic):** `moonshot.kimi-k2-thinking` and `moonshotai.kimi-k2.5` are **ACTIVE + `ON_DEMAND`** (no inference-profile gotcha), **but** their daily-token quota also reads **`0.0` / non-adjustable** → the new-account wall is **account-wide, not Anthropic-specific.** ⚠️ **Open:** an API `converse` test to confirm whether Kimi actually invokes (vs throttles) is **not yet run** — a transient `~/.aws/config` parse error (duplicate `region` key under `[profile samareltayeb]`) blocked it. The model itself is now **config-driven** ([ADR-0012](../adr/0012-model-agnostic-llm.md)), so whichever model unblocks first is a one-line swap.
 
 | ID | Severity | Stage | Symptom | Status |
 |---|---|---|---|---|

@@ -14,6 +14,7 @@
 | Diagrams = Mermaid in-repo (canonical); Eraser = optional personal/portfolio view, not committed | Renders on GitHub, versioned, never drifts, no binary bloat | journal §15 |
 | AWS: `samareltayeb` profile dedicated to JobFetcher; region **us-east-1**; Bedrock via **`us.anthropic.*` inference-profile ids** (base ids fail) | Confirmed in-account; Claude 4.x are inference-profile-only | [ADR-0008] · [ERR-001] |
 | Bedrock prerequisite: account **daily token quota > 0** | New account gated at 0 (**non-adjustable**); lifts via account maturity / AWS Support — billing is valid, credits unused | [ERR-001] |
+| **LLM is model-agnostic** — config-selected Bedrock model via **Converse** (model id per task); current candidate Kimi K2 Thinking, Claude when its quota lifts | Switching models is config, not code; routes around vendor quota/availability blocks | [ADR-0012] · [ERR-001] |
 | Non-root IAM identity = **deferred to hardening** (~M8); runtime Lambda roles stay least-privilege via Terraform | Root-vs-IAM isn't a bottleneck; root used in dev (solo personal account) | journal §16 |
 | Decision rights: Tarig approves arch/major; Claude drives rest | Co-design then build; confirm major only | journal §1, §6 |
 | Multi-user · feedback hub · BI dashboard = design-for, build-later | Seam-ready, not built in v1 | journal §6, roadmap |
