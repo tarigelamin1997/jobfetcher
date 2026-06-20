@@ -8,7 +8,7 @@
 
 ## 1 · Full-stack architecture (target)
 
-The complete two-plane design. **v0 is a small subset** (one Lambda → fetch → score → email); everything else arrives by migration. Discussed in [02-architecture](02-architecture.md).
+The complete two-plane design (high-level). **v0 is a small subset** (one Lambda → fetch → score → email); everything else arrives by migration. The **ingestion medallion is detailed in §2 below**; scoring is **model-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md)). Discussed in [02-architecture](02-architecture.md).
 
 ```mermaid
 flowchart TB
@@ -25,7 +25,7 @@ flowchart TB
       SI["Silver<br/>clean · dedup · embed"]
       GO["Gold<br/>profile filter"]
     end
-    ORC --> BR --> SI --> GO --> SC["Score<br/>Bedrock"]
+    ORC --> BR --> SI --> GO --> SC["Score<br/>Bedrock (model-agnostic)"]
     SC -->|">= threshold"| CV["cv_tailor (M1)<br/>DOCX + PDF"]
     SC --> NT["notify<br/>SES + Notion"]
     CV --> NT
@@ -59,7 +59,70 @@ flowchart TB
 
 ---
 
-## 2 · Roadmap & evolution
+## 2 · Ingestion — medallion landing (detail)
+
+A zoom-in on the operational plane's first half — **how a day's jobs get from the source API to a scored shortlist**, and why each stage exists. The guarantee is *land-everything-first*: everything downstream is a **pure, replayable function of immutable bronze**. Discussed in [02-architecture · Ingestion](02-architecture.md) · [ADR-0010](adr/0010-job-source-jsearch.md).
+
+```mermaid
+flowchart TB
+  subgraph SRC["① Source — JSearch (official API · single source in v0)"]
+    Q["query = keywords + country + date_posted<br/>(the cheap source-side pre-filter)"]
+    PAGE["paginated pull<br/>budget: queries × pages × sources ≤ quota ÷ 30"]
+    Q --> PAGE
+  end
+
+  subgraph BRZ["② Bronze — land everything, immutable (no filtering)"]
+    S3R[("S3<br/>raw/{source}/{date}/{id}.json")]
+    BP[("bronze_posting<br/>raw_payload · 1 row / raw posting")]
+  end
+
+  subgraph SLV["③ Silver — conform · clean · dedup (pure, versioned)"]
+    ADP["source adapter → common schema<br/>(Pydantic data contract)"]
+    subgraph TP["text pipeline · job_description / job_title"]
+      direction LR
+      T1["whitelist"] --> T2["clean<br/>html·unicode·ws"] --> T3["lang-detect<br/>English"] --> T4["segment<br/>job_highlights"] --> T5["fingerprint"] --> T6["embed<br/>pgvector"]
+    end
+    DD["dedup · cluster-and-surface<br/>v0: exact source-id only"]
+    ADP --> TP
+    TP --> DD
+  end
+
+  subgraph GLD["④ Gold — filter to candidates (deterministic · cheap)"]
+    PF["profile filter<br/>location · target title · seniority · exclude"]
+  end
+
+  SC["⑤ Score — Bedrock (model-agnostic)<br/>runs on GOLD only"]
+  CL[("cluster<br/>score + CV attach once per real job")]
+  AN["analytics marts (M5/M6)"]
+  DDM["⤷ M2 — multi-source + clustering:<br/>fingerprint → pgvector blocking → apply-URL / canonical-id<br/>→ company-canon → time-window → confidence bands<br/>→ LLM adjudication → human merge"]
+
+  PAGE -->|"all raw, untouched"| S3R
+  PAGE -->|"all raw, untouched"| BP
+  BP --> ADP
+  DD --> PF
+  PF --> SC
+  DD --> CL
+  SC --> CL
+  PF -.->|"below-bar rows kept for analytics"| AN
+  DD -.->|"lineage: bronze_id + pipeline_version"| BP
+  BP ==>|"immutable ⇒ replay · zero new API calls"| SLV
+  DD -.->|"grows at M2"| DDM
+```
+
+**Stage by stage**
+- **① Source (JSearch).** The query (`keywords + country + date_posted`) *is* the pre-filter — the API won't pre-filter for us, so the query is how we pay only for plausibly-relevant pages. Cost is bounded by a **request budget**, not storage.
+- **② Bronze.** Every raw result is written **untouched** — S3 `raw/…json` + a `bronze_posting` row (`raw_payload`). No filtering, ever: *whatever the API returned today is captured and replayable.*
+- **③ Silver.** A source **adapter** normalizes each payload into one common schema (the Pydantic **data contract**). Only `job_description`/`job_title` are transformation-heavy → one **pure, versioned text pipeline**; the rest is field-mapping. Every row carries `bronze_id + pipeline_version` (**origin-level lineage**). Dedup is **cluster-and-surface** — v0 is exact source-id only.
+- **④ Gold.** A cheap **deterministic profile filter** selects the likely-fit subset. **Only gold reaches the LLM**; below-bar rows stay in bronze/silver for analytics.
+- **⑤ Score.** Bedrock (model-agnostic) runs on gold only; score + CV attach to the **cluster** — done once per real job, every platform's apply-link kept.
+
+**Two properties worth discussing**
+- **Immutable bronze ⇒ replay.** Change a filter, the threshold, or your profile → re-derive silver→gold→score over existing bronze with **zero new API calls**.
+- **v0 vs migration.** v0 = single source + exact-id dedup. **M2** grows dedup into full clustering and adds source #2 (the dotted box).
+
+---
+
+## 3 · Roadmap & evolution
 
 The directional roadmap — a **living hypothesis**, not a contract. Live status is the source of truth in [ledgers/phase-index](ledgers/phase-index.md); this is the *shape*. Discussed in [03-roadmap](03-roadmap.md).
 
@@ -88,7 +151,7 @@ flowchart LR
 
 ---
 
-## 3 · Analytical constellation (dimensional model)
+## 4 · Analytical constellation (dimensional model)
 
 How accumulated data compounds into insight: **conformed dimensions** shared across **facts**; insights are *joins* over them. Built at M5/M6, grown per question. Skills + canonical title are **derived from the JD text**. Discussed in [02-architecture](02-architecture.md#analytical-plane--dbt-marts-adr-0004) · [ADR-0011](adr/0011-dimensional-analytical-model.md).
 
