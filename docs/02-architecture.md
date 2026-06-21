@@ -217,7 +217,7 @@ Config (`search_config`, sanitized sample profile) ships in-repo; **real profile
 
 ## Scoring — explainable, calibrated
 
-- **Model-agnostic LLM** ([ADR-0012](adr/0012-model-agnostic-llm.md)): the model is a **config-selected Bedrock model via the Converse API** — swap by editing config (current candidate **Kimi K2 Thinking**; `us.anthropic.*` Claude when its quota lifts). Everything below is model-independent.
+- **Model-agnostic LLM** ([ADR-0012](adr/0012-model-agnostic-llm.md)): the model is a **config-selected Bedrock model via the Converse API** — swap by editing config (**chosen model: `moonshot.kimi-k2-thinking`** — Kimi K2 Thinking; any other model is a one-line swap, still gated by the ERR-001 quota). Everything below is model-independent.
 
 - **7-factor ATS framework** (core-skill match, tool/tech alignment, achievement relevance, seniority/scope, ATS-keyword, formatting/clarity, realistic fit). Weights tunable; refined during the scoring migration.
 - **Explainability is the value:** structured output includes `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified` — not just a number. Bedrock, **temperature 0** for stability.

@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-The stack needs a region with reliable **Bedrock model availability** (Claude), low cost, and easy co-location with any future warehouse. Data residency is **not** a hard constraint (Tarig did not select it). The old plan used eu-north-1 with an EU cross-region inference profile.
+The stack needs a region with reliable **Bedrock model availability** (Claude, Kimi, …), low cost, and easy co-location with any future warehouse. Data residency is **not** a hard constraint (Tarig did not select it). The old plan used eu-north-1 with an EU cross-region inference profile.
 
 ## Decision
 Deploy in **us-east-1**.
