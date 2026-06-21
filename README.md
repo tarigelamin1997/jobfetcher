@@ -2,7 +2,7 @@
 
 **A serverless job-matching pipeline that scores roles against your real profile and tailors a CV for the good ones — built as an *evolutionary architecture* you can watch grow, one deliberate migration at a time.**
 
-> **Status:** 🏗️ Built in the open. Currently authoring **v0** (the minimal working core). This is an evolutionary project — it starts intentionally small and grows through a sequence of clean, documented releases. See the [roadmap](docs/03-roadmap.md) and live [phase index](docs/ledgers/phase-index.md).
+> **Status:** 🏗️ Built in the open. Currently building **v0** — the ingestion probe (Step 0) is validated against the live API. This is an evolutionary project — it starts intentionally small and grows through a sequence of clean, documented releases. See the [roadmap](docs/03-roadmap.md) and live [phase index](docs/ledgers/phase-index.md).
 
 ---
 
@@ -52,7 +52,7 @@ flowchart LR
 
 ## Tech stack
 
-Python · AWS (Lambda, EventBridge, S3, Secrets Manager; Step Functions + more added by migration) · **PostgreSQL** · **dbt** · **Amazon Bedrock** (Claude) · **Terraform** · GitHub Actions · Notion API · SES. Snowflake / Debezium-CDC / Spark are *documented scale-paths or live in sibling projects* — see the [decision journal](docs/01-session-decision-journal.md).
+Python · AWS (Lambda, EventBridge, S3, Secrets Manager; Step Functions + more added by migration) · **PostgreSQL** · **dbt** · **Amazon Bedrock** (model-agnostic; Kimi K2 Thinking) · **Terraform** · GitHub Actions · Notion API · SES. Snowflake / Debezium-CDC / Spark are *documented scale-paths or live in sibling projects* — see the [decision journal](docs/01-session-decision-journal.md).
 
 ## Documentation
 

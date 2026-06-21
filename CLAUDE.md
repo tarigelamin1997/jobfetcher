@@ -9,7 +9,7 @@ JobFetcher is a personal-scale, serverless job-matching tool **and** a Data-Engi
 - **The candidate / market:** Tarig Elamin — Data Engineer / Data Platform / Data Architect, Riyadh → GCC (on-site/relocation, not remote-global), English-only. Profile is the scoring source of truth.
 
 ## Current status
-**Pre-implementation.** This session produced the design + documentation (in [`docs/`](docs/)). **No code exists yet.** Next step is building **v0** (see [`docs/04-v0-build-plan.md`](docs/04-v0-build-plan.md)) — but only after Tarig reviews the docs. Live status lives in [`docs/ledgers/phase-index.md`](docs/ledgers/phase-index.md).
+**v0 in progress — Step 0 (ingestion probe).** Design + docs complete; the first code now exists ([`scripts/`](scripts/), [`config/`](config/)): a validated, `SearchSpec`-driven **JSearch coverage probe**, proven end-to-end against the live API (key in Secrets Manager). Chosen LLM = **Kimi K2 Thinking** (`moonshot.kimi-k2-thinking`, model-agnostic via Converse). Open blocker: account-wide Bedrock **daily-token quota = 0** ([ERR-001](docs/ledgers/errors.md)). Build plan: [`docs/04-v0-build-plan.md`](docs/04-v0-build-plan.md); live status: [`docs/ledgers/phase-index.md`](docs/ledgers/phase-index.md).
 
 ## Governing principles (read [`docs/00-design-philosophy.md`](docs/00-design-philosophy.md) for the full version)
 - **P1 — Absolute minimalism.** Build the minimal complexity that solves the *present* problem. Complexity is entropic — it accrues uninvited; the default stance is to *resist* it. Design cheap seams for the future; don't build the future.
