@@ -41,6 +41,8 @@ from pathlib import Path
 TITLES = ["Data Engineer", "Data Platform Engineer", "Data Architect"]
 COUNTRIES = ["sa", "ae", "qa", "kw", "bh", "om"]
 DATE_POSTED = "month"          # 30-day backfill window
+LANGUAGE = "en"               # force English metadata (else Arabic for GCC);
+                              # also populates job_city/job_country + the UTC timestamp
 REMOTE_ONLY = False
 MAX_PAGES_PER_QUERY = 5        # ~10 results/page, ~1 request/page
 REQUEST_BUDGET = 70           # hard ceiling for one sweep (free Basic = 200/mo)
@@ -84,6 +86,7 @@ def fetch(query: str, country: str, page: int, key: str) -> dict:
         "page": str(page),
         "num_pages": "1",
         "date_posted": DATE_POSTED,
+        "language": LANGUAGE,
         "remote_jobs_only": "true" if REMOTE_ONLY else "false",
     })
     req = urllib.request.Request(

@@ -26,6 +26,8 @@ countries:                       # JSearch `country` param — ISO 3166-1 alpha-
 # JSearch `date_posted`: all | today | 3days | week | month
 date_posted: month               # 30-day BACKFILL window (probe).
                                  # Daily-incremental window = TBD after the probe.
+language: en                     # force English metadata (Arabic otherwise for GCC);
+                                 # also populates job_city/job_country + the UTC timestamp
 
 mode: backfill                   # backfill | incremental  ("backfill only for now")
 remote_only: false               # on-site / relocation oriented, not remote-global
