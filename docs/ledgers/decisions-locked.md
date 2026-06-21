@@ -68,7 +68,7 @@
 ## Security, cost, infra
 | Decision | Why | Owner |
 |---|---|---|
-| Secrets Manager, IAM-scoped per function | Zero secrets in code; security signal | journal §7 |
+| **All secrets in AWS Secrets Manager**, IAM-scoped per function — convention: one secret per service named `jobfetcher/<service>` (e.g. `jobfetcher/jsearch`), JSON value, region us-east-1; created via CLI under `jobfetcher-dev`, read by scripts (boto3) + Lambdas; **never in env/repo** (env-var fallback only for quick local tests) | Zero secrets in code; one store for local + prod (store-once, use-everywhere); security signal | journal §7 |
 | **AWS auth: deployed pipeline = no static keys** (Lambdas use **IAM execution roles**, AWS injects creds at runtime); **local** dev = session login (keyless) **or** a **non-root IAM user key** (`jobfetcher` profile) — **never root keys** | Temporary runtime creds > long-lived keys; the local method is the operator's choice, root keys are the one hard no | journal §18 |
 | Public repo PII-scrubbed; real profile gitignored → private S3 | Privacy + clone-and-runnable sample | [ADR-0007] |
 | Cost ceiling ~$50/mo OK; some credits; `terraform destroy` → $0 | Optimize for signal, stay cost-aware | journal §6 |

@@ -4,6 +4,10 @@
 
 source: jsearch                  # ADR-0010
 
+# ── Secrets (AWS Secrets Manager — never env/repo for real runs) ──────────
+secret_name: jobfetcher/jsearch  # SecretString JSON: {"api_key": "..."}
+aws_region: us-east-1            # where the secret + all jobfetcher infra live
+
 # ── Query fan-out: titles × countries = 18 base queries ──────────────────
 titles:
   - "Data Engineer"

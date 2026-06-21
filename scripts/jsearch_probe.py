@@ -9,16 +9,21 @@ against JSearch Basic (free) and reports the 5 probe metrics:
   4) dedup reality   - apply_options counts (JSearch pre-merge) + duplicate job_id check
   5) depth           - pages pulled per query / whether more remained
 
-Stdlib only (no third-party deps). The API key is read from the environment and is
-NEVER printed or committed. Raw responses go to ./probe_output/ (gitignored). A hard
-request cap protects the 200/mo free quota.
+Deps: stdlib + boto3 (only to read the secret; the env-var fallback needs no boto3).
+The API key is read from AWS Secrets Manager (never printed or committed). Raw responses
+go to ./probe_output/ (gitignored). A hard request cap protects the 200/mo free quota.
+
+Key resolution (best practice first):
+  1) AWS Secrets Manager secret `jobfetcher/jsearch` (SecretString JSON {"api_key": "..."}),
+     read with the jobfetcher-dev credentials in us-east-1.   <-- preferred
+  2) env var JSEARCH_API_KEY (or RAPIDAPI_KEY)                <-- fallback for quick tests
+
+Store the key once:
+  aws secretsmanager create-secret --name jobfetcher/jsearch \
+    --secret-string '{"api_key":"<YOUR_KEY>"}' --region us-east-1
 
 Usage:
-  export JSEARCH_API_KEY=...          # RapidAPI key for JSearch (or RAPIDAPI_KEY)
-  python scripts/jsearch_probe.py     # --dry-run prints the plan without calling
-
-Mirrors config/search_config.sample.yml; keep in sync until the real fetch adapter
-(build-plan Step 1+) loads the config directly.
+  python scripts/jsearch_probe.py     # --dry-run prints the plan without calling AWS/JSearch
 """
 from __future__ import annotations
 
@@ -42,13 +47,34 @@ REQUEST_BUDGET = 70           # hard ceiling for one sweep (free Basic = 200/mo)
 
 HOST = "jsearch.p.rapidapi.com"
 OUT_DIR = Path("probe_output")
+SECRET_NAME = "jobfetcher/jsearch"   # AWS Secrets Manager — value: {"api_key": "..."}
+AWS_REGION = "us-east-1"
 
 
 def get_key() -> str:
-    key = os.environ.get("JSEARCH_API_KEY") or os.environ.get("RAPIDAPI_KEY")
-    if not key:
-        sys.exit("ERROR: set JSEARCH_API_KEY (or RAPIDAPI_KEY) in the environment first.")
-    return key
+    """JSearch API key from AWS Secrets Manager (best practice); env var as fallback."""
+    try:
+        import boto3  # imported lazily so --dry-run needs no AWS SDK
+        client = boto3.client("secretsmanager", region_name=AWS_REGION)
+        raw = client.get_secret_value(SecretId=SECRET_NAME).get("SecretString") or ""
+        try:
+            return json.loads(raw)["api_key"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return raw  # tolerate a plain-string secret
+    except Exception as exc:  # boto3 missing / secret absent / AWS unreachable
+        env = os.environ.get("JSEARCH_API_KEY") or os.environ.get("RAPIDAPI_KEY")
+        if env:
+            print(f"[secrets] Secrets Manager unavailable ({type(exc).__name__}); "
+                  "using env-var fallback.")
+            return env
+        sys.exit(
+            "ERROR: could not read the JSearch key.\n"
+            f"  Preferred - store it once in AWS Secrets Manager, then re-run:\n"
+            f"    aws secretsmanager create-secret --name {SECRET_NAME} \\\n"
+            f"      --secret-string '{{\"api_key\":\"<YOUR_KEY>\"}}' --region {AWS_REGION}\n"
+            "  Fallback - set JSEARCH_API_KEY in your environment.\n"
+            f"  (underlying error: {exc})"
+        )
 
 
 def fetch(query: str, country: str, page: int, key: str) -> dict:
