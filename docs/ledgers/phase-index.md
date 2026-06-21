@@ -1,6 +1,6 @@
 # Ledger · Phase Index
 
-> Live source of truth for progress. Status legend: ⬜ not started · 🚧 in progress · ✅ shipped (tagged release). The roadmap beyond v0 is a **[living hypothesis](../03-roadmap.md)** — re-derived after each release; update this table as reality unfolds.
+> Live source of truth for progress. Status legend: ⬜ not started · 🚧 in progress · ✅ shipped (tagged release). `/start-step` sets 🚧, `/close-step` sets ✅ ([ADR-0013](../adr/0013-enforcement-gate-trio-branch-pr.md)). The roadmap beyond v0 is a **[living hypothesis](../03-roadmap.md)** — re-derived after each release; update this table as reality unfolds.
 
 **Current state:** **v0 in progress — Step 0 (ingestion coverage probe).** Design + docs complete. First code exists: a validated, `SearchSpec`-driven JSearch probe ([`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py)) proven end-to-end against the live API; JSearch key in Secrets Manager; chosen LLM = Kimi K2 Thinking. **Blocker:** account-wide Bedrock daily-token quota = 0 ([ERR-001](errors.md)) gates the scoring path. Full 18-query sweep + v0 build steps 1+ are next.
 

@@ -8,6 +8,7 @@
 | Error/incident logging (Five Questions) | ✅ Written | [05-methodology](../05-methodology.md#adopt-cheap-high-leverage-even-solo--value-is-memory-across-time) + [errors.md](errors.md) |
 | Validation-gate standard (behavioral + negative case) | ✅ Written | [05-methodology](../05-methodology.md) + applied in [04-v0-build-plan](../04-v0-build-plan.md) |
 | Secrets management (Secrets Manager, `jobfetcher/<service>`) | ✅ Written | [decisions-locked](decisions-locked.md) (Security) · pattern in [`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py) `get_key()` |
+| **Gate trio** (entry/code/exit) as slash-commands | ✅ Written | [`.claude/commands/`](../../.claude/commands/) (`start-step` · `review-step` · `close-step`) · [ADR-0013](../adr/0013-enforcement-gate-trio-branch-pr.md) |
 | Data-contract / source normalization | 🟡 Started → v0 | `SearchSpec` ([scripts/search_spec.py](../../scripts/search_spec.py)) is the first; posting/score contracts at build Step 2 |
 | Scoring-prompt standard (7-factor, explainable, temp 0) | 🔜 Deferred → v0 | authored in v0 Step 5 |
 | Migratability checklist (ports/adapters, flags, Alembic, additive TF) | ✅ Written | [03-roadmap](../03-roadmap.md#migratability-requirements-build-v0-so-the-above-stays-cheap) |

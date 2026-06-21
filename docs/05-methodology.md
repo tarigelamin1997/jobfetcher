@@ -35,8 +35,23 @@ Each cut is **labeled "deferred → adopt when X"**, never silently dropped — 
 
 ---
 
-## Enforcement is emergent (Tarig)
-We do **not** pre-decide the gate machinery. v0's "process" is **the docs + manual discipline** (apply-sequence, validation gate, ADRs, error log). Whether the gates become **Claude Code slash-commands**, **Makefile targets**, or stay **manual checklists** is **evaluated during implementation** and adopted only when a real need justifies it — [P1/P2](00-design-philosophy.md) applied to the process itself. (We're working inside Claude Code, so slash-commands are near-free if/when we want them — a candidate, not a commitment.)
+## Enforcement — the gate trio ([ADR-0013](adr/0013-enforcement-gate-trio-branch-pr.md))
+The "emergent" machinery decision is now **made** — the trigger (building, inside Claude Code where a command is near-free) is met. The enforcement surface is **three committed Claude Code slash-commands** ([`.claude/commands/`](../.claude/commands/)), one per gate (the methodology *wired in*, not just written):
+- **`/start-step`** (ENTRY) — refuses to start a build unit until its spec is complete, prereqs are closed, deferred procedures are authored, and **every validation criterion is strong** → sets 🚧.
+- **`/review-step`** (CODE) — lint · secret scan · unit tests · **every negative case actually executed** · no hardcoded config.
+- **`/close-step`** (EXIT) — docs current · ADRs present · validation gate positive+negative · no open errors · contract verified + *Produces* appended → sets ✅.
+
+**Two human checkpoints** bracket every unit: **A** — spec/plan approved *before* code (= plan mode); **B** — approval *before* the irreversible merge/tag. **Git workflow:** v0 *code* builds on a per-migration branch → self-reviewed PR (+ CI from Step 9) → tag; `main` is PR-only (docs may stay direct for speed).
+
+**The gate-robustness standard** (self-applied by the commands): a criterion that checks only existence/liveness is **no gate** — it reports green on a broken system. Every criterion must be *behavioral* + carry a *negative case* (or `N/A — reason`):
+
+| Weak (presence / liveness) | Robust (behavioral) |
+|---|---|
+| Container is `running` | INSERT a row, SELECT it back — the value matches |
+| Port is open | Produce a message, consume it, payload decodes against the schema |
+| HTTP 200 returned | Response body matches the declared schema field-for-field |
+
+Still **not** adopted (coordination/scale ceremony — deferred, labeled): the full 10-command catalog (scaffolders, `/audit-foundation`), per-phase doc ceremony, the six-angle chaos matrix, an external-reviewer *hard* gate.
 
 ## Documentation system summary (what lives where)
 | Layer | Where | Updated |

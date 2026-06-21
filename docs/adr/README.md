@@ -18,5 +18,6 @@ These are the **foundational** decisions made during the design session — the 
 | [0010](0010-job-source-jsearch.md) | Job source: JSearch (probe-free → Pro), single-source for v0; Adzuna deferred | Accepted |
 | [0011](0011-dimensional-analytical-model.md) | Analytical model: insight-driven dimensional (constellation) schema; grow per question | Accepted |
 | [0012](0012-model-agnostic-llm.md) | Model-agnostic LLM via Bedrock Converse; model id in config (swap models freely) | Accepted |
+| [0013](0013-enforcement-gate-trio-branch-pr.md) | Enforcement: gate-trio slash-commands (`/start-step` · `/review-step` · `/close-step`) + branch/PR workflow | Accepted |
 
 > Full reasoning narrative: [01-session-decision-journal](../01-session-decision-journal.md). Crisp decision list: [ledgers/decisions-locked](../ledgers/decisions-locked.md).
