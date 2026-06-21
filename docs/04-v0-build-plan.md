@@ -31,10 +31,11 @@ EventBridge (daily) → **one Lambda**: fetch from **one source** → land raw i
 ## Apply sequence
 
 ### Step 0 — Coverage probe (resolve the source on evidence, at $0)
-Before building, validate the source. Register a RapidAPI key, subscribe to **JSearch's free tier (200 req/mo)**, and run real queries for the target market — e.g. `query="Data Engineer in Riyadh", country="sa"` and `query="Data Platform Engineer", country="ae"`, with a `date_posted` window. Eyeball: how many relevant DE roles/day, and do the **descriptions come through complete?**
+Validate JSearch before paying. Register a RapidAPI key, subscribe to **JSearch Basic (free, 200 req/mo)**, and run the **decided query matrix** ([ADR-0010 addendum](adr/0010-job-source-jsearch.md)): **3 titles × 6 GCC countries = 18 base queries** (`Data Engineer` / `Data Platform Engineer` / `Data Architect` × `sa,ae,qa,kw,bh,om`), `date_posted=month` (30-day backfill), `remote_jobs_only=false`, capped at `max_pages_per_query` with a hard `request_budget_per_run ≤ ~70`. Config = [`config/search_config.sample.yml`](../config/search_config.sample.yml); runner = [`scripts/jsearch_probe.py`](../scripts/jsearch_probe.py) (key from env, never committed; raw dumped to a gitignored `probe_output/`). **One sweep ≈ 40–70 requests → fits the free 200/mo** (room for 2–3 sweeps). "Backfill only for now" → inspect the real data *before* setting a daily cadence or paying for Pro.
+- **Measure the 5 metrics:** (1) coverage (relevant DE postings/day per country) · (2) JD completeness (full `job_description`?) · (3) query precision (best title/location phrasing) · (4) dedup reality (`apply_options` pre-merge; do reposts reuse `job_id`?) · (5) depth (pages/query). Also confirm the **`num_pages` billing** (N requests or 1?).
 - **WHY:** "is coverage good enough" is the bottleneck that justifies paying — settle it with data, not a guess. The free tier is plenty for the probe.
-- **WAIT-FOR:** a clear yes/no on GCC depth + full JD text. If yes → subscribe **Pro ($25/mo)** and proceed. If thin → record it and reconsider (probe Adzuna / a regional board) before building.
-- **FAILURE-MODE:** sparse results → widen queries (titles × cities) before concluding the source is weak; truncated JDs → that source is disqualified for scoring.
+- **WAIT-FOR:** a clear yes/no on GCC depth + full JD text. If yes → set the daily-incremental window + subscribe **Pro ($25/mo)**. If thin → record it and reconsider (probe Adzuna / a regional board) before building.
+- **FAILURE-MODE:** sparse results → widen queries (titles × cities, or add city text to the query) before concluding the source is weak; truncated JDs → that source is disqualified for scoring.
 
 ### Step 1 — Scaffold the project + resolve sub-decisions
 Create the Python package layout (ports-&-adapters from day one, so M1+ stay clean), the Terraform skeleton, and resolve D-v0-1/D-v0-2 with a short ADR each.

@@ -1,0 +1,34 @@
+# JobFetcher — search configuration (SAMPLE · sanitized, safe to commit)
+# The JSearch query matrix + request-budget knobs. Decided in ADR-0010 (addendum)
+# and plan §20. Real/local overrides go in config/search_config.local.yml (gitignored).
+
+source: jsearch                  # ADR-0010
+
+# ── Query fan-out: titles × countries = 18 base queries ──────────────────
+titles:
+  - "Data Engineer"
+  - "Data Platform Engineer"
+  - "Data Architect"
+
+countries:                       # JSearch `country` param — ISO 3166-1 alpha-2, all GCC
+  - sa                           # Saudi Arabia (primary)
+  - ae                           # United Arab Emirates
+  - qa                           # Qatar
+  - kw                           # Kuwait
+  - bh                           # Bahrain
+  - om                           # Oman
+
+# ── Freshness ────────────────────────────────────────────────────────────
+# JSearch `date_posted`: all | today | 3days | week | month
+date_posted: month               # 30-day BACKFILL window (probe).
+                                 # Daily-incremental window = TBD after the probe.
+
+mode: backfill                   # backfill | incremental  ("backfill only for now")
+remote_only: false               # on-site / relocation oriented, not remote-global
+
+# ── Request-budget guardrails (free Basic = 200 req/mo) ──────────────────
+max_pages_per_query: 5           # page cap; ~10 results/page, ~1 request/page
+request_budget_per_run: 70       # hard ceiling for one sweep (fits free 200/mo)
+
+# Probe-confirm: does num_pages=N bill as N requests or 1?
+# /search has limited pagination depth; /search-v2 uses a cursor for deeper pages.
