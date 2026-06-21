@@ -56,6 +56,25 @@ Each component is a single responsibility with an explicit **Consumes → Produc
 
 ---
 
+## User search spec (the input contract)
+
+The search targeting is **user input, not assumed** — a per-user [`SearchSpec`](../scripts/search_spec.py) (Pydantic) the user fills *before any query runs*; the loader **fails loudly** on any missing/invalid field (the "nothing taken for granted" gate). It rides the same per-user seam as `PROFILE.user_id` + `threshold`, and one spec drives three things: the **query fan-out**, the **gold-filter target sets**, and the **per-user geo scope** that flows into `dim_location` + analytics.
+
+| Field | User provides | → JSearch mechanism |
+|---|---|---|
+| `job_titles[]` | target roles (non-empty) | the `query` text |
+| `countries[]` | ISO-3166 alpha-2 (non-empty) | the **`country` param** — the reliable geo scope |
+| `cities[]` | target cities (`[]` = all) | **gold filter** on `job_city` |
+| `states[]` | target states (`[]` = none; usually null for GCC) | **gold filter** on `job_state` |
+| `date_posted` · `language` · `employment_types[]` · `remote` · `threshold` | freshness · language · type · remote-mode · cutoff | query params + gold |
+| `budget{max_pages_per_query, request_budget_per_run}` | request guardrails | the fetch-loop cap |
+
+- **Every field is required (no Pydantic defaults)** — the user sets each value; an explicit `[]` means "no filter". This is the *nothing-assumed* contract.
+- **Geo = the `country` param** (reliable), **not** the per-record `job_country` (often null). **City/state are post-pull gold filters** — pull broadly by country (every city still lands in bronze for analytics) → filter to targets in gold. (`language=en` is what makes `job_city` / `job_country` + the UTC timestamp populate at all — see the source schema below.)
+- **Intake (the seam):** v0 = the user fills `config/search_config.local.yml` (gitignored), validated at load; committed `search_config.sample.yml` is the complete template. Multi-user = a form/Notion/CLI writing the same schema per `user_id` — schema unchanged.
+
+---
+
 ## Ingestion — medallion landing (the operational medallion)
 
 The operational pipeline *is* a medallion. Landing the raw data is the **first-order daily guarantee** — everything else is derived from it.

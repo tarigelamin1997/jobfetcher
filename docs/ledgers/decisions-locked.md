@@ -48,6 +48,7 @@
 | Decision | Why | Owner |
 |---|---|---|
 | Source = **JSearch** (probe free 200-req → Pro $25/mo); single-source for v0; Adzuna deferred; official APIs only, no scraping | Coverage + full JD text from one API (Google-for-Jobs, supports GCC); single source ⇒ no cross-source dedup in v0; pay only on evidence | [ADR-0010] |
+| **Search targeting = validated, fully-explicit per-user `SearchSpec`** (no assumed inputs): `country`=query-param · `job_title`=query-text · `city`/`state`=gold-filters; `language=en` forces English metadata; intake = config (v0) → form (multi-user) | Different users, different targets; nothing taken for granted; gold-filter targets come from the user, not hardcode | [02-architecture] · plan §21 |
 | **Ingestion = medallion landing** — bronze (land-all-raw, immutable) → silver (clean+dedup) → gold (profile-filter) → score | Land-daily guarantee + cheap filter before the LLM | journal §13 · [02-architecture] |
 | **Immutable bronze ⇒ replay** — silver/gold/score are pure functions over bronze | Reprocess history with zero new API calls when filters/profile change | journal §13 |
 | **Quota/request-budget** — charged per request; query (keywords + `country` + date) = source-side pre-filter; page-cap + date-window are config | API quota is the real cap, not storage | [ADR-0010] |
