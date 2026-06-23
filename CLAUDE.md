@@ -22,6 +22,7 @@ JobFetcher is a personal-scale, serverless job-matching tool **and** a Data-Engi
 - **Decision rights:** Tarig approves architecture + major/irreversible decisions; Claude drives the rest and documents it. **Confirm major decisions only** — don't stop every step, don't barrel through irreversible ones.
 - **Safety-first (Castle Principle):** build don't demolish · smallest change that works · one change at a time · verify before *and* after · **document before you delete** · **destructive ops (rm, DROP, terraform destroy, force-push) require explicit approval.**
 - **AWS dev identity:** all local development uses the non-root **`jobfetcher-dev`** IAM user (CLI profile `jobfetcher`, also the `[default]`), region **us-east-1**; the keyless **root** session (`samareltayeb`) is for *rare root-only ops only*; **CI/CD and Lambda runtime get their own least-privilege IAM roles — never the personal key.** Full model in [`docs/ledgers/decisions-locked.md`](docs/ledgers/decisions-locked.md).
+- **Build workflow ([ADR-0013](docs/adr/0013-enforcement-gate-trio-branch-pr.md)):** each build unit runs the **gate trio** — `/start-step` (entry) → implement → `/review-step` (code) → `/close-step` (exit) — with **two human checkpoints** (spec approved *before* code; approval *before* merge/tag). v0 *code* builds on a branch → PR → tag; `main` is PR-only (docs may go direct for speed).
 - **Documentation is constructed, not described** — written live as decisions happen, not reconstructed later. Every doc carries **What / Why / So-what**. A `[TO BE FILLED]` placeholder is a blocker, not a draft.
 - **Decisions → ADRs** ([`docs/adr/`](docs/adr/)) with the rejected alternatives named. Errors → the error log ([`docs/ledgers/errors.md`](docs/ledgers/errors.md)) answering the Five Questions (what/why/how/fix/prevention+detection).
 - **Testing:** unit (logic) + integration (LocalStack/moto) + dbt tests (marts) + a live smoke run. Validation gates are **behavioral + carry a negative case** — a presence/liveness check is *no gate*.
@@ -51,7 +52,7 @@ Two planes (full detail in [`docs/02-architecture.md`](docs/02-architecture.md))
 ## What NOT to do
 - Don't build ahead of the current stage. v0 first; migrations are planned **just-in-time** after the prior release ships.
 - Don't add a service/tool/library that can't pass the defensibility rubric. If it's a showcase, label it one.
-- Don't pre-decide the gate-enforcement machinery (slash-commands vs Makefile vs checklists) — that's evaluated during implementation.
+- Don't commit v0 *code* directly to `main` — branch → PR → merge after the gate trio passes ([ADR-0013](docs/adr/0013-enforcement-gate-trio-branch-pr.md)); docs may go direct for speed.
 - Don't put real PII (CV/profile) in the repo — sanitized sample only; real data is gitignored and lives in private S3.
 - Don't claim scale justifies the stack — it doesn't (10–30 jobs/day). Defend on *patterns at production standard, modest scale, deliberately right-sized.*
 - Don't let a doc go stale after a change — update it the moment the change is made.
