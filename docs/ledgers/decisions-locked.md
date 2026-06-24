@@ -34,6 +34,7 @@
 |---|---|---|
 | Two-plane (operational vs analytical) | DE-depth without diluting serverless | [02-architecture] |
 | PostgreSQL operational store (over DynamoDB) | Relational data → relational store; pgvector | [ADR-0003] |
+| **Operational DB = Aurora Serverless v2 + RDS Data API** (Lambda outside any VPC) — resolves D-v0-1 | HTTPS DB access ⇒ no VPC/NAT/endpoints; a VPC-bound Lambda would need a ~$32/mo NAT for the public JSearch fetch | [ADR-0014] |
 | Analytics: dbt-on-Postgres default; Snowflake conditional | Tiny data; build warehouse only if a bottleneck demands | [ADR-0004] |
 | Databricks rejected (Spark→OrderFlow) | Spark-on-tiny-data is weak signal | [ADR-0004] |
 | Dedup: cluster-and-surface, never hide; measured P/R | Wrong-merge (hiding a job) is the only unacceptable error | [ADR-0005] |
@@ -53,6 +54,7 @@
 | **Immutable bronze ⇒ replay** — silver/gold/score are pure functions over bronze | Reprocess history with zero new API calls when filters/profile change | journal §13 |
 | **Quota/request-budget** — charged per request; query (keywords + `country` + date) = source-side pre-filter; page-cap + date-window are config | API quota is the real cap, not storage | [ADR-0010] |
 | **Silver text pipeline** — pure, versioned, ordered steps (clean → lang-detect → segment → fingerprint → embed) on job_description/title; rest is field-mapping | Most transforms are on text; pure+versioned ⇒ replayable | journal §14 |
+| **v0 silver = pure Python, no Bedrock** — `lingua` lang-detect (behavioral gate, fail-safe flag); embeddings + pgvector blocking deferred to M2; exact-id dedup only ⇒ **ingestion→silver→gold is quota-independent** (buildable now) | Cheap deterministic work in silver; LLM (Kimi) reserved for semantic scoring; only Step 5 waits on ERR-001 | [ADR-0014] · plan §26 |
 | **Origin-level lineage** — each silver row carries `bronze_id` + `pipeline_version`; field→source is a documented constant | Trace-to-origin + exact re-derive (replay-based) | journal §14 |
 | **Never-discard → dimensional modeling** — retain all (bronze lossless); model dims by *insight* not by *field*; grow a dim when a question needs it (retroactively via replay) | Compounding insight without table-per-field sprawl | [ADR-0011] · 00-philosophy |
 | **Analytical = constellation model** — facts (fct_job_posting · `fct_job_skill` bridge · fct_job_score · fct_application) over conformed dims (date/skill/title/company/sector/location) + point-in-time profile (SCD2); skills+title derived from text | Insights emerge from joins; the skill bridge is the linchpin | [ADR-0011] |

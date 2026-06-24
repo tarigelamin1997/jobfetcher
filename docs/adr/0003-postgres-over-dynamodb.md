@@ -12,7 +12,7 @@ Use **managed PostgreSQL** as the operational store, with **pgvector** for JD-em
 ## Alternatives Considered
 - **DynamoDB + Streams (the original choice).** Rejected: NoSQL for inherently relational, query-varied data is the *weaker* fit — it forces single-table-design gymnastics and GSIs to emulate joins. It was arguably the original plan's least-defensible call.
 - **SQLite.** Rejected: not a managed, concurrent, network-accessible store for a scheduled Lambda; no pgvector.
-- **Aurora vs RDS Postgres** — not decided here (a v0 sub-decision, [04-v0-build-plan](../04-v0-build-plan.md) D-v0-1): Aurora Serverless v2 + Data API (simpler Lambda, pricier) vs RDS t4g.micro (cheaper, VPC complexity).
+- **Aurora vs RDS Postgres** — **resolved in [ADR-0014](0014-operational-store-aurora-serverless-data-api.md)** (D-v0-1): **Aurora Serverless v2 + RDS Data API, Lambda outside any VPC** (a VPC-bound Lambda would need a ~$32/mo NAT for the public JSearch fetch).
 
 ## Consequences
 - **Easier:** natural relational modeling, rich SQL, pgvector for dedup, and a clean OLTP→analytics story (the same Postgres feeds dbt marts — [ADR-0004]). More defensible than NoSQL here.
