@@ -40,7 +40,7 @@ Two planes (full detail in [`docs/02-architecture.md`](docs/02-architecture.md))
 | Doc | What it holds |
 |---|---|
 | [`docs/00-design-philosophy.md`](docs/00-design-philosophy.md) | P1/P2, defensibility rubric, the two pillars, safety-first — the operating constitution. |
-| [`docs/01-session-decision-journal.md`](docs/01-session-decision-journal.md) | The full reasoning trail of the design session — *why* every choice was made. Context-survival core. |
+| [`docs/01-session-decision-journal.md`](docs/01-session-decision-journal.md) | The full reasoning trail — Part 1 (design session) + Part 2 (build phase: AWS identity · the Bedrock-quota wall · ingestion · gate-trio · Aurora · the silver-dissection evolution). *Why* every choice was made, including the reversals. Context-survival core. |
 | [`docs/02-architecture.md`](docs/02-architecture.md) | Two-plane design, data model/ERD, dedup, scoring, CV, diagrams. |
 | [`docs/03-roadmap.md`](docs/03-roadmap.md) | Directional roadmap + the migration-decision (bottleneck) protocol + end-state vision. |
 | [`docs/04-v0-build-plan.md`](docs/04-v0-build-plan.md) | Exhaustive, step-by-step v0 build plan + validation gate. The only fully-planned stage. |
