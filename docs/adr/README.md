@@ -20,5 +20,7 @@ These are the **foundational** decisions made during the design session — the 
 | [0012](0012-model-agnostic-llm.md) | Model-agnostic LLM via Bedrock Converse; model id in config (swap models freely) | Accepted |
 | [0013](0013-enforcement-gate-trio-branch-pr.md) | Enforcement: gate-trio slash-commands (`/start-step` · `/review-step` · `/close-step`) + branch/PR workflow | Accepted |
 | [0014](0014-operational-store-aurora-serverless-data-api.md) | Operational store: Aurora Serverless v2 + RDS Data API (no VPC); resolves D-v0-1 | Accepted |
+| [0015](0015-type-replaceable-pipeline-stages.md) | Type-replaceable pipeline stages: every stage = a config-selected strategy behind a port | Accepted |
+| [0016](0016-llm-dissection-at-silver.md) | LLM dissection at silver (every posting) → structured fields for the market-wide dimensional tables | Accepted |
 
 > Full reasoning narrative: [01-session-decision-journal](../01-session-decision-journal.md). Crisp decision list: [ledgers/decisions-locked](../ledgers/decisions-locked.md).
