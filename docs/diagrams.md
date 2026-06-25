@@ -8,7 +8,7 @@
 
 ## 1 · Full-stack architecture (target)
 
-The complete two-plane design (high-level). **v0 is a small subset** (one Lambda → fetch → score → email); everything else arrives by migration. The **ingestion medallion is detailed in §2 below**; scoring is **model-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md)). Discussed in [02-architecture](02-architecture.md).
+The complete two-plane design (high-level). **v0 is a small subset** (one Lambda → fetch → score → email); everything else arrives by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
 
 ```mermaid
 flowchart TB
@@ -22,10 +22,10 @@ flowchart TB
     EB["EventBridge<br/>daily cron"] --> ORC["Lambda v0<br/>→ Step Functions (M3)"]
     subgraph MED["Medallion"]
       BR["Bronze<br/>raw · immutable"]
-      SI["Silver<br/>clean · dedup · embed"]
+      SI["Silver<br/>clean · LLM dissect · dedup"]
       GO["Gold<br/>profile filter"]
     end
-    ORC --> BR --> SI --> GO --> SC["Score<br/>Bedrock (model-agnostic)"]
+    ORC --> BR --> SI --> GO --> SC["Score<br/>LLM · DeepSeek (provider-agnostic)"]
     SC -->|">= threshold"| CV["cv_tailor (M1)<br/>DOCX + PDF"]
     SC --> NT["notify<br/>SES + Notion"]
     CV --> NT
@@ -80,18 +80,18 @@ flowchart TB
     ADP["source adapter → common schema<br/>(Pydantic data contract)"]
     subgraph TP["text pipeline · job_description / job_title"]
       direction LR
-      T1["whitelist"] --> T2["clean<br/>html·unicode·ws"] --> T3["lang-detect<br/>English"] --> T4["segment<br/>job_highlights"] --> T5["fingerprint"] --> T6["embed<br/>pgvector"]
+      T1["whitelist"] --> T2["clean<br/>html·unicode·ws"] --> T3["LLM dissect · DeepSeek<br/>skills+levels · sector · title · lang"] --> T5["fingerprint"] --> T6["embed<br/>pgvector (M2)"]
     end
     DD["dedup · cluster-and-surface<br/>v0: exact source-id only"]
     ADP --> TP
     TP --> DD
   end
 
-  subgraph GLD["④ Gold — filter to candidates (deterministic · cheap)"]
-    PF["profile filter<br/>location · target title · seniority · exclude"]
+  subgraph GLD["④ Gold — filter to candidates (LLM FilterStrategy)"]
+    PF["LLM filter · likely-fit<br/>on dissected fields vs profile"]
   end
 
-  SC["⑤ Score — Bedrock (model-agnostic)<br/>runs on GOLD only"]
+  SC["⑤ Score — LLM · DeepSeek<br/>runs on GOLD only"]
   CL[("cluster<br/>score + CV attach once per real job")]
   AN["analytics marts (M5/M6)"]
   DDM["⤷ M2 — multi-source + clustering:<br/>fingerprint → pgvector blocking → apply-URL / canonical-id<br/>→ company-canon → time-window → confidence bands<br/>→ LLM adjudication → human merge"]
@@ -112,9 +112,9 @@ flowchart TB
 **Stage by stage**
 - **① Source (JSearch).** The query (`keywords + country + date_posted`) *is* the pre-filter — the API won't pre-filter for us, so the query is how we pay only for plausibly-relevant pages. Cost is bounded by a **request budget**, not storage.
 - **② Bronze.** Every raw result is written **untouched** — S3 `raw/…json` + a `bronze_posting` row (`raw_payload`). No filtering, ever: *whatever the API returned today is captured and replayable.*
-- **③ Silver.** A source **adapter** normalizes each payload into one common schema (the Pydantic **data contract**). Only `job_description`/`job_title` are transformation-heavy → one **pure, versioned text pipeline**; the rest is field-mapping. Every row carries `bronze_id + pipeline_version` (**origin-level lineage**). Dedup is **cluster-and-surface** — v0 is exact source-id only.
-- **④ Gold.** A cheap **deterministic profile filter** selects the likely-fit subset. **Only gold reaches the LLM**; below-bar rows stay in bronze/silver for analytics.
-- **⑤ Score.** Bedrock (model-agnostic) runs on gold only; score + CV attach to the **cluster** — done once per real job, every platform's apply-link kept.
+- **③ Silver.** A source **adapter** normalizes each payload into one common schema (the Pydantic **data contract**). The heavy step is the **LLM `Dissector`** (DeepSeek — [ADR-0016](adr/0016-llm-dissection-at-silver.md)) that extracts `skills[]`+levels, sector, normalized title, language from `job_description`/`job_title`; the rest is field-mapping. Every row carries `bronze_id + pipeline_version` (**origin-level lineage**). Dedup is **cluster-and-surface** — v0 is exact source-id only.
+- **④ Gold.** Silver **LLM-dissects every posting** (the market-wide analytics need *all* postings, not just gold); the **gold LLM `FilterStrategy`** then selects the likely-fit subset for scoring. Below-bar rows stay in bronze/silver for analytics.
+- **⑤ Score.** The **strong DeepSeek model** runs on gold only; score + CV attach to the **cluster** — done once per real job, every platform's apply-link kept.
 
 **Two properties worth discussing**
 - **Immutable bronze ⇒ replay.** Change a filter, the threshold, or your profile → re-derive silver→gold→score over existing bronze with **zero new API calls**.
