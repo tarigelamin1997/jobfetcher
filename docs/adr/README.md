@@ -23,5 +23,6 @@ These are the **foundational** decisions made during the design session — the 
 | [0015](0015-type-replaceable-pipeline-stages.md) | Type-replaceable pipeline stages: every stage = a config-selected strategy behind a port | Accepted |
 | [0016](0016-llm-dissection-at-silver.md) | LLM dissection at silver (every posting) → structured fields for the market-wide dimensional tables | Accepted |
 | [0017](0017-llm-transport-openai-compatible-deepseek.md) | LLM transport = OpenAI-compatible API; v0 provider = DeepSeek (Bedrock parked, ERR-001 mitigated) | Accepted |
+| [0018](0018-persistence-sqlalchemy-data-api-repository.md) | Persistence access: SQLAlchemy + aurora-data-api dialect, behind a `Repository` port | Accepted |
 
 > Full reasoning narrative: [01-session-decision-journal](../01-session-decision-journal.md). Crisp decision list: [ledgers/decisions-locked](../ledgers/decisions-locked.md).

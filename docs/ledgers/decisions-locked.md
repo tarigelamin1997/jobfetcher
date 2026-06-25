@@ -35,7 +35,10 @@
 | Two-plane (operational vs analytical) | DE-depth without diluting serverless | [02-architecture] |
 | PostgreSQL operational store (over DynamoDB) | Relational data → relational store; pgvector | [ADR-0003] |
 | **Operational DB = Aurora Serverless v2 + RDS Data API** (Lambda outside any VPC) — resolves D-v0-1 | HTTPS DB access ⇒ no VPC/NAT/endpoints; a VPC-bound Lambda would need a ~$32/mo NAT for the public JSearch fetch | [ADR-0014] |
-| **Type-replaceability** — every stage = a config-selected strategy behind a port (`SourceAdapter`/`Dissector`/`FilterStrategy`/`Embedder`/`Scorer`); swappable **by type** | Upgrades are config + an adapter, not a rewrite; enables P2 evolution | [ADR-0015] · 00-philosophy P3 |
+| **Type-replaceability** — every stage = a config-selected strategy behind a port (`SourceAdapter`/`Dissector`/`FilterStrategy`/`Embedder`/`Scorer`/`Repository`); swappable **by type** | Upgrades are config + an adapter, not a rewrite; enables P2 evolution | [ADR-0015] · 00-philosophy P3 |
+| **Aurora SLv2 `min_capacity = 0`** (scale-to-0 → ~$0 idle between daily runs); pick an engine version supporting Data API + `pgvector` + scale-to-0 (build check) | Daily batch idles ~23h; re-affirmed over external Postgres (nothing forces us off AWS, unlike Bedrock→DeepSeek) | [ADR-0014] |
+| **Persistence access = SQLAlchemy Core + `sqlalchemy-aurora-data-api` dialect, behind a `Repository` port**; DB tests on a **real local Postgres** (LocalStack can't mock the Data API) | Same code local↔Aurora by connection URL; storage is a swappable port; high-fidelity local tests | [ADR-0018] · [ADR-0015] |
+| **Dissected output = JSONB + scalar columns on `posting`** (`skills jsonb` + sector/normalized_title/seniority/language/city/state/country/…); `score` **drops** `skills_extracted`/`sector`/`seniority` (now silver-derived); `dim_skill`/`fct_job_skill` bridge = M5 (no early bridge) | Lossless + minimal; the dimensional model grows retroactively per question (P1) | [ADR-0016] · [ADR-0011] · [ADR-0018] |
 | Analytics: dbt-on-Postgres default; Snowflake conditional | Tiny data; build warehouse only if a bottleneck demands | [ADR-0004] |
 | Databricks rejected (Spark→OrderFlow) | Spark-on-tiny-data is weak signal | [ADR-0004] |
 | Dedup: cluster-and-surface, never hide; measured P/R | Wrong-merge (hiding a job) is the only unacceptable error | [ADR-0005] |
@@ -75,10 +78,11 @@
 |---|---|---|
 | **All secrets in AWS Secrets Manager**, IAM-scoped per function — convention: one secret per service named `jobfetcher/<service>` (e.g. `jobfetcher/jsearch`), JSON value, region us-east-1; created via CLI under `jobfetcher-dev`, read by scripts (boto3) + Lambdas; **never in env/repo** (env-var fallback only for quick local tests) | Zero secrets in code; one store for local + prod (store-once, use-everywhere); security signal | journal §7 |
 | **AWS auth: deployed pipeline = no static keys** (Lambdas use **IAM execution roles**, AWS injects creds at runtime); **local** dev = session login (keyless) **or** a **non-root IAM user key** (`jobfetcher` profile) — **never root keys** | Temporary runtime creds > long-lived keys; the local method is the operator's choice, root keys are the one hard no | journal §18 |
+| **Runtime Lambda IAM = least-privilege, no Bedrock** — `secretsmanager:GetSecretValue` (`jobfetcher/deepseek` + `jobfetcher/jsearch`) · `rds-data` (Data API) on the cluster · its S3 prefix · SES send; LLM = DeepSeek over HTTPS (Lambda outside VPC ⇒ outbound internet) | DeepSeek replaced Bedrock ([ADR-0017]) ⇒ no `bedrock:InvokeModel`; least-privilege is the security signal | [ADR-0017] · [ADR-0014] |
 | Public repo PII-scrubbed; real profile gitignored → private S3 | Privacy + clone-and-runnable sample | [ADR-0007] |
 | Cost ceiling ~$50/mo OK; some credits; `terraform destroy` → $0 | Optimize for signal, stay cost-aware | journal §6 |
 | IaC: Terraform | Tarig's showcase + most-recognized | journal §6 |
-| Testing: unit + LocalStack/moto + dbt tests + live smoke | Reliability + clone-and-run confidence | journal §6 |
+| Testing: unit + LocalStack/moto (S3/Secrets) + **local Postgres for the DB** + dbt tests + live smoke | Reliability + clone-and-run confidence; DB tests via the aurora-data-api dialect (local↔cloud parity) | journal §6 · [ADR-0018] |
 | Enforcement machinery (commands/gates) = emergent | Decide during implementation per P1/P2 | [05-methodology] |
 
 ## v0 boundary & versioning

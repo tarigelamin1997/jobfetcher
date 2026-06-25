@@ -16,6 +16,7 @@ The pipeline is an evolutionary architecture: stages get *upgraded by type* over
 | `FilterStrategy` | cut silver → gold candidates | LLM filter | deterministic / embedding filter |
 | `Embedder` | text → vector (pgvector) | Titan / Cohere (M2) | any embedding model |
 | `Scorer` | score fit + explain | strong OpenAI-compat model (`deepseek-v4-pro`) | any model/provider (config) |
+| `Repository` | persist + read pipeline state | `PostgresRepository` (SQLAlchemy + Aurora Data API) | any SQL store; an in-memory fake (tests) |
 | (`Notifier`, `CVRenderer`) | later stages | — | — |
 
 Each port is a small interface; strategies are registered + chosen via config (the same pattern as the model id). Swapping a stage's *type* is adding an adapter + flipping config — no downstream rewrite.
@@ -27,4 +28,4 @@ Each port is a small interface; strategies are registered + chosen via config (t
 ## Consequences
 - **Easier:** upgrades are config + an adapter; A/B-ing a strategy is trivial; the architecture *reads* as deliberately evolvable (a senior signal). Tests target the port interface, so a swapped strategy reuses the same gate.
 - **Harder:** a little upfront indirection (ports/registries) vs inline calls — justified by the evolutionary roadmap, kept minimal (a port is a thin interface, not a framework).
-- **Impact:** generalizes [ADR-0012]; underpins the M2 multi-source ([ADR-0010]) + dedup ([ADR-0005]) swaps and the silver `Dissector` ([ADR-0016]). A governing tenet in [00-design-philosophy](../00-design-philosophy.md).
+- **Impact:** generalizes [ADR-0012]; underpins the M2 multi-source ([ADR-0010]) + dedup ([ADR-0005]) swaps, the silver `Dissector` ([ADR-0016]), and the storage `Repository` ([ADR-0018](0018-persistence-sqlalchemy-data-api-repository.md)). A governing tenet in [00-design-philosophy](../00-design-philosophy.md).

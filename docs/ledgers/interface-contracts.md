@@ -8,10 +8,10 @@
 |---|---|---|---|
 | **v0 · search input** | 🚧 built | validated `SearchSpec` (job_titles, countries, cities, states, knobs, budget) — [scripts/search_spec.py](../../scripts/search_spec.py) | v0 · fetch (query fan-out) + gold (city/state filters) |
 | **v0 · fetch** | ⬜ | `posting` rows (status `fetched`, normalized via the data contract) · raw JSON at `s3://…/raw/{source}/{date}/{id}.json` · correlation `run_id` | v0 · score |
-| **v0 · silver dissect** | 🚧 built (C-1) | `DissectedPosting` — grounded `skills[]` (name / level `{must\|nice\|implied}` / evidence), sector, normalized_title + carried metadata (location, seniority, language) — [src/jobfetcher/core/models.py](../../src/jobfetcher/core/models.py) via the `Dissector` (ADR-0016) | v0 · gold filter + score; (later) the dimensional model (`fct_job_skill`, `dim_skill`) |
-| **v0 · score** | ⬜ | `score` rows (score, fit_category, strengths, gaps, strategic_assessment, skills_extracted, sector, poster_type, legitimacy_verified; status `scored`) | v0 · notify; (later) analytics, near-miss |
+| **v0 · silver dissect** | 🚧 built (C-1) | `DissectedPosting` — grounded `skills[]` (name / level `{must\|nice\|implied}` / evidence), sector, normalized_title + carried metadata (location, seniority, language) — [src/jobfetcher/core/models.py](../../src/jobfetcher/core/models.py) via the `Dissector` (ADR-0016) | v0 · gold filter + score — **persisted as JSONB + scalar columns on `posting`** ([ADR-0018](../adr/0018-persistence-sqlalchemy-data-api-repository.md)); (later) `fct_job_skill` / `dim_skill` at M5 |
+| **v0 · score** | ⬜ | `score` rows (score, fit_category, strengths, gaps, strategic_assessment, poster_type, legitimacy_verified; status `scored`) — reads `skills`/`sector` from the silver dissection on `posting` | v0 · notify; (later) analytics, near-miss |
 | **v0 · notify** | ⬜ | one daily SES digest email (matches ≥ threshold + below-threshold count) | Tarig (human) |
-| **v0 · schema** | ⬜ | Postgres tables `posting`, `cluster` (1:1 in v0), `score`, `profile` (Alembic-migrated) | all later migrations build on this |
+| **v0 · schema** | ⬜ | Postgres tables `bronze_posting`, `posting` (silver + dissected columns — `skills jsonb`, sector, normalized_title, seniority, language, …), `cluster` (1:1 in v0), `score` (reconciled — no `skills_extracted`/`sector`/`seniority`), `profile`; Alembic-migrated; reached via the `Repository` port ([ADR-0018](../adr/0018-persistence-sqlalchemy-data-api-repository.md)) | all later migrations build on this |
 
 ### Appended as migrations ship
 *(empty — each future release appends its Produces row here at close, e.g. M1 cv_tailor → `cv` rows + DOCX/PDF S3 keys; M2 dedup → `cluster` grouping + `match_status`; M5 dbt → marts.)*

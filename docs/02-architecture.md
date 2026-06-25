@@ -48,7 +48,7 @@ Each component is a single responsibility with an explicit **Consumes → Produc
 |---|---|---|---|
 | **fetch** | `search_config`, source secrets | raw postings (S3 `raw/`), upserted `posting` rows (status `fetched`) | Pluggable **source adapters** (JSearch, Adzuna, …) normalize each API into one internal schema *before* anything downstream — the **data contract** boundary. |
 | **dedup** | new `posting` rows | `cluster` rows + `posting.cluster_id` + `match_status`/`match_confidence` | **Cluster-and-surface** (never hide). Detail below. Scoring/CV run **once per cluster**. |
-| **score** | cluster representative + candidate profile | `score` row (score, fit, strengths, gaps, strategic_assessment, skills_extracted, sector), status `scored` | Bedrock, 7-factor ATS, explainable, temp 0. Detail below. |
+| **score** | cluster representative (+ its silver-dissected `skills`/`sector`) + candidate profile | `score` row (score, fit, strengths, gaps, strategic_assessment, poster_type, legitimacy_verified), status `scored` | LLM (DeepSeek, provider-agnostic), 7-factor ATS, explainable, temp 0. Detail below. |
 | **cv_tailor** | scored cluster (≥ threshold) + master CV | DOCX+PDF in S3 `gold/cvs/...`, `cv` row (status `draft`) | Reliable renderer (no LibreOffice). Draft → human-review gate → `approved`. |
 | **notify** | newly-scored clusters, graduations | daily email (SES) + Notion rows | Email = morning triage; Notion = act + track. |
 
@@ -127,15 +127,28 @@ erDiagram
   }
   POSTING {
     text posting_id PK
+    text bronze_id FK "lineage → bronze_posting"
     text source "jsearch | adzuna | ..."
     text source_job_id "native id from the API"
     text cluster_id FK
-    text title
+    text title "raw source title"
     text company
     text location
+    text city
+    text state
+    text country
     text apply_url
     text description
-    vector jd_embedding "pgvector — for dedup blocking"
+    text normalized_title "LLM-dissected"
+    text sector "LLM-dissected"
+    text seniority "metadata + dissection"
+    text employment_type
+    text language "dissection byproduct (no lingua)"
+    jsonb skills "LLM-dissected: [{name, level must|nice|implied, evidence}]"
+    text dissection_model "provenance"
+    int dropped_skill_count "skills cut by grounding"
+    text pipeline_version "lineage"
+    vector jd_embedding "pgvector — dedup blocking (M2)"
     text fingerprint "normalized title|company|location hash"
     text match_status "confirmed | suspected | rejected_by_user"
     float match_confidence
@@ -153,12 +166,9 @@ erDiagram
     text cluster_id FK
     int score "0-100"
     text fit_category "strong_fit | stretch | misaligned | near_miss"
-    text seniority
     jsonb strengths
     jsonb gaps
     text strategic_assessment
-    jsonb skills_extracted
-    text sector
     text poster_type
     bool legitimacy_verified
     int previous_score "for near-miss re-scoring"
@@ -188,6 +198,8 @@ erDiagram
 
 - **`user_id` on PROFILE is the multi-user seam** — present from day one, single-valued now; multi-user is a future migration that adds the dimension across tables, not a rewrite.
 - **Schema migrations** are first-class: **Alembic** versioned migrations; every release that changes the schema ships its migration. No ad-hoc `ALTER`.
+- **Dissected fields live on `posting`** (silver) — `skills` (jsonb: `[{name, level, evidence}]`), `normalized_title`, `sector`, `seniority`, `language` — produced by the silver `Dissector` ([ADR-0016](adr/0016-llm-dissection-at-silver.md)), **not re-extracted at score** (that's why `score` no longer carries `skills_extracted`/`sector`/`seniority`). v0 stores `skills` losslessly as **JSONB**; the `dim_skill`/`fct_job_skill` bridge is modeled retroactively over it at **M5** ([ADR-0011](adr/0011-dimensional-analytical-model.md)) — no early bridge (P1).
+- **DB access** ([ADR-0018](adr/0018-persistence-sqlalchemy-data-api-repository.md)): the pipeline reaches Aurora through **SQLAlchemy Core + the `sqlalchemy-aurora-data-api` dialect**, behind a **`Repository` port** — the *same* code runs against a local Postgres (fast tests) and the Aurora **Data API** (deployed) by swapping the connection URL; Alembic uses the same. LocalStack doesn't mock the Data API, so DB tests use a **real local Postgres** (LocalStack/moto stay for S3 + Secrets).
 
 ### S3 layout
 ```
@@ -222,7 +234,7 @@ Config (`search_config`, sanitized sample profile) ships in-repo; **real profile
 - **Model-agnostic LLM** ([ADR-0012](adr/0012-model-agnostic-llm.md)): the model **and provider** are **config** (`base_url` + `api_key` + `model`) over the **OpenAI-compatible API** ([ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) — **v0 backend = DeepSeek** (`deepseek-v4-pro` for scoring); Anthropic-direct / Ollama / Bedrock are one-line swaps. Everything below is provider-independent.
 
 - **7-factor ATS framework** (core-skill match, tool/tech alignment, achievement relevance, seniority/scope, ATS-keyword, formatting/clarity, realistic fit). Weights tunable; refined during the scoring migration.
-- **Explainability is the value:** structured output includes `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified` — not just a number. **Temperature 0** for stability.
+- **Explainability is the value:** structured output includes `strengths`, `gaps`, `strategic_assessment`, `poster_type`, `legitimacy_verified` — not just a number. (The `skills`/`sector` it reasons over come from the **silver dissection** on `posting` — [ADR-0016](adr/0016-llm-dissection-at-silver.md) — not re-extracted here.) **Temperature 0** for stability.
 - **Threshold (single, user-configurable, runtime):** **one `threshold`** (default **60**) gates **both** the daily shortlist **and** CV writing — read from the per-user `profile` config on every run, so changing it is editing one value (no redeploy). **Hard floor 50** + **near-miss band 10** remain the watch/honesty band *below* the threshold (→ near-miss = 50–59). Below floor → analytics only. The *active* threshold is stamped on each run's records for measurement. (One knob, not two — see [ADR/journal §12 amendment](01-session-decision-journal.md).)
 - **Calibration loop (lightweight):** the human-review gate captures `score_override` corrections as structured data → used to tune the scoring prompt and to drive a **"scoring accuracy" SLO** (% of scores that needed override). High reliability ROI, low complexity. *A labeled reliability showcase.*
 - **Legitimacy gate** (scam detection, hard) + **poster-type label** (informational — direct employer / staffing / consulting / etc.; user decides). No hard-filter by company type.
