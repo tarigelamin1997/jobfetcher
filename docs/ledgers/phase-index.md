@@ -6,7 +6,7 @@
 
 | Release | Adds | Status |
 |---|---|---|
-| **v0.1** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → daily email; Terraform, Secrets Manager, tests, minimal CI | 🚧 Step 0 (probe built + validated; `SearchSpec` + Secrets Manager done; LLM unblocked via DeepSeek — ADR-0017) |
+| **v0.1** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → daily email; Terraform, Secrets Manager, tests, minimal CI | 🚧 Step 0 done; **silver `Dissector` reader (C-1) built + live-validated** on real JDs (LLM client + grounded extraction, ADR-0016/0017); next = storage/infra (Steps 1–3) |
 | M1 · v0.2 | CV tailoring (reliable renderer, draft→review) | ⬜ (hypothesis) |
 | M2 · v0.3 | Multi-source + clustering dedup + Suspected-Duplicates | ⬜ (hypothesis) |
 | M3 · v0.4 | Single Lambda → Step Functions | ⬜ (hypothesis) |
