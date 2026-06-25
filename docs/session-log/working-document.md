@@ -1,14 +1,14 @@
 # Working Document — verbatim design + build reasoning notes
 
 > **What this is.** The raw, unedited working document behind JobFetcher's design and build — the live reasoning notes captured *as decisions were made*, preserved here in full for complete context. It is the granular source that the curated docs distill:
-> - **Curated narrative:** [`../01-session-decision-journal.md`](../01-session-decision-journal.md) — Part 1 = design session (§1–11), Part 2 = build phase (§12–27).
-> - **Formal decisions:** [`../adr/`](../adr/) · **live state:** [`../ledgers/`](../ledgers/).
+> - **Curated narrative:** [`../01-session-decision-journal.md`](../01-session-decision-journal.md) — Part 1 = design session (§1–11), Part 2 = build phase (§12–20, incl. the LLM-live milestone).
+> - **Formal decisions:** [`../adr/`](../adr/) · **live state:** [`../ledgers/`](../ledgers/) · **release log:** [`../../CHANGELOG.md`](../../CHANGELOG.md).
 >
-> **Read it for the *why behind the why*.** It includes everything: the prior (scrapped) project that was absorbed (§1), the full ~150-question discovery intake (§2), the section-by-section captured understanding (§3), the architecture synthesis and its pivots (§4–§8), the governing principles (§9), the status checkpoints (§10), the methodology adoption (§11), and every build-phase capture (§12–§28) — each with its original *Context / Decision / Edits / Verification* working-notes.
+> **Read it for the *why behind the why*.** It includes everything: the prior (scrapped) project that was absorbed (§1), the full ~150-question discovery intake (§2), the section-by-section captured understanding (§3), the architecture synthesis and its pivots (§4–§8), the governing principles (§9), the status checkpoints (§10), the methodology adoption (§11), and every build-phase capture (§12–§29) — each with its original *Context / Decision / Edits / Verification* working-notes.
 >
-> **Fidelity over polish (intentional).** Working-process meta is left in *verbatim* — plan-mode markers, per-capture "Edits (out of plan mode)" and "Verification" checklists, `✅ DONE (commit …)` stamps, and the occasional decision reversed in place (e.g. silver `lingua`→LLM in §27; Bedrock→DeepSeek in §28). That mess **is** the context; nothing was cleaned up or removed. This is "documentation as infrastructure" taken literally: the repo is the memory.
+> **Fidelity over polish (intentional).** Working-process meta is left in *verbatim* — plan-mode markers, per-capture "Edits (out of plan mode)" and "Verification" checklists, `✅ DONE (commit …)` stamps, and the occasional decision reversed in place (silver `lingua`→LLM in §27; Bedrock→DeepSeek in §28, verified live in §29). That mess **is** the context; nothing was cleaned up or removed. This is "documentation as infrastructure" taken literally: the repo is the memory.
 >
-> **Status.** A point-in-time snapshot of a *living* working doc (re-synced through §28 — Bedrock→DeepSeek). For *current* authoritative state, the numbered docs + ADRs + ledgers win; this file is the historical reasoning record.
+> **Status.** A point-in-time snapshot of a *living* working doc (re-synced through **§29 — the LLM-live milestone**). For *current* authoritative state, the numbered docs + ADRs + ledgers win; this file is the historical reasoning record.
 >
 > *(Section numbers `§n` referenced throughout the curated docs point at the headings below.)*
 
@@ -980,3 +980,18 @@ Root: `CLAUDE.md` (lean orientation: identity, status, governing principles, nav
 **Part C — deferred to a build unit (`/start-step`):** the `OpenAICompatLlmClient` port + the silver `Dissector` (cheap model, structured contract) + its behavioral gate, built as a proper v0 build step.
 
 **Verification (Part A):** ADR-0017 exists + indexed; ADR-0012 retitled (OpenAI-compatible, DeepSeek default); **grep finds no stale "Bedrock quota blocks / Kimi chosen / only bronze live" framing** in the living docs; ERR-001 reads Mitigated; CLAUDE.md status shows no open blocker; pushed. *(Part B verified by the smoke-test completion once the key lands.)*
+
+---
+
+## 29 — Milestone: LLM verified LIVE on DeepSeek + milestone documentation
+
+**Context.** Part B of §28 completed. Tarig registered DeepSeek, **rotated the key** (it had been pasted in plaintext), funded a **$2 balance** (DeepSeek's "free signup tokens" did **not** apply → `402 Insufficient Balance` until funded), and stored the key in Secrets Manager (`jobfetcher/deepseek`). `scripts/deepseek_smoke.py` → **HTTP 200 from `deepseek-v4-flash`** (2026-06-24). **The LLM path is LIVE; ERR-001 is worked around.** This is the project's first "it works" milestone after weeks blocked (committed `d3e1bb3`).
+
+**Milestone documentation** (Tarig: *"document this milestone everywhere, thoroughly, so anyone continuing understands the why"*):
+- **Journal Part 2 → new §18 "⭐ Milestone — the LLM goes live"** — the full arc: the decision to stop waiting, the option comparison (local / DeepSeek / Anthropic-direct) grounded in the real 4 GB hardware, the OpenAI-compatible-adapter insight, the `402` balance detour, the verified PASS, and *what it means* (Mitigated-not-Resolved · quota-scope inverted · the architecture paid for itself · the honest China-hosted/privacy cost). Renumbered pointers→§19, through-line→§20 (folded the pivot in).
+- **NEW `CHANGELOG.md`** (repo root, Keep-a-Changelog; per [ADR-0013]/methodology) — `[Unreleased] v0.1` with the milestone headline + build-phase Added/Changed/Notes.
+- **ADR-0017 status** → "✅ Verified live 2026-06-24"; **phase-index + CLAUDE.md status** → "verified live"; **errors.md** already carries the Verified note.
+- Re-synced the working-document archive through §29.
+- **Annotated git tag** `milestone/llm-live-2026-06-24` marks the moment.
+
+**Verification:** journal §18 exists + renumbering clean (pointers §19, through-line §20); `CHANGELOG.md` at root; ADR-0017 / phase-index / CLAUDE read "verified live"; tag created + pushed; all on `main`.

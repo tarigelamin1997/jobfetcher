@@ -2,7 +2,7 @@
 
 > Live source of truth for progress. Status legend: ⬜ not started · 🚧 in progress · ✅ shipped (tagged release). `/start-step` sets 🚧, `/close-step` sets ✅ ([ADR-0013](../adr/0013-enforcement-gate-trio-branch-pr.md)). The roadmap beyond v0 is a **[living hypothesis](../03-roadmap.md)** — re-derived after each release; update this table as reality unfolds.
 
-**Current state:** **v0 in progress — Step 0 (ingestion coverage probe).** Design + docs complete. First code exists: a validated, `SearchSpec`-driven JSearch probe ([`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py)) proven end-to-end against the live API; JSearch key in Secrets Manager; **LLM = OpenAI-compatible API, v0 backend = DeepSeek** ([ADR-0017](../adr/0017-llm-transport-openai-compatible-deepseek.md)) — no new-account quota gate, so Bedrock's wall ([ERR-001](errors.md)) is **worked around: no open blocker.** Full 18-query sweep + the DeepSeek smoke test + v0 build steps 1+ are next.
+**Current state:** **v0 in progress — Step 0 (ingestion coverage probe).** Design + docs complete. First code exists: a validated, `SearchSpec`-driven JSearch probe ([`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py)) proven end-to-end against the live API; JSearch key in Secrets Manager; **LLM = OpenAI-compatible API, v0 backend = DeepSeek** ([ADR-0017](../adr/0017-llm-transport-openai-compatible-deepseek.md)) — **✅ verified live 2026-06-24** (`deepseek-v4-flash`, HTTP 200); Bedrock's wall ([ERR-001](errors.md)) is **worked around: no open blocker.** Full 18-query sweep + the silver `Dissector` build (Step 4) are next.
 
 | Release | Adds | Status |
 |---|---|---|

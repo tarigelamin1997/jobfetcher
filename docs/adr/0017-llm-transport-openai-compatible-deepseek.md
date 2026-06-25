@@ -1,7 +1,7 @@
 # ADR-0017 — LLM transport: OpenAI-compatible API; v0 provider = DeepSeek (Bedrock parked)
 
 ## Status
-Accepted (supersedes the Bedrock-Converse *transport* of [ADR-0012](0012-model-agnostic-llm.md))
+Accepted (supersedes the Bedrock-Converse *transport* of [ADR-0012](0012-model-agnostic-llm.md)) · **✅ Verified live 2026-06-24** — `scripts/deepseek_smoke.py` → HTTP 200 from `deepseek-v4-flash` (see [ERR-001](../ledgers/errors.md) + [journal §18](../01-session-decision-journal.md))
 
 ## Context
 [ADR-0012](0012-model-agnostic-llm.md) made the LLM model-agnostic but bound the *transport* to Amazon Bedrock's Converse API. Bedrock then blocked us: the new-account **daily-token quota = 0 / non-adjustable** ([ERR-001](../ledgers/errors.md)) throttled *every* model (Anthropic and Kimi alike) for weeks, with no lift timeline. Waiting on AWS is not a plan. The architecture's whole point ([ADR-0015](0015-type-replaceable-pipeline-stages.md), P2) is that a blocked stage is broken by the *minimal migration* — here, swapping the LLM transport behind the `LlmClient` port. A local option was checked (RTX 3050, **4 GB VRAM** → 3–7B models only, and a laptop can't run the deployed serverless pipeline).
