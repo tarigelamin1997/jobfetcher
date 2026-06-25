@@ -4,11 +4,11 @@
 > - **Curated narrative:** [`../01-session-decision-journal.md`](../01-session-decision-journal.md) — Part 1 = design session (§1–11), Part 2 = build phase (§12–27).
 > - **Formal decisions:** [`../adr/`](../adr/) · **live state:** [`../ledgers/`](../ledgers/).
 >
-> **Read it for the *why behind the why*.** It includes everything: the prior (scrapped) project that was absorbed (§1), the full ~150-question discovery intake (§2), the section-by-section captured understanding (§3), the architecture synthesis and its pivots (§4–§8), the governing principles (§9), the status checkpoints (§10), the methodology adoption (§11), and every build-phase capture (§12–§27) — each with its original *Context / Decision / Edits / Verification* working-notes.
+> **Read it for the *why behind the why*.** It includes everything: the prior (scrapped) project that was absorbed (§1), the full ~150-question discovery intake (§2), the section-by-section captured understanding (§3), the architecture synthesis and its pivots (§4–§8), the governing principles (§9), the status checkpoints (§10), the methodology adoption (§11), and every build-phase capture (§12–§28) — each with its original *Context / Decision / Edits / Verification* working-notes.
 >
-> **Fidelity over polish (intentional).** Working-process meta is left in *verbatim* — plan-mode markers, per-capture "Edits (out of plan mode)" and "Verification" checklists, `✅ DONE (commit …)` stamps, and the occasional decision reversed in place. That mess **is** the context; nothing was cleaned up or removed. This is "documentation as infrastructure" taken literally: the repo is the memory.
+> **Fidelity over polish (intentional).** Working-process meta is left in *verbatim* — plan-mode markers, per-capture "Edits (out of plan mode)" and "Verification" checklists, `✅ DONE (commit …)` stamps, and the occasional decision reversed in place (e.g. silver `lingua`→LLM in §27; Bedrock→DeepSeek in §28). That mess **is** the context; nothing was cleaned up or removed. This is "documentation as infrastructure" taken literally: the repo is the memory.
 >
-> **Status.** A point-in-time snapshot of a *living* working doc (as of the last build-phase capture). For *current* authoritative state, the numbered docs + ADRs + ledgers win; this file is the historical reasoning record, re-synced on later captures.
+> **Status.** A point-in-time snapshot of a *living* working doc (re-synced through §28 — Bedrock→DeepSeek). For *current* authoritative state, the numbered docs + ADRs + ledgers win; this file is the historical reasoning record.
 >
 > *(Section numbers `§n` referenced throughout the curated docs point at the headings below.)*
 
@@ -948,3 +948,35 @@ Root: `CLAUDE.md` (lean orientation: identity, status, governing principles, nav
 6. **`docs/ledgers/decisions-locked.md`** — rows: type-replaceability tenet; **silver = LLM dissection on all postings** (supersede the §26 lingua/pure-Python row); gold = LLM FilterStrategy. Remove the lingua/lang-detect references.
 
 **Verification:** ADR-0015 + ADR-0016 exist + indexed; design-philosophy carries the replaceability tenet; 02-architecture silver describes the LLM dissection + canonicalization + ports + corrected quota scope; **grep finds no stale "lingua / pure-Python silver / silver quota-independent" claim** anywhere; build-plan Steps 4/4b updated; decisions-locked reconciled; pushed.
+
+---
+
+## 28 — Route around Bedrock: OpenAI-compatible `LlmClient`, v0 backend = DeepSeek API (Bedrock parked)
+
+**Context.** Bedrock's new-account daily-token quota = **0** ([ERR-001](docs/ledgers/errors.md)) has blocked the LLM for weeks with no lift timeline. **Decision: stop waiting on Bedrock; route around it via the model-agnostic port ([ADR-0012](docs/adr/0012-model-agnostic-llm.md)) — the exact P2 bottleneck-break the architecture was built for.** Hardware checked (RTX 3050, **4 GB VRAM** → local caps at 3–7B, not serverless). Compared DeepSeek API vs local Ollama vs Anthropic-direct; **Tarig chose DeepSeek API** — cheapest (V4 Flash **$0.14/$0.28** per M, **5M free** signup tokens, **~$0.50–1/mo** at our volume), OpenAI-compatible, serverless-ready.
+
+**The design (more minimal + universal than Bedrock Converse):**
+- **One `OpenAICompatLlmClient` behind the `LlmClient` port.** OpenAI-compatible is the de-facto standard ⇒ the **backend is pure config**: `base_url` + `api_key` (Secrets Manager) + `model` per task. DeepSeek API, Ollama, OpenRouter, Anthropic (a thin 2nd adapter), and Bedrock-when-unblocked are all config swaps. **This permanently kills the single-provider fragility Bedrock just inflicted.**
+- **v0 default backend = DeepSeek API** (`https://api.deepseek.com`, OpenAI-compatible). Per-task models ([ADR-0012](docs/adr/0012-model-agnostic-llm.md)): **`deepseek-v4-flash`** for the bulk silver `Dissector` + gold `FilterStrategy`; **`deepseek-v4-pro`** for `Scorer`. *(Use the v4 ids — `deepseek-chat`/`deepseek-reasoner` aliases retire 2026-07-24.)*
+- **Structured output** via prompt + Pydantic (unchanged, portable).
+- **Honest privacy note:** JD text + (at scoring) the profile go to DeepSeek's **China-hosted** servers, whose ToS permits training on API inputs. Accepted for v0; the port lets us flip *scoring* to local Ollama or Anthropic-direct later if the CV/PII privacy matters.
+- **Bedrock → parked as one possible backend.** **ERR-001 → Mitigated/Worked-around** (the quota is still 0, but it no longer gates us); keep AWS case `178220019100382` open as "nice if it lifts." Kimi/Converse were only chosen because they were *on Bedrock* — now moot.
+
+**Quota consequence (reverses §27's caveat):** with DeepSeek (no new-account gate), the **whole pipeline is live-runnable now** — bronze + silver-dissection + gold + score — once the DeepSeek key is in Secrets Manager. The "only bronze live until ERR-001" caveat is gone.
+
+**Edits — Part A (docs → direct to `main`):**
+1. **NEW [ADR-0017] — LLM transport = OpenAI-compatible API; v0 provider = DeepSeek (Bedrock parked).** Rejected: stay-on-Bedrock (blocked, AWS-coupled), Bedrock-Converse-only (single-provider fragility — the failure we just hit), Anthropic-direct (pricier; kept as the privacy/quality fallback), local-only (4 GB-limited, not serverless). Records the cost + privacy trade + the per-task model split. + index.
+2. **[ADR-0012]** — retitle → "Model-agnostic LLM via OpenAI-compatible API (model + base_url in config)"; transport Bedrock Converse → OpenAI-compatible HTTP; default backend = DeepSeek API; Kimi removed as "chosen model"; Anthropic/Ollama/Bedrock = config-swap alternatives.
+3. **[ADR-0015]** — ports table: `Dissector`/`FilterStrategy`/`Scorer` "Bedrock model" → "OpenAI-compatible LLM (DeepSeek v0)".
+4. **`02-architecture.md`** — scoring/silver/gold + the Converse line (≈L222) + diagram labels: Bedrock → provider-agnostic OpenAI-compatible (v0 = DeepSeek); drop the Bedrock-quota-gated language (no gate on DeepSeek); whole pipeline live-runnable.
+5. **`04-v0-build-plan.md`** — Prereq 1: Bedrock-quota → **DeepSeek API key in Secrets Manager (`jobfetcher/deepseek`)**, WAIT-FOR = a 1-call `deepseek-v4-flash` completion; Step 4 (Dissector) + Step 5 (Scorer): OpenAI-compatible client + DeepSeek model ids; cost estimate → DeepSeek (~$1/mo); remove the ERR-001 WAIT-FOR gating; note the whole pipeline is now live-runnable.
+6. **`decisions-locked.md`** — replace the Bedrock-quota + Kimi/Converse rows → "LLM = OpenAI-compatible API; provider in config; v0 = DeepSeek API (Flash/Pro per task); Bedrock parked"; fix the silver/gold "only bronze live until ERR-001" rows → whole pipeline live on DeepSeek.
+7. **`errors.md` (ERR-001)** — status Open → **Mitigated (worked around via ADR-0017)**; add the update note; AWS case stays open as optional.
+8. **`CLAUDE.md`** — Current-status: drop "Open blocker: Bedrock quota = 0"; "Chosen LLM = Kimi via Converse" → "LLM = OpenAI-compatible API; v0 backend = DeepSeek API; Bedrock parked".
+9. **`README.md`** — "Amazon Bedrock (Kimi)" → "LLM via OpenAI-compatible API (DeepSeek; provider-agnostic)".
+
+**Part B — the live unblock (needs Tarig):** Tarig registers at `platform.deepseek.com` → hands over the API key → I store it in **Secrets Manager `jobfetcher/deepseek`** (never committed) → I write a minimal OpenAI-compatible **smoke test** (`scripts/deepseek_smoke.py`, key from Secrets Manager, 1 cheap call to `deepseek-v4-flash`) → a completion **proves ERR-001 is worked-around** and the pipeline is unblocked.
+
+**Part C — deferred to a build unit (`/start-step`):** the `OpenAICompatLlmClient` port + the silver `Dissector` (cheap model, structured contract) + its behavioral gate, built as a proper v0 build step.
+
+**Verification (Part A):** ADR-0017 exists + indexed; ADR-0012 retitled (OpenAI-compatible, DeepSeek default); **grep finds no stale "Bedrock quota blocks / Kimi chosen / only bronze live" framing** in the living docs; ERR-001 reads Mitigated; CLAUDE.md status shows no open blocker; pushed. *(Part B verified by the smoke-test completion once the key lands.)*

@@ -55,7 +55,7 @@ This is the **engine of the roadmap** (see [roadmap](03-roadmap.md)). After each
 
 > *Every pipeline stage is a swappable strategy behind a port; an upgrade is config + a new adapter, never a rewrite.*
 
-P2's evolution only works if stages can be **replaced by type, not just scaled by volume** — `lingua`→LLM, deterministic-filter→LLM-filter, JSearch→+Adzuna, Kimi→Claude. So each stage (`SourceAdapter` · `Dissector` · `FilterStrategy` · `Embedder` · `Scorer`) is a thin **port** with a **config-selected strategy** ([ADR-0015](adr/0015-type-replaceable-pipeline-stages.md), generalizing the model-agnostic LLM of [ADR-0012](adr/0012-model-agnostic-llm.md)). The seam *is* the point: it makes "break the bottleneck with the minimal migration" a config change instead of a rewrite — and it reads as a deliberately evolvable architecture.
+P2's evolution only works if stages can be **replaced by type, not just scaled by volume** — `lingua`→LLM, deterministic-filter→LLM-filter, JSearch→+Adzuna, Bedrock→DeepSeek (the exact swap ADR-0017 just made). So each stage (`SourceAdapter` · `Dissector` · `FilterStrategy` · `Embedder` · `Scorer`) is a thin **port** with a **config-selected strategy** ([ADR-0015](adr/0015-type-replaceable-pipeline-stages.md), generalizing the model-agnostic LLM of [ADR-0012](adr/0012-model-agnostic-llm.md)). The seam *is* the point: it makes "break the bottleneck with the minimal migration" a config change instead of a rewrite — and it reads as a deliberately evolvable architecture.
 
 ---
 

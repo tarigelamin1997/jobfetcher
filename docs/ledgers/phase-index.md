@@ -2,11 +2,11 @@
 
 > Live source of truth for progress. Status legend: ⬜ not started · 🚧 in progress · ✅ shipped (tagged release). `/start-step` sets 🚧, `/close-step` sets ✅ ([ADR-0013](../adr/0013-enforcement-gate-trio-branch-pr.md)). The roadmap beyond v0 is a **[living hypothesis](../03-roadmap.md)** — re-derived after each release; update this table as reality unfolds.
 
-**Current state:** **v0 in progress — Step 0 (ingestion coverage probe).** Design + docs complete. First code exists: a validated, `SearchSpec`-driven JSearch probe ([`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py)) proven end-to-end against the live API; JSearch key in Secrets Manager; chosen LLM = Kimi K2 Thinking. **Blocker:** account-wide Bedrock daily-token quota = 0 ([ERR-001](errors.md)) gates the scoring path. Full 18-query sweep + v0 build steps 1+ are next.
+**Current state:** **v0 in progress — Step 0 (ingestion coverage probe).** Design + docs complete. First code exists: a validated, `SearchSpec`-driven JSearch probe ([`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py)) proven end-to-end against the live API; JSearch key in Secrets Manager; **LLM = OpenAI-compatible API, v0 backend = DeepSeek** ([ADR-0017](../adr/0017-llm-transport-openai-compatible-deepseek.md)) — no new-account quota gate, so Bedrock's wall ([ERR-001](errors.md)) is **worked around: no open blocker.** Full 18-query sweep + the DeepSeek smoke test + v0 build steps 1+ are next.
 
 | Release | Adds | Status |
 |---|---|---|
-| **v0.1** | One Lambda: 1 source → S3 + Postgres → Bedrock score → daily email; Terraform, Secrets Manager, tests, minimal CI | 🚧 Step 0 (probe built + validated; `SearchSpec` + Secrets Manager done; scoring gated on ERR-001) |
+| **v0.1** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → daily email; Terraform, Secrets Manager, tests, minimal CI | 🚧 Step 0 (probe built + validated; `SearchSpec` + Secrets Manager done; LLM unblocked via DeepSeek — ADR-0017) |
 | M1 · v0.2 | CV tailoring (reliable renderer, draft→review) | ⬜ (hypothesis) |
 | M2 · v0.3 | Multi-source + clustering dedup + Suspected-Duplicates | ⬜ (hypothesis) |
 | M3 · v0.4 | Single Lambda → Step Functions | ⬜ (hypothesis) |

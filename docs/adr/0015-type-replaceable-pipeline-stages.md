@@ -12,10 +12,10 @@ The pipeline is an evolutionary architecture: stages get *upgraded by type* over
 | Port | Job | v0 strategy | Swap examples |
 |---|---|---|---|
 | `SourceAdapter` | fetch + normalize a source | JSearch | + Adzuna / Bayt (M2) |
-| `Dissector` | LLM-dissect a JD → structured fields | cheap Bedrock model | stronger model; fine-tuned extractor |
+| `Dissector` | LLM-dissect a JD → structured fields | cheap OpenAI-compat model (`deepseek-v4-flash`) | stronger model; fine-tuned extractor |
 | `FilterStrategy` | cut silver → gold candidates | LLM filter | deterministic / embedding filter |
 | `Embedder` | text → vector (pgvector) | Titan / Cohere (M2) | any embedding model |
-| `Scorer` | score fit + explain | strong Bedrock model | any Converse model |
+| `Scorer` | score fit + explain | strong OpenAI-compat model (`deepseek-v4-pro`) | any model/provider (config) |
 | (`Notifier`, `CVRenderer`) | later stages | — | — |
 
 Each port is a small interface; strategies are registered + chosen via config (the same pattern as the model id). Swapping a stage's *type* is adding an adapter + flipping config — no downstream rewrite.

@@ -5,7 +5,7 @@
 ---
 
 ## v0 in one sentence
-EventBridge (daily) → **one Lambda**: fetch from **one source** → land raw in **S3** + upsert rows in **Postgres** → **Bedrock** scores each new job against the profile → **daily email** with the scored shortlist. Terraform + Secrets Manager + tests + minimal CI. **That's all.**
+EventBridge (daily) → **one Lambda**: fetch from **one source** → land raw in **S3** + upsert rows in **Postgres** → an **LLM (DeepSeek, OpenAI-compatible API)** scores each new job against the profile → **daily email** with the scored shortlist. Terraform + Secrets Manager + tests + minimal CI. **That's all.**
 
 **Explicitly NOT in v0:** CV tailoring · multi-source · clustering dedup (one source ⇒ only exact-id re-fetch dedup) · Step Functions · Notion · near-miss/graduation · warehouse/dbt · full observability. Each is a later migration.
 
@@ -16,7 +16,7 @@ EventBridge (daily) → **one Lambda**: fetch from **one source** → land raw i
 ---
 
 ## Prerequisites (one-time, before the apply sequence)
-1. **AWS account** in **us-east-1**, **Bedrock-ready for the chosen model** (Kimi K2 Thinking — `moonshot.kimi-k2-thinking`, ON_DEMAND) — two things (confirmed real in [ERR-001](ledgers/errors.md)): (a) **model access** enabled for the moonshot model; (b) **per-day token quota > 0** — a brand-new account is gated at 0 (**non-adjustable, account-wide across *all* models**) and throttles every call with *"Too many tokens per day"*; this lifts via account maturity or an AWS Support case (a valid payment method + free credits do **not** bypass it). *Note:* the `us.anthropic.*` **inference-profile** requirement (base id → `ValidationException`) is **Anthropic-4.x-only** — Kimi is ON_DEMAND and invokes its base id directly. · *WAIT-FOR:* a 1-token `converse` against `moonshot.kimi-k2-thinking` returns a completion (today: still throttles → the quota gate). · *FAILURE-MODE:* `ThrottlingException`/0-quota → quota; `AccessDeniedException` → model access/region; `ValidationException` → wrong id (or an Anthropic base id used without its inference profile).
+1. **AWS account** in **us-east-1**, + a **DeepSeek API key in Secrets Manager** (`jobfetcher/deepseek`, never committed). The LLM transport is the **OpenAI-compatible API** ([ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)); v0 provider = **DeepSeek** (`deepseek-v4-flash` cheap / `deepseek-v4-pro` strong) — **no new-account quota gate** (unlike Bedrock; [ERR-001](ledgers/errors.md) is now worked around, not blocking). Register at `platform.deepseek.com` (5M free signup tokens cover the backfill). · *WAIT-FOR:* a 1-call `deepseek-v4-flash` chat-completion returns a valid completion. · *FAILURE-MODE:* `401` → key/secret wrong; `model not found` → wrong model id; `429` → backoff. *(Bedrock stays a parked, config-swappable backend — flip `base_url`+`model` if its quota ever lifts.)*
 2. **One job-source API key** — JSearch (RapidAPI) **or** Adzuna app id+key. (v0 uses exactly one; the second source is M2.) Store it in **Secrets Manager** (`jobfetcher/jsearch`), never env/repo.
 3. **SES**: verify the sender identity and the recipient (sandbox mode is fine for a single recipient). · *FAILURE-MODE:* `MessageRejected` → identity not verified.
 4. **Candidate profile**: real `profile.yml`/`profile.json` kept **locally + gitignored**; a **sanitized sample** committed so the repo is runnable by others.
@@ -45,7 +45,7 @@ Create the Python package layout (ports-&-adapters from day one, so M1+ stay cle
 - **FAILURE-MODE:** import path tangles → fix the package layout before writing logic, not after.
 
 ### Step 2 — Data contract + v0 schema
-Define **Pydantic** models for the normalized posting + the Bedrock score output (the data-contract boundary). Write the **Alembic** migration for the v0 tables: **`bronze_posting`** (immutable raw landing), `posting` (silver — normalized), `cluster` (trivial 1:1 in v0), `score`, `profile`. Silver `posting` **retains all source fields (lossless)** — v0 has no marts, but because nothing is dropped (and bronze is immutable), the analytics dimensions ([ADR-0011](adr/0011-dimensional-analytical-model.md), M5/M6) can be modeled retroactively over history.
+Define **Pydantic** models for the normalized posting + the LLM score output (the data-contract boundary). Write the **Alembic** migration for the v0 tables: **`bronze_posting`** (immutable raw landing), `posting` (silver — normalized), `cluster` (trivial 1:1 in v0), `score`, `profile`. Silver `posting` **retains all source fields (lossless)** — v0 has no marts, but because nothing is dropped (and bronze is immutable), the analytics dimensions ([ADR-0011](adr/0011-dimensional-analytical-model.md), M5/M6) can be modeled retroactively over history.
 - **WHY:** contracts at the boundary prevent "assumed-from-inspection" bugs; Alembic from day one makes schema evolution first-class.
 - **WAIT-FOR:** `alembic upgrade head` creates the tables; a round-trip insert/select of a sample posting works.
 - **FAILURE-MODE:** validation errors on real API payloads → tighten the adapter's normalization, not the contract.
@@ -57,7 +57,7 @@ Modules/resources: S3 bucket (`force_destroy = true`), Secrets Manager entries (
 - **FAILURE-MODE:** IAM `AccessDenied` at runtime → the role is missing a specific permission; add exactly that one, not `*`.
 
 ### Step 4 — JSearch adapter + bronze→silver landing
-Implement the **JSearch adapter** behind the source-port interface: call per query (keywords + `country` + `date_posted`), **paginate to a config page-cap**, with rate-limit/backoff + **quota-header awareness** (stop gracefully near quota, landing what you have). **Bronze:** write each raw result *untouched* to S3 `raw/jsearch/{date}/` + a `bronze_posting` row (immutable). **Silver:** `clean` → **LLM `Dissector`** (a *cheap* Bedrock model → structured contract: `skills[]`+levels, sector, normalized title, seniority, location, language; populates the dimensional tables — [ADR-0016](adr/0016-llm-dissection-at-silver.md)) → `fingerprint` → field-map into `posting`; **exact-id dedup on re-fetch** (embeddings + pgvector blocking are M2). **Quota scope:** only **bronze** (fetch+land) is *live-runnable* until [ERR-001](ledgers/errors.md) lifts — silver-onward uses Bedrock — but the whole pipeline is **build + unit/integration-test-able now with Bedrock mocked**. Thread the **correlation `run_id`**. Request-budget knobs (queries, page-cap, date window) live in config.
+Implement the **JSearch adapter** behind the source-port interface: call per query (keywords + `country` + `date_posted`), **paginate to a config page-cap**, with rate-limit/backoff + **quota-header awareness** (stop gracefully near quota, landing what you have). **Bronze:** write each raw result *untouched* to S3 `raw/jsearch/{date}/` + a `bronze_posting` row (immutable). **Silver:** `clean` → **LLM `Dissector`** (a *cheap* model `deepseek-v4-flash` → structured contract: `skills[]`+levels, sector, normalized title, seniority, location, language; populates the dimensional tables — [ADR-0016](adr/0016-llm-dissection-at-silver.md)) → `fingerprint` → field-map into `posting`; **exact-id dedup on re-fetch** (embeddings + pgvector blocking are M2). **Live now:** on DeepSeek there's no quota gate ([ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)), so the whole **bronze→silver→gold→score** path is live-runnable once the key lands — and unit/integration-testable with the LLM mocked. Thread the **correlation `run_id`**. Request-budget knobs (queries, page-cap, date window) live in config.
 - **WHY:** bronze-first = the land-daily guarantee + replay; the adapter is the seam that makes M2 (multi-source) a one-file add.
 - **WAIT-FOR:** a real call lands raw to S3 + `bronze_posting`, and ≥1 normalized `posting` in silver; re-running the same day adds no duplicate bronze rows for the same source-id.
 - **FAILURE-MODE:** API shape drift → the contract catches it loudly (map the field in the adapter); quota exhausted → land what you got + log, never crash the run.
@@ -68,11 +68,11 @@ Apply the **`FilterStrategy`** over silver → mark the **gold candidate** subse
 - **WAIT-FOR:** an obviously-irrelevant posting (wrong location/title) is **excluded** from gold while a matching one is included.
 - **FAILURE-MODE:** filter too aggressive → real fits dropped before scoring. Keep it *coarse* (the LLM does the fine judgment); log filtered counts.
 
-### Step 5 — Scorer (Bedrock)
-Implement scoring **over the gold candidates only**: load profile, build the 7-factor ATS system prompt, call Bedrock **via the Converse API** with the **config-selected model id** ([ADR-0012](adr/0012-model-agnostic-llm.md); **chosen model `moonshot.kimi-k2-thinking`** — Kimi K2 Thinking, ON_DEMAND; still gated by the ERR-001 quota) at **temperature 0**, with prompt-based structured-output enforcement, parse into the score contract (`score`, `fit_category`, `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified`), write `score` rows. Apply the **single config threshold** (default **60**) + hard-floor **50** + near-miss band **10** — **read from the per-user `profile` config at runtime, never hardcoded.** This one threshold gates the email shortlist now (and CV writing from M1). Stamp the active threshold onto each run's records.
+### Step 5 — Scorer (LLM)
+Implement scoring **over the gold candidates only**: load profile, build the 7-factor ATS system prompt, call the **LLM via the OpenAI-compatible API** with the **config-selected model** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md); v0 = `deepseek-v4-pro`) at **temperature 0**, with prompt-based structured-output enforcement, parse into the score contract (`score`, `fit_category`, `strengths`, `gaps`, `strategic_assessment`, `skills_extracted`, `sector`, `poster_type`, `legitimacy_verified`), write `score` rows. Apply the **single config threshold** (default **60**) + hard-floor **50** + near-miss band **10** — **read from the per-user `profile` config at runtime, never hardcoded.** This one threshold gates the email shortlist now (and CV writing from M1). Stamp the active threshold onto each run's records.
 - **WHY:** scoring is the core value; explainability is the value, not just the number.
 - **WAIT-FOR:** the same JD+profile scored twice lands within ±3 points (determinism check).
-- **FAILURE-MODE:** `ValidationException` → wrong model id/region; malformed JSON → tighten the output schema / add a single retry.
+- **FAILURE-MODE:** `401` / `model not found` → key or model id; `429` → backoff; malformed JSON → tighten the output schema / add a single retry.
 
 ### Step 6 — Notifier (SES daily digest)
 Render a clean daily email: top matches (≥ threshold) with score, one-line why, and the apply link; a short "below threshold" count. Send via SES.
@@ -88,7 +88,7 @@ Wire fetch → score → notify in one handler, idempotent for a given run date 
 
 ### Step 8 — Tests (the pyramid, v0 slice)
 - **Unit:** normalization, fingerprint, score-output parsing, threshold routing, email rendering.
-- **Integration:** the handler against **LocalStack/moto** (S3, Secrets) + a local Postgres; Bedrock mocked.
+- **Integration:** the handler against **LocalStack/moto** (S3, Secrets) + a local Postgres; the LLM mocked.
 - **Live smoke:** one real end-to-end run against deployed infra.
 - **WHY:** reliability + clone-and-run confidence; tests are the negative-case engine for the gate.
 - **WAIT-FOR:** all green locally + one clean live smoke run.
@@ -126,7 +126,7 @@ All VGs must pass before tagging `v0.1.0`. Any failure → log an `ERR-NNN` in [
 ---
 
 ## v0 cost estimate (sanity)
-Lambda (≈30 invokes/day) ~$0 · S3 (MBs) ~$0 · Secrets Manager ~$1 · Bedrock (≈30 scores/day, **Kimi K2 Thinking** — a reasoning model ⇒ more tokens; swap a cheaper model for high-volume steps later per [ADR-0012](adr/0012-model-agnostic-llm.md)) ~$3–8 · SES (≈30 emails/mo) ~$0 · Postgres: **Aurora Serverless v2** ~$40/mo floor *or* **RDS t4g.micro** ~$12/mo. **`terraform destroy` → ~$0** when idle. (The DB dominates idle cost — a real input to D-v0-1.)
+Lambda (≈30 invokes/day) ~$0 · S3 (MBs) ~$0 · Secrets Manager ~$1 · LLM (**DeepSeek** via the OpenAI-compatible API — `deepseek-v4-flash` for dissection + `deepseek-v4-pro` for scoring, per [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) **~$1/mo** (5M free signup tokens cover the backfill) · SES (≈30 emails/mo) ~$0 · Postgres: **Aurora Serverless v2** ~$40/mo floor *or* **RDS t4g.micro** ~$12/mo. **`terraform destroy` → ~$0** when idle. (The DB dominates idle cost — a real input to D-v0-1.)
 
 ## On completion
 Tag `v0.1.0`, write its release notes (what it does, how to deploy/destroy, the VG evidence), append the v0 **Produces** row to the contract ledger, set v0 ✅ in the [phase index](ledgers/phase-index.md) — then run the [migration-decision protocol](03-roadmap.md#the-migration-decision-protocol-how-the-next-step-is-actually-chosen): use it, find the top-3 bottlenecks, and design M1 (expected: CV tailoring) just-in-time.

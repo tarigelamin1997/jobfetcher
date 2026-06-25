@@ -27,7 +27,7 @@ flowchart LR
   subgraph OP["Operational plane — the daily tool (AWS serverless)"]
     SCHED[EventBridge cron] --> FETCH[fetch: source adapters]
     FETCH --> DEDUP[dedup: cluster &amp; surface]
-    DEDUP --> SCORE[score: Bedrock LLM, explainable]
+    DEDUP --> SCORE[score: LLM via DeepSeek, explainable]
     SCORE --> CV[tailor CV: DOCX + PDF, draft→review]
     CV --> NOTIFY[notify: email + Notion]
     FETCH -. raw .-> S3[(S3)]
@@ -45,14 +45,14 @@ flowchart LR
   NOTIFY --> NOTION
 ```
 
-- **Operational plane:** scheduled run → fetch (pluggable source adapters) → dedup (groups suspected duplicates and surfaces them — never silently hides a real job) → Bedrock scoring with explanations → CV tailoring (reliable renderer, human-review gate) → email + Notion. State in **Postgres**, raw objects + CVs in **S3**, credentials in **Secrets Manager**, region **us-east-1**.
+- **Operational plane:** scheduled run → fetch (pluggable source adapters) → dedup (groups suspected duplicates and surfaces them — never silently hides a real job) → LLM scoring (DeepSeek) with explanations → CV tailoring (reliable renderer, human-review gate) → email + Notion. State in **Postgres**, raw objects + CVs in **S3**, credentials in **Secrets Manager**, region **us-east-1**.
 - **Analytical plane (DE depth):** **dbt** models the medallion into marts (with tests, lineage, incremental) — on **Postgres** by default; a dedicated **Snowflake** warehouse is added *only if* a real analytics bottleneck ever justifies it. Powers a live Skill-Demand tracker and weekly Sector Intelligence.
 
 > **v0 is much smaller than the diagram:** one scheduled Lambda → one source → score → daily email. The diagram is the *destination*; the [roadmap](docs/03-roadmap.md) is the path.
 
 ## Tech stack
 
-Python · AWS (Lambda, EventBridge, S3, Secrets Manager; Step Functions + more added by migration) · **PostgreSQL** · **dbt** · **Amazon Bedrock** (model-agnostic; Kimi K2 Thinking) · **Terraform** · GitHub Actions · Notion API · SES. Snowflake / Debezium-CDC / Spark are *documented scale-paths or live in sibling projects* — see the [decision journal](docs/01-session-decision-journal.md).
+Python · AWS (Lambda, EventBridge, S3, Secrets Manager; Step Functions + more added by migration) · **PostgreSQL** · **dbt** · **LLM via OpenAI-compatible API** (model-agnostic; v0 = DeepSeek) · **Terraform** · GitHub Actions · Notion API · SES. Snowflake / Debezium-CDC / Spark are *documented scale-paths or live in sibling projects* — see the [decision journal](docs/01-session-decision-journal.md).
 
 ## Documentation
 
