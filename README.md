@@ -2,7 +2,7 @@
 
 **A serverless job-matching pipeline that scores roles against your real profile and tailors a CV for the good ones — built as an *evolutionary architecture* you can watch grow, one deliberate migration at a time.**
 
-> **Status:** 🏗️ Built in the open. Currently building **v0** — the ingestion probe (Step 0) is validated against the live API. This is an evolutionary project — it starts intentionally small and grows through a sequence of clean, documented releases. See the [roadmap](docs/03-roadmap.md) and live [phase index](docs/ledgers/phase-index.md).
+> **Status:** 🏗️ Built in the open. Building **v0**: the ingestion probe (Step 0) is validated against the live API, and — as of **2026-06-24** — the **LLM scoring path is verified live**, running on **DeepSeek** through a provider-agnostic OpenAI-compatible client ([ADR-0017](docs/adr/0017-llm-transport-openai-compatible-deepseek.md)) after an AWS Bedrock new-account quota wall was *routed around, not waited out*. An evolutionary project — it starts intentionally small and grows through a sequence of clean, documented releases ([CHANGELOG](CHANGELOG.md) · [roadmap](docs/03-roadmap.md) · live [phase index](docs/ledgers/phase-index.md)).
 
 ---
 
