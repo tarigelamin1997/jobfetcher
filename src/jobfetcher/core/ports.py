@@ -180,3 +180,33 @@ class Repository(Protocol):
     def set_posting_cluster(self, posting_id: str, cluster_id: str) -> None:
         """Set `posting.cluster_id` — attach a posting to its cluster."""
         ...
+
+    def get_gold_candidates(self) -> "list[tuple[str, str, DissectedPosting]]":
+        """Read postings with `status='gold_candidate'` as `(posting_id, cluster_id,
+        DissectedPosting)` triples — the Scorer's input set. The `cluster_id` is the key the
+        `score` row is written under (1:1 with cluster in v0). **Ordered by `posting_id`** so
+        a run is deterministic. Raises `RepositoryError` on a backend failure."""
+        ...
+
+    def save_score(
+        self,
+        *,
+        cluster_id: str,
+        score: int,
+        fit_category: str,
+        strengths: list[Any],
+        gaps: list[Any],
+        strategic_assessment: str,
+        poster_type: str,
+        legitimacy_verified: bool,
+        previous_score: int | None = None,
+    ) -> str:
+        """Upsert a `score` row keyed on `cluster_id` (1:1 with cluster). Idempotent —
+        re-scoring overwrites; the prior `score` is carried into `previous_score` when one
+        exists (near-miss re-scoring trail). Returns the `cluster_id`. Raises `RepositoryError`
+        on a backend failure."""
+        ...
+
+    def mark_scored(self, posting_id: str) -> None:
+        """Mark a posting done: set `posting.status = 'scored'`."""
+        ...

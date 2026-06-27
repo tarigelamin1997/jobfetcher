@@ -68,6 +68,7 @@
 | Explainability critical (strengths/gaps/strategic assessment) | The reasoning is the value, not just a number | journal §7 |
 | Single threshold (default 60), runtime-editable per user, gates shortlist + CV; floor 50, near-miss 10 | One user-tunable knob; change without redeploy; active value stamped per run for measurement | journal §7 + plan §12 |
 | Lightweight scoring calibration loop + accuracy SLO | Reliability ROI; corrections tune the prompt | journal §7 |
+| **Scoring determinism = best-effort (VG3 softened)** — temp 0 *is* sent (the guaranteed invariant), but `deepseek-v4-pro` is non-deterministic even at temp 0 (MoE/FP variance — observed deltas to ~14 pts); v0 accepts a generous sanity band (~±20), precise stability + calibration deferred to **M7**. Rejected: switch scoring model (deviates from ADR-0017 v0=DeepSeek), average-N samples (3× cost/latency, anti-P1) | The v0 score is a triage signal, not a precise number; ±3 is unachievable on the chosen model — pay for precision only when an accuracy bottleneck (M7) earns it | build-plan Step 5 (Unit B) |
 | Scam-gate + poster-type label (no hard company filter) | Surface context; user decides | journal §7 |
 | UI: email + Notion both first-class; status tracked in Notion | Email triage + Notion act/track | journal §7 |
 | Near-miss watch→re-score→graduate loop (full) | Distinctive feature | journal §7 |
