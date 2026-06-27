@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from .models import DissectedPosting
+    from .profile import Profile
     from .search_spec import SearchSpec
 
 
@@ -62,6 +63,31 @@ class SourceAdapter(Protocol):
         network error stops iteration gracefully, yielding whatever was already fetched. A
         genuine misconfiguration — no resolvable API key, or an auth/subscription rejection
         (HTTP 401/403) — raises `SourceError`, so a broken credential fails loudly.
+        """
+        ...
+
+
+class FilterError(Exception):
+    """A `FilterStrategy` could not produce a verdict (e.g. the LLM filter's output was
+    unparseable after a retry). Mirrors the `LlmError` style — the gold step catches it and
+    **fails open** (includes the posting), so a real fit is never dropped before scoring."""
+
+
+class FilterStrategy(Protocol):
+    """Coarse gold filter (ADR-0015/0016): a per-posting "likely-fit?" verdict over the
+    *already-dissected* silver fields + the spec targeting vs the candidate profile.
+
+    Type-replaceable: the v0 default is `DeterministicFilterStrategy` (no LLM — P1 at v0
+    volume); `LlmFilterStrategy` is built + selectable. Kept **coarse + permissive** on
+    purpose — the Scorer does the fine judgment; this only cuts the obviously-irrelevant.
+    """
+
+    def filter(
+        self, spec: "SearchSpec", profile: "Profile", posting: "DissectedPosting"
+    ) -> bool:
+        """Return `True` if the posting is a *likely* fit (keep for scoring), `False` to drop.
+
+        May raise `FilterError` only when no verdict is possible; the caller fails open.
         """
         ...
 
@@ -121,4 +147,36 @@ class Repository(Protocol):
     def get_posting(self, posting_id: str) -> "DissectedPosting | None":
         """Read a `posting` row back into the `DissectedPosting` contract, or `None` if no
         such id exists (a missing id is not an error)."""
+        ...
+
+    def get_profile(self, user_id: str) -> "dict[str, Any] | None":
+        """Read a `profile` row: `{profile, threshold, hard_floor, near_miss_band}` (the
+        JSONB payload + the numeric knobs), or `None` if no such user exists. The caller
+        builds a `Profile` from the `profile` key (`Profile.from_jsonb`)."""
+        ...
+
+    def get_silver_postings(
+        self, *, limit: int | None = None
+    ) -> "list[tuple[str, DissectedPosting]]":
+        """Read postings with `status='silver'` as `(posting_id, DissectedPosting)` pairs —
+        the id is needed to mark/cluster each. The gold step's input set."""
+        ...
+
+    def mark_gold_candidate(self, posting_id: str) -> None:
+        """Promote a posting: set `posting.status = 'gold_candidate'`."""
+        ...
+
+    def upsert_cluster(
+        self,
+        *,
+        cluster_id: str,
+        representative_posting_id: str,
+        posting_count: int = 1,
+    ) -> str:
+        """Create (or no-op if it exists) a `cluster` row. v0 clusters are trivially 1:1
+        (one posting per cluster; real clustering is M2). Idempotent. Returns `cluster_id`."""
+        ...
+
+    def set_posting_cluster(self, posting_id: str, cluster_id: str) -> None:
+        """Set `posting.cluster_id` — attach a posting to its cluster."""
         ...
