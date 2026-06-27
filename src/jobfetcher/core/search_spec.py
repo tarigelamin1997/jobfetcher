@@ -9,11 +9,11 @@ flows downstream into dim_location + analytics.
 
 v0 intake: the user fills config/search_config.local.yml (gitignored), validated
 here at load. The committed search_config.sample.yml is the complete template.
-Migrates to src/jobfetcher/core/ at build Step 1.
+Lives in src/jobfetcher/core/ (promoted from scripts/ at build Step 1).
 
 Quick check:
-  python scripts/search_spec.py                         # validate the sample
-  python scripts/search_spec.py config/search_config.local.yml
+  python -m jobfetcher.core.search_spec                         # validate the sample
+  python -m jobfetcher.core.search_spec config/search_config.local.yml
 """
 from __future__ import annotations
 

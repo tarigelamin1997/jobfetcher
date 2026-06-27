@@ -1,6 +1,6 @@
 # JobFetcher — search spec (SAMPLE · the complete user-input template, safe to commit)
 #
-# Every field below is REQUIRED and validated by scripts/search_spec.py (SearchSpec)
+# Every field below is REQUIRED and validated by src/jobfetcher/core/search_spec.py (SearchSpec)
 # at load — NOTHING is assumed. Copy this to config/search_config.local.yml (gitignored)
 # and fill it for your own search. An incomplete/invalid file fails loudly.
 # Decided in ADR-0010 (addendum) + plan §20/§21.

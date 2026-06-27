@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from .models import DissectedPosting
+    from .search_spec import SearchSpec
 
 
 class LlmError(Exception):
@@ -33,6 +36,32 @@ class LlmClient(Protocol):
 
         Raises `LlmAuthError` / `LlmModelNotFoundError` / `LlmError` on failure — never
         returns a silent empty string for an error.
+        """
+        ...
+
+
+class SourceError(Exception):
+    """A job-source fetch failed in a way the run cannot recover from: no resolvable API key,
+    or an auth/subscription rejection (HTTP 401/403) — a broken credential must fail LOUDLY,
+    else a rotated key becomes a silent zero-count "success". Quota/rate-limit (429) and
+    network blips are NOT raised — the adapter stops gracefully and yields what it already has.
+    Mirrors the `LlmError` style."""
+
+
+class SourceAdapter(Protocol):
+    """A provider-agnostic job source (ADR-0015). The v0 impl is `JSearchSourceAdapter`;
+    tests pass a fake. `fetch` is a generator so the caller can land each posting as it
+    arrives (bronze-first), and so budget/quota stops are observable mid-stream.
+    """
+
+    def fetch(self, spec: "SearchSpec", *, run_id: str) -> "Iterator[dict[str, Any]]":
+        """Yield raw posting dicts (the source's untouched per-job JSON), paginated across
+        the spec's query matrix under its request/page budget.
+
+        **Never crashes the run on a *transient* condition:** quota/rate-limit (429) or a
+        network error stops iteration gracefully, yielding whatever was already fetched. A
+        genuine misconfiguration — no resolvable API key, or an auth/subscription rejection
+        (HTTP 401/403) — raises `SourceError`, so a broken credential fails loudly.
         """
         ...
 
@@ -79,6 +108,7 @@ class Repository(Protocol):
         description: str | None = None,
         state: str | None = None,
         pipeline_version: str | None = None,
+        fingerprint: str | None = None,
         status: str = "silver",
     ) -> str:
         """Map a `DissectedPosting` (+ its lineage/source fields) to a silver `posting` row
