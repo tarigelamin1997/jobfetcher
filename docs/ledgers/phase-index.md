@@ -6,7 +6,7 @@
 
 | Release | Adds | Status |
 |---|---|---|
-| **v0.1** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → daily email; Terraform, Secrets Manager, tests, minimal CI | 🚧 Step 0 done; **C-1** silver `Dissector` built + live-validated; **C-2** storage schema + `Repository` built (Alembic migration · SQLAlchemy + aurora-data-api · ADR-0018; live DB round-trip pending a Postgres env); next = Terraform infra (C-3, Step 3) |
+| **v0.1** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → daily email; Terraform, Secrets Manager, tests, minimal CI | 🚧 Step 0 done; **C-1** silver `Dissector` built + live-validated; **C-2** storage schema + `Repository` built + **live-validated** (Alembic migration · SQLAlchemy + aurora-data-api · ADR-0018; **5/5 DB round-trip passes on real Postgres** — schema builds, `DissectedPosting` round-trips equal, idempotency holds); next = Terraform infra (C-3, Step 3) |
 | M1 · v0.2 | CV tailoring (reliable renderer, draft→review) | ⬜ (hypothesis) |
 | M2 · v0.3 | Multi-source + clustering dedup + Suspected-Duplicates | ⬜ (hypothesis) |
 | M3 · v0.4 | Single Lambda → Step Functions | ⬜ (hypothesis) |
