@@ -19,6 +19,7 @@ from sqlalchemy import (
     MetaData,
     Table,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
@@ -108,6 +109,8 @@ score = Table(
     Column("previous_score", Integer),  # for near-miss re-scoring
     Column("scored_at", _TS),
     Column("score_override", Integer),  # human correction → calibration data
+    # 1:1 with cluster on the natural key — the unique key the upsert conflict-targets.
+    UniqueConstraint("cluster_id", name="uq_score_cluster_id"),
 )
 
 

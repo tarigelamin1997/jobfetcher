@@ -16,14 +16,26 @@ from ..adapters.jsearch_source import QUERY_COUNTRY_KEY, jd_and_metadata_from_js
 from .clean import clean
 from .dissector import DissectionError
 from .fingerprint import fingerprint
-from .ports import FilterError
+from .ports import FilterError, LlmError, RepositoryError
+from .profile import Profile
+from .scorer import ScorerError
 
 if TYPE_CHECKING:
     from ..adapters.s3_raw import RawStore
     from .dissector import Dissector
     from .ports import FilterStrategy, Repository, SourceAdapter
-    from .profile import Profile
+    from .scorer import Scorer
     from .search_spec import SearchSpec
+
+# The single-user profile key (v0): one row in `profile`, the multi-user seam (db/tables.py).
+DEFAULT_USER_ID = "default"
+
+# Threshold-knob fallbacks if a `profile` row leaves them NULL (the documented defaults,
+# 02-architecture "Threshold"). The values still come from the DB row at runtime when set —
+# these only cover a row that omitted them, never a hardcoded override of a configured knob.
+_DEFAULT_THRESHOLD = 60
+_DEFAULT_HARD_FLOOR = 50
+_DEFAULT_NEAR_MISS_BAND = 10
 
 log = logging.getLogger(__name__)
 
@@ -240,3 +252,101 @@ def apply_gold_filter(
     if failed_open:
         log.info("gold filter: %d posting(s) failed open (included)", failed_open)
     return summary
+
+
+def derive_fit_category(
+    score: int, *, threshold: int, hard_floor: int, near_miss_band: int
+) -> str:
+    """Map a numeric score to a `fit_category` from the **runtime** threshold/floor/band — the
+    band routing, in code, never asked of the LLM (VG8). The bands (02-architecture "Threshold"):
+
+      - `score >= threshold`                        -> "strong_fit"  (the surfaced shortlist)
+      - `threshold - near_miss_band <= score`       -> "near_miss"   (the watch band below the
+        `< threshold`                                                 cut, default 50-59)
+      - `score >= hard_floor` (below the near band)  -> "stretch"    (a real-but-distant fit kept
+                                                                      for analytics, above floor)
+      - `score < hard_floor`                         -> "misaligned" (analytics only)
+
+    `stretch` is the band-derived 4th bucket the ERD names (`strong_fit | stretch | misaligned
+    | near_miss`): the slice that clears the hard floor but sits below the near-miss band — i.e.
+    a genuine but far stretch, distinct from a near-miss (just-below-threshold) and from
+    misaligned (below floor). It is derived purely from the configured bands — no new knob.
+    """
+    if score >= threshold:
+        return "strong_fit"
+    if score >= threshold - near_miss_band:
+        return "near_miss"
+    if score >= hard_floor:
+        return "stretch"
+    return "misaligned"
+
+
+def score_gold(
+    *,
+    run_id: str,
+    repo: "Repository",
+    scorer: "Scorer",
+    user_id: str = DEFAULT_USER_ID,
+) -> dict[str, int]:
+    """Step-5 scoring: load the candidate profile + its **runtime** threshold knobs, then for
+    each gold candidate -> score it (LLM) -> derive its `fit_category` from the config bands
+    (VG8) -> upsert the `score` row (keyed on `cluster_id`) -> mark the posting `scored`.
+
+    The profile and the threshold/floor/band are read from the `profile` row **at runtime**
+    (never hardcoded) — changing `threshold` in that one DB value changes which jobs surface
+    on the next run, with no code change (VG8). The surfaced/shortlist set is `score >=
+    threshold` (== `fit_category == 'strong_fit'`).
+
+    **A scoring/LLM failure (`ScorerError`/`LlmError`) is logged and SKIPPED, never crashes the
+    run** (mirrors `land_silver`): one un-scorable posting must not lose the rest of the
+    shortlist — but a DB failure (`RepositoryError`) stays loud and aborts the run.
+
+    Returns `{gold, scored, surfaced, failed}` — `gold` = candidates examined; `scored` +
+    `failed` partition them; `surfaced` = those at/above the threshold (a subset of `scored`).
+    """
+    row = repo.get_profile(user_id)
+    if row is None:
+        raise RepositoryError(f"no profile row for user_id={user_id!r} — cannot score")
+    profile = Profile.from_jsonb(row["profile"])
+    threshold = row["threshold"] if row["threshold"] is not None else _DEFAULT_THRESHOLD
+    hard_floor = row["hard_floor"] if row["hard_floor"] is not None else _DEFAULT_HARD_FLOOR
+    near_miss_band = (
+        row["near_miss_band"]
+        if row["near_miss_band"] is not None
+        else _DEFAULT_NEAR_MISS_BAND
+    )
+
+    candidates = repo.get_gold_candidates()
+    scored = 0
+    surfaced = 0
+    failed = 0
+    for posting_id, cluster_id, dissected in candidates:
+        try:
+            result = scorer.score(dissected, profile)
+        except (ScorerError, LlmError) as exc:
+            log.warning("scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)
+            failed += 1
+            continue
+
+        fit_category = derive_fit_category(
+            result.score,
+            threshold=threshold,
+            hard_floor=hard_floor,
+            near_miss_band=near_miss_band,
+        )
+        repo.save_score(
+            cluster_id=cluster_id,
+            score=result.score,
+            fit_category=fit_category,
+            strengths=result.strengths,
+            gaps=result.gaps,
+            strategic_assessment=result.strategic_assessment,
+            poster_type=result.poster_type,
+            legitimacy_verified=result.legitimacy_verified,
+        )
+        repo.mark_scored(posting_id)
+        scored += 1
+        if result.score >= threshold:
+            surfaced += 1
+
+    return {"gold": len(candidates), "scored": scored, "surfaced": surfaced, "failed": failed}

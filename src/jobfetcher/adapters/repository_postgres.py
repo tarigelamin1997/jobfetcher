@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Engine, select, update
+from sqlalchemy import Engine, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -250,3 +250,88 @@ class PostgresRepository:
             raise RepositoryError(
                 f"set_posting_cluster failed for {posting_id!r}: {e}"
             ) from e
+
+    def get_gold_candidates(self) -> list[tuple[str, str, DissectedPosting]]:
+        # Ordered by posting_id so a scoring run is deterministic (re-runs visit the same order).
+        stmt = (
+            select(tables.posting)
+            .where(tables.posting.c.status == "gold_candidate")
+            .order_by(tables.posting.c.posting_id)
+        )
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(stmt).mappings().all()
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"get_gold_candidates failed: {e}") from e
+        return [
+            (row["posting_id"], row["cluster_id"], _dissected_from_row(row)) for row in rows
+        ]
+
+    def save_score(
+        self,
+        *,
+        cluster_id: str,
+        score: int,
+        fit_category: str,
+        strengths: list[Any],
+        gaps: list[Any],
+        strategic_assessment: str,
+        poster_type: str,
+        legitimacy_verified: bool,
+        previous_score: int | None = None,
+    ) -> str:
+        if not cluster_id:
+            raise RepositoryError("save_score requires a non-empty cluster_id")
+        # `score` is 1:1 with cluster on the natural key `cluster_id` (uq_score_cluster_id —
+        # see db/tables.py), so a re-score is an upsert on that key: idempotent, never
+        # duplicates the cluster's row. On conflict, carry the existing row's score into
+        # `previous_score` (the pre-update value via `tables.score.c.score`, NOT excluded) so
+        # the old score moves into previous_score in one statement — unless the caller passed
+        # an explicit `previous_score`.
+        stmt = pg_insert(tables.score).values(
+            cluster_id=cluster_id,
+            score=score,
+            fit_category=fit_category,
+            strengths=strengths,
+            gaps=gaps,
+            strategic_assessment=strategic_assessment,
+            poster_type=poster_type,
+            legitimacy_verified=legitimacy_verified,
+            previous_score=previous_score,
+            scored_at=text("now()"),
+        )
+        carried_previous = (
+            previous_score if previous_score is not None else tables.score.c.score
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["cluster_id"],
+            set_={
+                "score": stmt.excluded.score,
+                "fit_category": stmt.excluded.fit_category,
+                "strengths": stmt.excluded.strengths,
+                "gaps": stmt.excluded.gaps,
+                "strategic_assessment": stmt.excluded.strategic_assessment,
+                "poster_type": stmt.excluded.poster_type,
+                "legitimacy_verified": stmt.excluded.legitimacy_verified,
+                "previous_score": carried_previous,
+                "scored_at": stmt.excluded.scored_at,
+            },
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"save_score failed for {cluster_id!r}: {e}") from e
+        return cluster_id
+
+    def mark_scored(self, posting_id: str) -> None:
+        stmt = (
+            update(tables.posting)
+            .where(tables.posting.c.posting_id == posting_id)
+            .values(status="scored")
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"mark_scored failed for {posting_id!r}: {e}") from e
