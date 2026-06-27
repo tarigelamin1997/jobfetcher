@@ -8,10 +8,15 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ### 🏆 Milestones
 
+- **2026-06-26 — v0 DESIGN COMPLETE.** The v0 implementation plan, **19 ADRs**, and the storage-layer design are fully documented; the M1–M8 foundations are laid (directional, a living hypothesis). The first build unit is **live** (C-1 silver `Dissector`). Tagged `milestone/v0-design-complete-2026-06-26`. Next: the **agentic per-unit build** ([ADR-0019](docs/adr/0019-agentic-build-orchestration.md)), starting with C-2 (schema + `Repository`). `v0.1.0` is reserved for when the pipeline ships end-to-end.
 - **2026-06-24 — THE LLM IS LIVE.** After weeks blocked by a Bedrock new-account daily-token quota of **0** ([ERR-001](docs/ledgers/errors.md)), the scoring/dissection path is unblocked. We stopped waiting on AWS and **routed around it** — the LLM transport now runs on the **OpenAI-compatible API with DeepSeek** (`deepseek-v4-flash`), verified end-to-end (`scripts/deepseek_smoke.py` → HTTP 200). The whole pipeline (bronze → silver dissection → gold → score) is now **live-runnable**, not blocked work. Full arc + reasoning: [journal §18](docs/01-session-decision-journal.md). ([ADR-0017](docs/adr/0017-llm-transport-openai-compatible-deepseek.md))
 
 ### Added
 
+- **C-1 — silver `Dissector` (first application code, LIVE):** `OpenAICompatLlmClient` (the `LlmClient` port) + a grounded, evidence-required JD dissection (`DissectedPosting` contract + `grounding_check`) — proven on real probe JDs (the thin JD invented **0** tools; the detailed JD returned 17 grounded skills). `src/jobfetcher/`.
+- **[ADR-0019]** — agentic build orchestration: each unit runs the gate trio as a per-unit pipeline (builder→review→scribe→guardian), fanned out across *independent* units; proven on C-2 first.
+- **[ADR-0018]** — persistence access: SQLAlchemy Core + the `aurora-data-api` dialect behind a `Repository` port; local Postgres for DB tests (LocalStack can't mock the Data API).
+- **Storage layer designed** (plan §31): Aurora SLv2 **scale-to-0**; dissected output = **JSONB + scalar columns on `posting`** (the `dim_skill`/`fct_job_skill` bridge stays at M5); `score` reconciled (`skills`/`sector`/`seniority` are silver-derived, not re-extracted).
 - **[ADR-0017]** — LLM transport = OpenAI-compatible API; v0 provider = **DeepSeek**; Bedrock parked. The model-agnostic port now swaps *provider*, not just model, via config (`base_url`/`api_key`/`model`) — one `OpenAICompatLlmClient` serves DeepSeek, Ollama, Anthropic-direct, or Bedrock.
 - `scripts/deepseek_smoke.py` — key-free smoke test that proves the DeepSeek unblock.
 - DeepSeek API key in **Secrets Manager** (`jobfetcher/deepseek`).
