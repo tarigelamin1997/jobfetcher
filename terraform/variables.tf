@@ -17,6 +17,11 @@ variable "sender_email" {
   type        = string
 }
 
+variable "recipient_email" {
+  description = "Destination for the daily digest. REQUIRED — no default (set in gitignored terraform.tfvars). NOTE: in SES sandbox the recipient must ALSO be a verified identity (see ses.tf), so verify it manually before the first send."
+  type        = string
+}
+
 variable "db_name" {
   description = "Initial database name created inside the Aurora cluster."
   type        = string

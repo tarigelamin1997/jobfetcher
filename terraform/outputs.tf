@@ -39,3 +39,8 @@ output "ses_sender_identity" {
   description = "SES sender identity (must be verified before sending)."
   value       = aws_ses_email_identity.sender.email
 }
+
+output "digest_recipient_email" {
+  description = "Destination for the daily digest. In SES sandbox this address must also be a verified identity before the first send."
+  value       = var.recipient_email
+}

@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..core.models import DissectedPosting, RequirementLevel, Skill
-from ..core.ports import RepositoryError
+from ..core.ports import RepositoryError, ShortlistItem
 from ..db import tables
 from ..db.engine import make_engine
 
@@ -335,3 +335,64 @@ class PostgresRepository:
                 conn.execute(stmt)
         except SQLAlchemyError as e:
             raise RepositoryError(f"mark_scored failed for {posting_id!r}: {e}") from e
+
+    def get_scored_shortlist(
+        self, *, threshold: int
+    ) -> tuple[list[ShortlistItem], int]:
+        # `threshold` is the one config knob, resolved by the caller (`notify()` — the single
+        # authority); the surfaced/below split is computed against it, never a re-derived
+        # constant (VG8: the gate is config, not a hardcoded value).
+        #
+        # SCOPE CAVEAT: the score↔posting join is GLOBAL / single-user v0 — there is no user/run
+        # scope on the join (every scored posting is read); the multi-user/M2 seam must close it.
+        #
+        # JOIN score ↔ posting on cluster_id (1:1 in v0). Carry the raw title + apply_url from
+        # posting and the LLM judgment from score; order by score DESC so the digest leads with
+        # the best match.
+        s, p = tables.score, tables.posting
+        joined = (
+            select(
+                p.c.posting_id,
+                p.c.title,
+                p.c.company,
+                p.c.apply_url,
+                p.c.normalized_title,
+                s.c.score,
+                s.c.fit_category,
+                s.c.strengths,
+                s.c.gaps,
+                s.c.strategic_assessment,
+            )
+            .select_from(s.join(p, s.c.cluster_id == p.c.cluster_id))
+            .order_by(s.c.score.desc())
+        )
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(joined).mappings().all()
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"get_scored_shortlist failed: {e}") from e
+
+        surfaced: list[ShortlistItem] = []
+        below = 0
+        for row in rows:
+            score = row["score"]
+            if score is None:
+                continue  # an un-scored join artifact never surfaces or counts as below
+            if score >= threshold:
+                surfaced.append(
+                    ShortlistItem(
+                        posting_id=row["posting_id"],
+                        title=row["title"],
+                        company=row["company"],
+                        apply_url=row["apply_url"],
+                        normalized_title=row["normalized_title"],
+                        score=score,
+                        fit_category=row["fit_category"],
+                        strengths=list(row["strengths"] or []),
+                        gaps=list(row["gaps"] or []),
+                        strategic_assessment=row["strategic_assessment"],
+                    )
+                )
+            else:
+                below += 1
+        return surfaced, below

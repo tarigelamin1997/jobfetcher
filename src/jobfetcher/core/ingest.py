@@ -10,20 +10,22 @@ failure skips one posting without losing the raw or crashing the run.
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from ..adapters.jsearch_source import QUERY_COUNTRY_KEY, jd_and_metadata_from_jsearch
 from .clean import clean
 from .dissector import DissectionError
 from .fingerprint import fingerprint
-from .ports import FilterError, LlmError, RepositoryError
+from .notifier import render_digest
+from .ports import FilterError, LlmError, NotifierError, RepositoryError
 from .profile import Profile
 from .scorer import ScorerError
 
 if TYPE_CHECKING:
     from ..adapters.s3_raw import RawStore
     from .dissector import Dissector
-    from .ports import FilterStrategy, Repository, SourceAdapter
+    from .ports import FilterStrategy, Notifier, Repository, SourceAdapter
     from .scorer import Scorer
     from .search_spec import SearchSpec
 
@@ -350,3 +352,53 @@ def score_gold(
             surfaced += 1
 
     return {"gold": len(candidates), "scored": scored, "surfaced": surfaced, "failed": failed}
+
+
+def notify(
+    *,
+    run_id: str,
+    repo: "Repository",
+    notifier: "Notifier",
+    recipient_email: str,
+    user_id: str = DEFAULT_USER_ID,
+    run_date: date | None = None,
+) -> dict[str, int]:
+    """Step-6 notification: load the profile (its **runtime** threshold) → read the scored
+    shortlist (surfaced + below count) → render the daily digest → send it.
+
+    The threshold is read from the `profile` row at runtime (VG8) — the same knob the Scorer
+    used — and a NULL falls back to the documented default. The recipient is the caller's arg
+    (the Step-7 handler passes `$RECIPIENT_EMAIL`), not hardcoded.
+
+    **A send failure is LOUD** (re-raised): email is the v0 surface, so a failed send is a
+    failed run, never a silent skip. **Zero surfaced matches still sends** a valid "no matches
+    today" email (VG5 negative) — the digest renderer handles the empty case, not the caller.
+
+    Returns `{surfaced, below_threshold, sent}` (`sent` is 1 — a send failure raises before
+    we get here)."""
+    if not recipient_email:
+        raise NotifierError("no recipient_email — cannot send the digest")
+    row = repo.get_profile(user_id)
+    if row is None:
+        raise RepositoryError(f"no profile row for user_id={user_id!r} — cannot notify")
+    threshold = row["threshold"] if row["threshold"] is not None else _DEFAULT_THRESHOLD
+
+    # `notify()` is the SINGLE threshold authority (VG8): it resolves the runtime threshold
+    # (DB row → documented default) and passes it down, so the surfaced/below split is computed
+    # against the one config knob — the Repository no longer re-derives its own constant.
+    items, below = repo.get_scored_shortlist(threshold=threshold)
+    subject, html_body, text_body = render_digest(
+        items, below, threshold=threshold, date=run_date or date.today()
+    )
+    # A send failure propagates (NotifierError) — the v0 surface is the email; a failed send is
+    # a failed run, not a swallowed warning (mirrors the loud DB-failure stance in score_gold).
+    notifier.send(
+        subject=subject,
+        html_body=html_body,
+        text_body=text_body,
+        recipients=[recipient_email],
+    )
+    log.info(
+        "notify: run_id=%s surfaced=%d below=%d sent=1", run_id, len(items), below
+    )
+    return {"surfaced": len(items), "below_threshold": below, "sent": 1}
