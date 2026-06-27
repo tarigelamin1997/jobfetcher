@@ -10,14 +10,17 @@
 #   alembic upgrade head        # build the v0 schema
 #   pytest -m integration       # the live DB round-trip (ADR-0018 WAIT-FOR)
 #
-# Docker Hub pulls blocked (the 403 issue)? Use a locally-cached image until it's fixed:
-#   JOBFETCHER_DB_IMAGE=postgres:14 docker compose up -d
+# Docker Hub pulls 403-blocked (its CloudFront CDN refuses the client — not an auth issue)?
+# Route Hub through Google's mirror: Docker Desktop -> Settings -> Docker Engine ->
+#   "registry-mirrors": ["https://mirror.gcr.io"]   (Apply & Restart) — then pulls just work.
+# Quick one-off without the mirror:  JOBFETCHER_DB_IMAGE=postgres:14 docker compose up -d  (cached image)
 name: jobfetcher
 
 services:
   db:
     image: ${JOBFETCHER_DB_IMAGE:-postgres:16-alpine}   # matches Aurora PG 16; swap to a pgvector image at M2
     container_name: jobfetcher-db
+    restart: unless-stopped               # dedicated dev DB — comes back after a machine/Docker restart
     environment:
       POSTGRES_USER: jobfetcher
       POSTGRES_PASSWORD: jobfetcher        # LOCAL DEV ONLY — localhost-bound, not a real secret (prod creds live in Secrets Manager)
