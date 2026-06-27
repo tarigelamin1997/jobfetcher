@@ -83,7 +83,7 @@
 | Cost ceiling ~$50/mo OK; some credits; `terraform destroy` → $0 | Optimize for signal, stay cost-aware | journal §6 |
 | IaC: Terraform | Tarig's showcase + most-recognized | journal §6 |
 | Testing: unit + LocalStack/moto (S3/Secrets) + **local Postgres for the DB** + dbt tests + live smoke | Reliability + clone-and-run confidence; DB tests via the aurora-data-api dialect (local↔cloud parity) | journal §6 · [ADR-0018] |
-| Enforcement = the gate trio, run as an **agentic per-unit pipeline** (builder→review→scribe→guardian) + cross-unit fan-out; worktree-isolated; proven on C-2 first | Trigger met (building v0); the orchestration is itself portfolio signal | [ADR-0013] · [ADR-0019] |
+| Enforcement = the gate trio, run as an **agentic per-unit pipeline** (builder→review→**independent fresh-context verifier**→scribe→guardian) + cross-unit fan-out; **CodeRabbit + human = extra independent eyes per PR** | The in-build reviewer can share the orchestrator's blind spots — an unbiased verifier caught real crash-bugs on Step 4 | [ADR-0013] · [ADR-0019] |
 
 ## v0 boundary & versioning
 | Decision | Why | Owner |
