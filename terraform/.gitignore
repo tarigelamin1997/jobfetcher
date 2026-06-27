@@ -1,0 +1,17 @@
+# Terraform working files — never commit state or local var overrides.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+build/            # generated Lambda stub zip (rebuilt by the archive provider)
+
+# Local var overrides hold the (non-secret but env-specific) sender_email etc.
+terraform.tfvars
+*.auto.tfvars
+
+# DO commit the dependency lock so provider versions are reproducible.
+# (Re-include it — the root .gitignore excludes it globally.)
+!.terraform.lock.hcl
