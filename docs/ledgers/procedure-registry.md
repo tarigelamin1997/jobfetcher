@@ -9,6 +9,7 @@
 | Validation-gate standard (behavioral + negative case) | ✅ Written | [05-methodology](../05-methodology.md) + applied in [04-v0-build-plan](../04-v0-build-plan.md) |
 | Secrets management (Secrets Manager, `jobfetcher/<service>`) | ✅ Written | [decisions-locked](decisions-locked.md) (Security) · pattern in [`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py) `get_key()` |
 | **Gate trio** (entry/code/exit) as slash-commands | ✅ Written | [`.claude/commands/`](../../.claude/commands/) (`start-step` · `review-step` · `close-step`) · [ADR-0013](../adr/0013-enforcement-gate-trio-branch-pr.md) |
+| **Agentic build pipeline** (per-unit gate stages: builder→review→scribe→guardian; cross-unit fan-out; worktree isolation) | ✅ Written | [ADR-0019](../adr/0019-agentic-build-orchestration.md) — first run C-2 |
 | Data-contract / source normalization | 🟡 Started → v0 | `SearchSpec` ([scripts/search_spec.py](../../scripts/search_spec.py)) + the **dissection contract** `DissectedPosting`/`Skill` (`src/jobfetcher/core/models.py`, C-1); the posting/score contracts complete at Step 2 |
 | Scoring-prompt standard (7-factor, explainable, temp 0) | 🔜 Deferred → v0 | authored in v0 Step 5 |
 | Dissection-prompt standard (grounded, evidence-required, temp 0) | ✅ Written → v0 (C-1) | `src/jobfetcher/core/dissector.py` `DISSECTION_SYSTEM_PROMPT` + `grounding_check` |
