@@ -6,11 +6,13 @@ testcontainers spins up. SKIPS CLEANLY (like `load_probe`) when neither is avail
 Docker, no testcontainers, no DB URL. This proves: `alembic upgrade head` builds the schema,
 and a `DissectedPosting` saved → read back is equal (skills survive the JSONB hop).
 
-Restricted network (Docker Hub pulls 403-blocked / no Ryuk image)? Skip testcontainers and
-point `$JOBFETCHER_DB_URL` at a Postgres from any cached image::
+Simplest local DB: the project's `docker-compose.yml` (`docker compose up -d`), then::
 
-    docker run -d -e POSTGRES_PASSWORD=postgres -p 5433:5432 postgres:14
-    JOBFETCHER_DB_URL=postgresql+psycopg2://postgres:postgres@localhost:5433/postgres pytest -m integration
+    export JOBFETCHER_DB_URL=postgresql+psycopg2://jobfetcher:jobfetcher@localhost:5433/jobfetcher
+    pytest -m integration
+
+If Docker Hub pulls are 403-blocked, start it from a cached image:
+``JOBFETCHER_DB_IMAGE=postgres:14 docker compose up -d``.
 """
 from __future__ import annotations
 
