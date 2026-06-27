@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -36,6 +36,25 @@ def _skills_from_json(raw: Any) -> list[Skill]:
         Skill(name=s["name"], level=RequirementLevel(s["level"]), evidence=s["evidence"])
         for s in raw
     ]
+
+
+def _dissected_from_row(row: Any) -> DissectedPosting:
+    """Rebuild the `DissectedPosting` contract from a `posting` row mapping (the single place
+    the silver column→contract mapping lives, shared by `get_posting`/`get_silver_postings`)."""
+    return DissectedPosting(
+        raw_title=row["title"],
+        language=row["language"],
+        location=row["location"],
+        city=row["city"],
+        country=row["country"],
+        employment_type=row["employment_type"],
+        seniority=row["seniority"],
+        normalized_title=row["normalized_title"],
+        sector=row["sector"],
+        skills=_skills_from_json(row["skills"]),
+        model=row["dissection_model"],
+        dropped_skill_count=row["dropped_skill_count"] or 0,
+    )
 
 
 class PostgresRepository:
@@ -150,17 +169,84 @@ class PostgresRepository:
             raise RepositoryError(f"get_posting failed for {posting_id!r}: {e}") from e
         if row is None:
             return None
-        return DissectedPosting(
-            raw_title=row["title"],
-            language=row["language"],
-            location=row["location"],
-            city=row["city"],
-            country=row["country"],
-            employment_type=row["employment_type"],
-            seniority=row["seniority"],
-            normalized_title=row["normalized_title"],
-            sector=row["sector"],
-            skills=_skills_from_json(row["skills"]),
-            model=row["dissection_model"],
-            dropped_skill_count=row["dropped_skill_count"] or 0,
+        return _dissected_from_row(row)
+
+    def get_profile(self, user_id: str) -> dict[str, Any] | None:
+        stmt = select(tables.profile).where(tables.profile.c.user_id == user_id)
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(stmt).mappings().first()
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"get_profile failed for {user_id!r}: {e}") from e
+        if row is None:
+            return None
+        return {
+            "profile": row["profile"],
+            "threshold": row["threshold"],
+            "hard_floor": row["hard_floor"],
+            "near_miss_band": row["near_miss_band"],
+        }
+
+    def get_silver_postings(
+        self, *, limit: int | None = None
+    ) -> list[tuple[str, DissectedPosting]]:
+        stmt = select(tables.posting).where(tables.posting.c.status == "silver")
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(stmt).mappings().all()
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"get_silver_postings failed: {e}") from e
+        return [(row["posting_id"], _dissected_from_row(row)) for row in rows]
+
+    def mark_gold_candidate(self, posting_id: str) -> None:
+        stmt = (
+            update(tables.posting)
+            .where(tables.posting.c.posting_id == posting_id)
+            .values(status="gold_candidate")
         )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"mark_gold_candidate failed for {posting_id!r}: {e}") from e
+
+    def upsert_cluster(
+        self,
+        *,
+        cluster_id: str,
+        representative_posting_id: str,
+        posting_count: int = 1,
+    ) -> str:
+        # Idempotent: a re-run over the same gold candidate must not error or duplicate the
+        # 1:1 cluster (v0 clusters are trivial; real clustering is M2).
+        stmt = (
+            pg_insert(tables.cluster)
+            .values(
+                cluster_id=cluster_id,
+                representative_posting_id=representative_posting_id,
+                posting_count=posting_count,
+            )
+            .on_conflict_do_nothing(index_elements=["cluster_id"])
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"upsert_cluster failed for {cluster_id!r}: {e}") from e
+        return cluster_id
+
+    def set_posting_cluster(self, posting_id: str, cluster_id: str) -> None:
+        stmt = (
+            update(tables.posting)
+            .where(tables.posting.c.posting_id == posting_id)
+            .values(cluster_id=cluster_id)
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(
+                f"set_posting_cluster failed for {posting_id!r}: {e}"
+            ) from e

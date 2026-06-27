@@ -1,0 +1,76 @@
+# JobFetcher — candidate profile (SAMPLE · sanitized, safe to commit)
+#
+# This is the scoring + gold-filter source of truth (the `profile.profile` JSONB payload).
+# Validated by src/jobfetcher/core/profile.py (Profile) at load — every required field must
+# be present or it fails loudly. Copy this to config/profile.local.yml (gitignored) and fill
+# it with your real profile. NO contact PII here (no email/phone/address) — the sanitized
+# sample is the only profile committed; the real one lives in private S3 / profile.local.yml.
+#
+# NOTE: the numeric knobs threshold / hard_floor / near_miss_band are NOT in this file — they
+# are columns on the `profile` table (build Step 5), so changing the shortlist cutoff is one
+# DB edit, never a re-validate of this blob.
+
+name: "Data Engineer Candidate"
+headline: "Data Engineer / Data Platform Engineer / Data Architect"
+summary: >
+  Data Engineer focused on production data platforms — streaming + batch ingestion, CDC,
+  warehousing, and analytics engineering on AWS. Builds right-sized, observable systems.
+
+# ── Skills (name required; level/years optional) ──────────────────────────
+skills:
+  - { name: "Python",        level: "expert",     years: 5 }
+  - { name: "SQL",           level: "expert",     years: 6 }
+  - { name: "Kafka",         level: "proficient", years: 3 }
+  - { name: "ClickHouse",    level: "proficient", years: 2 }
+  - { name: "Debezium",      level: "proficient", years: 2 }
+  - { name: "dbt",           level: "proficient", years: 3 }
+  - { name: "Airflow",       level: "proficient", years: 3 }
+  - { name: "PostgreSQL",    level: "proficient", years: 5 }
+  - { name: "MongoDB",       level: "proficient", years: 3 }
+  - { name: "AWS",           level: "proficient", years: 3 }
+  - { name: "Terraform",     level: "proficient", years: 2 }
+  - { name: "Docker",        level: "proficient", years: 4 }
+  - { name: "Kubernetes",    level: "proficient", years: 2 }
+  - { name: "Spark",         level: "learning",   years: 1 }
+  - { name: "PySpark",       level: "learning",   years: 1 }
+  - { name: "Delta Lake",    level: "learning",   years: 1 }
+
+# ── Certifications ────────────────────────────────────────────────────────
+certifications:
+  - { name: "AWS Certified Solutions Architect - Associate (SAA-C03)", issuer: "AWS" }
+  - { name: "AWS Certified Cloud Practitioner (CLF-C02)",              issuer: "AWS" }
+  - { name: "AWS Certified AI Practitioner (AIF-C01)",                 issuer: "AWS" }
+
+# ── Projects ──────────────────────────────────────────────────────────────
+projects:
+  - name: "Barakah CDC Challenge"
+    summary: "Change-data-capture pipeline (Debezium/Kafka) streaming Postgres changes to a warehouse."
+  - name: "OrderFlow"
+    summary: "CDC + Spark streaming/batch showcase on a synthetic e-commerce order stream."
+  - name: "JobFetcher"
+    summary: "Serverless job-matching tool — medallion ingestion, LLM scoring, dbt analytics on AWS."
+
+# ── Preferences — the filter/scorer targeting + dealbreakers ──────────────
+preferences:
+  target_titles:
+    - "Data Engineer"
+    - "Data Platform Engineer"
+    - "Data Architect"
+  target_sectors:
+    - "fintech"
+    - "e-commerce"
+    - "technology"
+  target_locations:                # on-site / relocation in the GCC; English-only
+    - "Riyadh"
+    - "Saudi Arabia"
+    - "United Arab Emirates"
+    - "Qatar"
+    - "Kuwait"
+    - "Bahrain"
+    - "Oman"
+  remote_preference: "off"         # off (on-site) | include | only
+  seniority_level: "mid-senior"
+  avoid_keywords:                   # a hit excludes from gold (dealbreakers)
+    - "Arabic required"
+    - "unpaid"
+    - "internship"

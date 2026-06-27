@@ -16,11 +16,13 @@ from ..adapters.jsearch_source import QUERY_COUNTRY_KEY, jd_and_metadata_from_js
 from .clean import clean
 from .dissector import DissectionError
 from .fingerprint import fingerprint
+from .ports import FilterError
 
 if TYPE_CHECKING:
     from ..adapters.s3_raw import RawStore
     from .dissector import Dissector
-    from .ports import Repository, SourceAdapter
+    from .ports import FilterStrategy, Repository, SourceAdapter
+    from .profile import Profile
     from .search_spec import SearchSpec
 
 log = logging.getLogger(__name__)
@@ -189,3 +191,52 @@ def ingest(
         "skipped": skipped,
         "already": already,
     }
+
+
+def apply_gold_filter(
+    spec: "SearchSpec",
+    profile: "Profile",
+    *,
+    strategy: "FilterStrategy",
+    repo: "Repository",
+    source: str = "jsearch",  # noqa: ARG001 — accepted for symmetry/future multi-source; unused in v0
+) -> dict[str, int]:
+    """Step-4b gold filter: load every silver posting → ask the `strategy` if it is a likely
+    fit → for each fit, create its trivial **1:1 cluster** (cluster_id == posting_id), attach
+    it (`posting.cluster_id`), and promote it (`status='gold_candidate'`). Non-fits stay silver.
+
+    **Type-replaceable** (ADR-0015): the caller injects the strategy — `DeterministicFilterStrategy`
+    by default (P1 — no redundant LLM at v0 volume), `LlmFilterStrategy` selectable.
+
+    **Fail-open** (build-plan Step 4b FAILURE-MODE): a `FilterStrategy` that raises `FilterError`
+    is treated as INCLUDE — a real fit must never be dropped before scoring; over-inclusion is
+    cheap (the Scorer filters), a dropped fit is invisible. The fail-open count is logged.
+
+    Returns `{silver, gold, dropped}` (silver = candidates examined; gold + dropped partition it).
+    """
+    candidates = repo.get_silver_postings()
+    gold = 0
+    dropped = 0
+    failed_open = 0
+    for posting_id, posting in candidates:
+        try:
+            likely_fit = strategy.filter(spec, profile, posting)
+        except FilterError as exc:
+            log.warning("gold filter failed open (include) for %s: %s", posting_id, exc)
+            likely_fit = True
+            failed_open += 1
+
+        if not likely_fit:
+            dropped += 1
+            continue
+
+        # v0: a trivial 1:1 cluster (cluster_id == posting_id); real clustering is M2.
+        repo.upsert_cluster(cluster_id=posting_id, representative_posting_id=posting_id)
+        repo.set_posting_cluster(posting_id, posting_id)
+        repo.mark_gold_candidate(posting_id)
+        gold += 1
+
+    summary = {"silver": len(candidates), "gold": gold, "dropped": dropped}
+    if failed_open:
+        log.info("gold filter: %d posting(s) failed open (included)", failed_open)
+    return summary
