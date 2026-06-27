@@ -50,7 +50,7 @@ Each component is a single responsibility with an explicit **Consumes → Produc
 | **dedup** | new `posting` rows | `cluster` rows + `posting.cluster_id` + `match_status`/`match_confidence` | **Cluster-and-surface** (never hide). Detail below. Scoring/CV run **once per cluster**. |
 | **score** | cluster representative (+ its silver-dissected `skills`/`sector`) + candidate profile | `score` row (score, fit, strengths, gaps, strategic_assessment, poster_type, legitimacy_verified), status `scored` | LLM (DeepSeek, provider-agnostic), 7-factor ATS, explainable, temp 0. Detail below. |
 | **cv_tailor** | scored cluster (≥ threshold) + master CV | DOCX+PDF in S3 `gold/cvs/...`, `cv` row (status `draft`) | Reliable renderer (no LibreOffice). Draft → human-review gate → `approved`. |
-| **notify** | newly-scored clusters, graduations | daily email (SES) + Notion rows | Email = morning triage; Notion = act + track. |
+| **notify** | newly-scored clusters, graduations | daily email (SES) + Notion rows | Email = morning triage; Notion = act + track. **v0 = SES HTML + plaintext daily digest** of the threshold-gated shortlist (`score >= threshold`) + a below-threshold count; apply-link `href`s scheme-allowlisted to http/https; zero matches → a valid "no matches today" email. The `Notifier` port is defined (ADR-0015); **Notion is a later migration (M4).** |
 
 **Orchestration:** in v0 this is **one Lambda** doing all steps in sequence. It migrates to **Step Functions** (M3) only when the single Lambda is genuinely too big — *earned*, not assumed.
 

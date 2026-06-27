@@ -2,6 +2,7 @@
 never the concrete provider (ADR-0015 — type-replaceable stages)."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -10,6 +11,25 @@ if TYPE_CHECKING:
     from .models import DissectedPosting
     from .profile import Profile
     from .search_spec import SearchSpec
+
+
+@dataclass(frozen=True)
+class ShortlistItem:
+    """One surfaced (score >= threshold) match, carrying exactly what the daily digest renders
+    (Step 6). A small dataclass reads cleaner than a wide tuple at the call sites; the
+    Repository builds these, the renderer consumes them. `strengths`/`gaps` are the JSONB lists
+    read back from the `score` row (list[str] in v0; `Any` tolerates the lossless JSONB shape)."""
+
+    posting_id: str
+    title: str  # raw source title
+    company: str | None
+    apply_url: str | None
+    normalized_title: str | None
+    score: int
+    fit_category: str | None
+    strengths: list[Any] = field(default_factory=list)
+    gaps: list[Any] = field(default_factory=list)
+    strategic_assessment: str | None = None
 
 
 class LlmError(Exception):
@@ -209,4 +229,45 @@ class Repository(Protocol):
 
     def mark_scored(self, posting_id: str) -> None:
         """Mark a posting done: set `posting.status = 'scored'`."""
+        ...
+
+    def get_scored_shortlist(
+        self, *, threshold: int
+    ) -> "tuple[list[ShortlistItem], int]":
+        """Read the daily digest input (Step 6): JOIN `score` ↔ `posting` on `cluster_id` (1:1
+        in v0) and return `(surfaced, count_below_threshold)` where `surfaced` is every match
+        with `score >= threshold` as `ShortlistItem`s **ordered by score DESC**, and
+        `count_below_threshold` is how many scored matches fell below it (the "+N below" footer).
+
+        The `threshold` is resolved by the caller (`notify()` is the single threshold authority —
+        the DB `profile.threshold` with the documented-default fallback) and passed in, so the
+        surfaced/below split uses the one config knob — this method does not re-derive it.
+
+        "Surfaced" matches Step 5's `surfaced`/`strong_fit` cut. Raises `RepositoryError` on a
+        backend failure."""
+        ...
+
+
+class NotifierError(Exception):
+    """The daily digest could not be sent (the provider rejected it, or no sender is
+    configured). Mirrors the `LlmError` style — the core raises this, never a raw boto3 error.
+    Email is the v0 surface, so a send failure is a run failure (loud), not a silent skip."""
+
+
+class Notifier(Protocol):
+    """Send one rendered digest (ADR-0015 — type-replaceable). The v0 impl is `SesNotifier`
+    (AWS SES); tests pass a fake. The renderer (`core/notifier.py`) produces the bodies; this
+    port only delivers them, so the transport is swappable without touching the rendering."""
+
+    def send(
+        self,
+        *,
+        subject: str,
+        html_body: str,
+        text_body: str,
+        recipients: list[str],
+    ) -> str:
+        """Send the digest to `recipients` with both an HTML body and a plaintext fallback.
+        Returns the provider message id. Raises `NotifierError` on any failure — never returns
+        a silent empty id for a rejected send."""
         ...

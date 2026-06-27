@@ -37,6 +37,7 @@ resource "aws_lambda_function" "pipeline" {
       DEEPSEEK_SECRET_NAME = var.deepseek_secret_name
       JSEARCH_SECRET_NAME  = var.jsearch_secret_name
       SES_SENDER           = var.sender_email
+      RECIPIENT_EMAIL      = var.recipient_email
     }
   }
 }
