@@ -2,11 +2,11 @@
 
 > Live source of truth for progress. Status legend: ⬜ not started · 🚧 in progress · ✅ shipped (tagged release). `/start-step` sets 🚧, `/close-step` sets ✅ ([ADR-0013](../adr/0013-enforcement-gate-trio-branch-pr.md)). The roadmap beyond v0 is a **[living hypothesis](../03-roadmap.md)** — re-derived after each release; update this table as reality unfolds.
 
-**Current state:** **v0 in progress — Step 0 (ingestion coverage probe).** Design + docs complete. First code exists: a validated, `SearchSpec`-driven JSearch probe ([`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py)) proven end-to-end against the live API; JSearch key in Secrets Manager; **LLM = OpenAI-compatible API, v0 backend = DeepSeek** ([ADR-0017](../adr/0017-llm-transport-openai-compatible-deepseek.md)) — **✅ verified live 2026-06-24** (`deepseek-v4-flash`, HTTP 200); Bedrock's wall ([ERR-001](errors.md)) is **worked around: no open blocker.** Full 18-query sweep + the silver `Dissector` build (Step 4) are next.
+**Current state:** **v0 in progress — Step 0 (ingestion coverage probe).** Design + docs complete. First code exists: a validated, `SearchSpec`-driven JSearch probe ([`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py)) proven end-to-end against the live API; JSearch key in Secrets Manager; **LLM = OpenAI-compatible API, v0 backend = DeepSeek** ([ADR-0017](../adr/0017-llm-transport-openai-compatible-deepseek.md)) — **✅ verified live 2026-06-24** (`deepseek-v4-flash`, HTTP 200); Bedrock's wall ([ERR-001](errors.md)) is **worked around: no open blocker.** The silver `Dissector` (C-1) and the storage schema + `Repository` (C-2) are built; next = Terraform infra (C-3) and the full 18-query sweep.
 
 | Release | Adds | Status |
 |---|---|---|
-| **v0.1** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → daily email; Terraform, Secrets Manager, tests, minimal CI | 🚧 Step 0 done; **silver `Dissector` reader (C-1) built + live-validated** on real JDs (LLM client + grounded extraction, ADR-0016/0017); next = storage/infra (Steps 1–3) |
+| **v0.1** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → daily email; Terraform, Secrets Manager, tests, minimal CI | 🚧 Step 0 done; **C-1** silver `Dissector` built + live-validated; **C-2** storage schema + `Repository` built (Alembic migration · SQLAlchemy + aurora-data-api · ADR-0018; live DB round-trip pending a Postgres env); next = Terraform infra (C-3, Step 3) |
 | M1 · v0.2 | CV tailoring (reliable renderer, draft→review) | ⬜ (hypothesis) |
 | M2 · v0.3 | Multi-source + clustering dedup + Suspected-Duplicates | ⬜ (hypothesis) |
 | M3 · v0.4 | Single Lambda → Step Functions | ⬜ (hypothesis) |

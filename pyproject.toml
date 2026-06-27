@@ -11,10 +11,14 @@ dependencies = [
     "pydantic>=2",
     "pyyaml>=6",
     "boto3>=1.34",
+    "sqlalchemy>=2",
+    "sqlalchemy-aurora-data-api>=0.5",
+    "alembic>=1.13",
+    "psycopg2-binary>=2.9",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.4"]
+dev = ["pytest>=7", "ruff>=0.4", "testcontainers[postgres]>=4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -22,7 +26,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: hits the live DeepSeek API (needs a key + balance); deselect with -m 'not integration'",
+    "integration: hits a live external resource — the DeepSeek API (key + balance) or a real Postgres (Docker / $JOBFETCHER_DB_URL); deselect with -m 'not integration'",
 ]
 
 [tool.ruff]

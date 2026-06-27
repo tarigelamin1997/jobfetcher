@@ -13,7 +13,7 @@
 | Data-contract / source normalization | 🟡 Started → v0 | `SearchSpec` ([scripts/search_spec.py](../../scripts/search_spec.py)) + the **dissection contract** `DissectedPosting`/`Skill` (`src/jobfetcher/core/models.py`, C-1); the posting/score contracts complete at Step 2 |
 | Scoring-prompt standard (7-factor, explainable, temp 0) | 🔜 Deferred → v0 | authored in v0 Step 5 |
 | Dissection-prompt standard (grounded, evidence-required, temp 0) | ✅ Written → v0 (C-1) | `src/jobfetcher/core/dissector.py` `DISSECTION_SYSTEM_PROMPT` + `grounding_check` |
-| Persistence / `Repository` pattern (SQLAlchemy Core + aurora-data-api dialect; local-Postgres DB tests) | ✅ Written → v0 (C-2) | [ADR-0018](../adr/0018-persistence-sqlalchemy-data-api-repository.md) + [04-v0-build-plan](../04-v0-build-plan.md) Steps 1–2 |
+| Persistence / `Repository` pattern (SQLAlchemy Core + aurora-data-api dialect; local-Postgres DB tests) | ✅ Written → **built** v0 (C-2) | [ADR-0018](../adr/0018-persistence-sqlalchemy-data-api-repository.md); `src/jobfetcher/{db/tables.py, adapters/repository_postgres.py}` + `migrations/` |
 | Migratability checklist (ports/adapters, flags, Alembic, additive TF) | ✅ Written | [03-roadmap](../03-roadmap.md#migratability-requirements-build-v0-so-the-above-stays-cheap) |
 | Dedup / entity-resolution standard | 🔜 Deferred → M2 | authored when multi-source + dedup lands |
 | CV-render standard (content model → DOCX + PDF; honesty rules) | 🔜 Deferred → M1 | authored when CV tailoring lands |
