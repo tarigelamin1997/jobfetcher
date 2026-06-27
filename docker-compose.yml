@@ -1,0 +1,39 @@
+# Dedicated local Postgres for JobFetcher — dev + integration tests (project-owned + isolated).
+#
+# The deployed store is Aurora Serverless v2 + the RDS Data API (ADR-0014); locally we run a
+# real Postgres so the storage layer (ADR-0018: SQLAlchemy + the aurora-data-api dialect) is
+# tested with full local<->cloud parity. This container has its own name + volume — it does not
+# borrow another project's image/data.
+#
+#   docker compose up -d
+#   export JOBFETCHER_DB_URL=postgresql+psycopg2://jobfetcher:jobfetcher@localhost:5433/jobfetcher
+#   alembic upgrade head        # build the v0 schema
+#   pytest -m integration       # the live DB round-trip (ADR-0018 WAIT-FOR)
+#
+# Docker Hub pulls 403-blocked (its CloudFront CDN refuses the client — not an auth issue)?
+# Route Hub through Google's mirror: Docker Desktop -> Settings -> Docker Engine ->
+#   "registry-mirrors": ["https://mirror.gcr.io"]   (Apply & Restart) — then pulls just work.
+# Quick one-off without the mirror:  JOBFETCHER_DB_IMAGE=postgres:14 docker compose up -d  (cached image)
+name: jobfetcher
+
+services:
+  db:
+    image: ${JOBFETCHER_DB_IMAGE:-postgres:16-alpine}   # matches Aurora PG 16; swap to a pgvector image at M2
+    container_name: jobfetcher-db
+    restart: unless-stopped               # dedicated dev DB — comes back after a machine/Docker restart
+    environment:
+      POSTGRES_USER: jobfetcher
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobfetcher}   # local-dev default, localhost-bound — override via .env; real/prod creds live in Secrets Manager
+      POSTGRES_DB: jobfetcher
+    ports:
+      - "5433:5432"                         # 5433 avoids clashing with a host Postgres on 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobfetcher -d jobfetcher"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
