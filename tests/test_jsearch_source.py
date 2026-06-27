@@ -1,0 +1,178 @@
+"""JSearchSourceAdapter unit tests (network mocked): the raw→metadata mapping + seniority,
+and the fetch sweep's pagination / budget / quota-stop. Each carries a negative."""
+import io
+import urllib.error
+
+import pytest
+
+from jobfetcher.adapters import jsearch_source
+from jobfetcher.adapters.jsearch_source import (
+    JSearchSourceAdapter,
+    _seniority_from_title,
+    get_key,
+    jd_and_metadata_from_jsearch,
+)
+from jobfetcher.core.ports import SourceError
+from jobfetcher.core.search_spec import SearchSpec
+
+
+def _spec(*, titles=("data engineer",), countries=("sa",), max_pages=3, budget=100) -> SearchSpec:
+    return SearchSpec.model_validate(
+        {
+            "source": "jsearch",
+            "secret_name": "jobfetcher/jsearch",
+            "aws_region": "us-east-1",
+            "targeting": {
+                "job_titles": list(titles),
+                "countries": list(countries),
+                "cities": [],
+                "states": [],
+            },
+            "date_posted": "week",
+            "language": "en",
+            "employment_types": [],
+            "remote": "off",
+            "threshold": 60,
+            "budget": {"max_pages_per_query": max_pages, "request_budget_per_run": budget},
+        }
+    )
+
+
+def _job(jid: str, **over) -> dict:
+    base = {
+        "job_id": jid,
+        "job_title": "Senior Data Engineer",
+        "job_description": "Build pipelines with Python.",
+        "job_location": "Riyadh",
+        "job_city": "Riyadh",
+        "job_country": "SA",
+        "job_employment_type": "FULLTIME",
+        "employer_name": "Acme",
+        "job_apply_link": "https://x/apply",
+        "job_state": None,
+    }
+    base.update(over)
+    return base
+
+
+def _full_page(n: int, start: int = 0) -> dict:
+    return {"data": [_job(f"j{start + i}") for i in range(n)]}
+
+
+# --------------------------------------------------------------------------- mapping
+def test_mapping_extracts_jd_and_metadata():
+    jd, meta = jd_and_metadata_from_jsearch(_job("j1"))
+    assert jd == "Build pipelines with Python."
+    assert meta.raw_title == "Senior Data Engineer"
+    assert meta.seniority == "senior"  # parsed deterministically from the title
+    assert meta.city == "Riyadh" and meta.country == "SA" and meta.language == "en"
+
+
+def test_mapping_tolerates_missing_fields():
+    # negative: a sparse payload → no crash, sensible fallbacks, no JD.
+    jd, meta = jd_and_metadata_from_jsearch({})
+    assert jd == ""
+    assert meta.raw_title == "Untitled role"
+    assert meta.seniority is None and meta.location is None
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("Principal Engineer", "principal"),
+        ("Staff Data Engineer", "staff"),
+        ("Junior Analyst", "junior"),
+        ("Data Engineer", None),  # negative: no seniority keyword
+    ],
+)
+def test_seniority_from_title(title, expected):
+    assert _seniority_from_title(title) == expected
+
+
+# --------------------------------------------------------------------------- key resolution
+def test_get_key_env_fallback(monkeypatch):
+    monkeypatch.setattr(jsearch_source, "boto3", None, raising=False)
+    monkeypatch.setenv("JSEARCH_API_KEY", "envkey")
+    # force the boto3 path to fail so the env fallback is exercised
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_boto3(name, *a, **k):
+        if name == "boto3":
+            raise ImportError("no boto3")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_boto3)
+    assert get_key(_spec()) == "envkey"
+
+
+def test_get_key_raises_when_unresolvable(monkeypatch):
+    monkeypatch.delenv("JSEARCH_API_KEY", raising=False)
+    monkeypatch.delenv("RAPIDAPI_KEY", raising=False)
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_boto3(name, *a, **k):
+        if name == "boto3":
+            raise ImportError("no boto3")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_boto3)
+    with pytest.raises(SourceError):
+        get_key(_spec())
+
+
+# --------------------------------------------------------------------------- fetch sweep
+def _patch_pages(monkeypatch, pages):
+    """Make `_fetch_page` return successive items of `pages` (dict or exception)."""
+    seq = iter(pages)
+
+    def _fake(query, country, page, spec, key):
+        item = next(seq)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(jsearch_source, "_fetch_page", _fake)
+    monkeypatch.setattr(jsearch_source.time, "sleep", lambda *_: None)
+
+
+def test_fetch_paginates_until_short_page(monkeypatch):
+    # full page (10) then a short page (3) → 13 jobs, stop (no 3rd call needed).
+    _patch_pages(monkeypatch, [_full_page(10), {"data": [_job(f"s{i}") for i in range(3)]}])
+    out = list(JSearchSourceAdapter(api_key="k").fetch(_spec(max_pages=5), run_id="r"))
+    assert len(out) == 13
+
+
+def test_fetch_empty_data_yields_nothing(monkeypatch):
+    # negative: empty data → 0 postings, no crash, stops (short page).
+    _patch_pages(monkeypatch, [{"data": []}])
+    out = list(JSearchSourceAdapter(api_key="k").fetch(_spec(), run_id="r"))
+    assert out == []
+
+
+def test_fetch_429_stops_gracefully(monkeypatch):
+    # negative: a 429 mid-sweep stops politely, yielding what came before — never crashes.
+    err = urllib.error.HTTPError("u", 429, "rate", None, io.BytesIO(b""))
+    _patch_pages(monkeypatch, [_full_page(10), err])
+    out = list(JSearchSourceAdapter(api_key="k").fetch(_spec(max_pages=5), run_id="r"))
+    assert len(out) == 10  # first page survived; the 429 stopped the rest
+
+
+def test_fetch_budget_caps_requests(monkeypatch):
+    # request budget = 2 → at most 2 pages fetched even though more are available.
+    _patch_pages(monkeypatch, [_full_page(10), _full_page(10, 10), _full_page(10, 20)])
+    spec = _spec(max_pages=10, budget=2)
+    out = list(JSearchSourceAdapter(api_key="k").fetch(spec, run_id="r"))
+    assert len(out) == 20  # exactly 2 full pages, then the cap stops the sweep
+
+
+def test_fetch_network_error_skips_query(monkeypatch):
+    # negative: a URLError breaks this query's pages but the sweep continues to the next query.
+    err = urllib.error.URLError("down")
+    _patch_pages(monkeypatch, [err, {"data": [_job("ok")]}])
+    spec = _spec(titles=("de", "da"), max_pages=2)  # two queries
+    out = list(JSearchSourceAdapter(api_key="k").fetch(spec, run_id="r"))
+    assert [j["job_id"] for j in out] == ["ok"]  # query 1 skipped, query 2 yielded

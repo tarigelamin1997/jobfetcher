@@ -58,7 +58,7 @@ Each component is a single responsibility with an explicit **Consumes → Produc
 
 ## User search spec (the input contract)
 
-The search targeting is **user input, not assumed** — a per-user [`SearchSpec`](../scripts/search_spec.py) (Pydantic) the user fills *before any query runs*; the loader **fails loudly** on any missing/invalid field (the "nothing taken for granted" gate). It rides the same per-user seam as `PROFILE.user_id` + `threshold`, and one spec drives three things: the **query fan-out**, the **gold-filter target sets**, and the **per-user geo scope** that flows into `dim_location` + analytics.
+The search targeting is **user input, not assumed** — a per-user [`SearchSpec`](../src/jobfetcher/core/search_spec.py) (Pydantic) the user fills *before any query runs*; the loader **fails loudly** on any missing/invalid field (the "nothing taken for granted" gate). It rides the same per-user seam as `PROFILE.user_id` + `threshold`, and one spec drives three things: the **query fan-out**, the **gold-filter target sets**, and the **per-user geo scope** that flows into `dim_location` + analytics.
 
 | Field | User provides | → JSearch mechanism |
 |---|---|---|

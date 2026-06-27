@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.4", "testcontainers[postgres]>=4"]
+dev = ["pytest>=7", "ruff>=0.4", "testcontainers[postgres]>=4", "moto[s3]>=5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

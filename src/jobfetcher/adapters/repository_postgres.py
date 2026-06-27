@@ -96,6 +96,7 @@ class PostgresRepository:
         description: str | None = None,
         state: str | None = None,
         pipeline_version: str | None = None,
+        fingerprint: str | None = None,
         status: str = "silver",
     ) -> str:
         if not posting_id:
@@ -123,6 +124,7 @@ class PostgresRepository:
             "dissection_model": dissected.model,
             "dropped_skill_count": dissected.dropped_skill_count,
             "pipeline_version": pipeline_version,
+            "fingerprint": fingerprint,
             "status": status,
         }
         # Upsert: re-running the same day must not duplicate the silver row (idempotent).

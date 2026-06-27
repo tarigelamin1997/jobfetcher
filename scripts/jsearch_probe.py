@@ -27,8 +27,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from search_spec import RemoteMode, SearchSpec  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from jobfetcher.core.search_spec import RemoteMode, SearchSpec  # noqa: E402
 
 HOST = "jsearch.p.rapidapi.com"
 OUT_DIR = Path("probe_output")

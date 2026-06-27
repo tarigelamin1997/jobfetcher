@@ -6,7 +6,20 @@ from pathlib import Path
 
 import pytest
 
+from jobfetcher.adapters.jsearch_source import (  # productionized in Step 4 — re-export for tests
+    _seniority_from_title,
+    jd_and_metadata_from_jsearch,
+)
 from jobfetcher.core.models import PostingMetadata
+
+__all__ = [
+    "CANNED_JD",
+    "CANNED_LLM_JSON",
+    "FakeLlm",
+    "_seniority_from_title",
+    "jd_and_metadata_from_jsearch",
+    "load_probe",
+]
 
 PROBE_DIR = Path(__file__).resolve().parents[1] / "probe_output"
 
@@ -37,30 +50,6 @@ class FakeLlm:
     def complete(self, *, system: str, user: str) -> str:
         self.calls.append({"system": system, "user": user})
         return self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
-
-
-def _seniority_from_title(title: str) -> str | None:
-    t = title.lower()
-    for kw in ("principal", "staff", "lead", "senior", "junior", "mid", "entry"):
-        if kw in t:
-            return kw
-    return None
-
-
-def jd_and_metadata_from_jsearch(raw: dict, *, language: str = "en") -> tuple[str, PostingMetadata]:
-    """Map a saved JSearch posting -> (jd_text, PostingMetadata). Field extraction only;
-    the real JSearch source adapter (fetch/paginate/bronze) is build Step 4."""
-    title = raw.get("job_title") or "Untitled role"
-    meta = PostingMetadata(
-        raw_title=title,
-        language=language,
-        location=raw.get("job_location"),
-        city=raw.get("job_city"),
-        country=raw.get("job_country"),
-        employment_type=raw.get("job_employment_type"),
-        seniority=_seniority_from_title(title),
-    )
-    return raw.get("job_description") or "", meta
 
 
 def load_probe(name: str) -> tuple[str, PostingMetadata]:
