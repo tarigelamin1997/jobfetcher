@@ -23,7 +23,7 @@ services:
     restart: unless-stopped               # dedicated dev DB — comes back after a machine/Docker restart
     environment:
       POSTGRES_USER: jobfetcher
-      POSTGRES_PASSWORD: jobfetcher        # LOCAL DEV ONLY — localhost-bound, not a real secret (prod creds live in Secrets Manager)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobfetcher}   # local-dev default, localhost-bound — override via .env; real/prod creds live in Secrets Manager
       POSTGRES_DB: jobfetcher
     ports:
       - "5433:5432"                         # 5433 avoids clashing with a host Postgres on 5432

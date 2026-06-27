@@ -8,7 +8,7 @@ and a `DissectedPosting` saved → read back is equal (skills survive the JSONB 
 
 Simplest local DB: the project's `docker-compose.yml` (`docker compose up -d`), then::
 
-    export JOBFETCHER_DB_URL=postgresql+psycopg2://jobfetcher:jobfetcher@localhost:5433/jobfetcher
+    export JOBFETCHER_DB_URL="postgresql+psycopg2://jobfetcher:${POSTGRES_PASSWORD:-jobfetcher}@localhost:5433/jobfetcher"
     pytest -m integration
 
 If Docker Hub pulls are 403-blocked, start it from a cached image:
