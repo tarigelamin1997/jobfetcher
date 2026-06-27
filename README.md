@@ -2,7 +2,7 @@
 
 **A serverless job-matching pipeline that scores roles against your real profile and tailors a CV for the good ones — built as an *evolutionary architecture* you can watch grow, one deliberate migration at a time.**
 
-> **Status:** 🏗️ Built in the open. Building **v0**: the ingestion probe (Step 0) is validated against the live API, and — as of **2026-06-24** — the **LLM scoring path is verified live**, running on **DeepSeek** through a provider-agnostic OpenAI-compatible client ([ADR-0017](docs/adr/0017-llm-transport-openai-compatible-deepseek.md)) after an AWS Bedrock new-account quota wall was *routed around, not waited out*. An evolutionary project — it starts intentionally small and grows through a sequence of clean, documented releases ([CHANGELOG](CHANGELOG.md) · [roadmap](docs/03-roadmap.md) · live [phase index](docs/ledgers/phase-index.md)).
+> **Status:** 🏗️ Built in the open. Building **v0**: the data path is now **code-complete end to end** — **fetch → bronze → silver (LLM dissect) → gold filter → score → notify**. On `main`: the ingestion probe (Step 0), the silver `Dissector`, the schema + `Repository` (live-validated on Postgres), the Terraform infra (apply-validated, then destroyed to ~$0), the fetch + bronze→silver landing, the deterministic gold filter + `Profile` contract, and the 7-factor ATS Scorer; the SES daily-digest Notifier is in review (PR #8). The **LLM path is live** (since **2026-06-24**) on **DeepSeek** through a provider-agnostic OpenAI-compatible client ([ADR-0017](docs/adr/0017-llm-transport-openai-compatible-deepseek.md)), after an AWS Bedrock new-account quota wall was *routed around, not waited out*. **153 unit + ~22 integration tests green.** What remains for v0: wire the stages into one Lambda, the test round-up, minimal CI, and the first live deploy → **v0.1.0**. An evolutionary project — it starts intentionally small and grows through a sequence of clean, documented releases ([CHANGELOG](CHANGELOG.md) · [roadmap](docs/03-roadmap.md) · live [phase index](docs/ledgers/phase-index.md)).
 
 ---
 
@@ -48,7 +48,7 @@ flowchart LR
 - **Operational plane:** scheduled run → fetch (pluggable source adapters) → dedup (groups suspected duplicates and surfaces them — never silently hides a real job) → LLM scoring (DeepSeek) with explanations → CV tailoring (reliable renderer, human-review gate) → email + Notion. State in **Postgres**, raw objects + CVs in **S3**, credentials in **Secrets Manager**, region **us-east-1**.
 - **Analytical plane (DE depth):** **dbt** models the medallion into marts (with tests, lineage, incremental) — on **Postgres** by default; a dedicated **Snowflake** warehouse is added *only if* a real analytics bottleneck ever justifies it. Powers a live Skill-Demand tracker and weekly Sector Intelligence.
 
-> **v0 is much smaller than the diagram:** one scheduled Lambda → one source → score → daily email. The diagram is the *destination*; the [roadmap](docs/03-roadmap.md) is the path.
+> **v0 is much smaller than the diagram:** one scheduled Lambda → one source → score → daily email. Its data path (fetch → … → notify) is now code-complete; the Lambda wiring, CI, and first live deploy are the remaining steps to **v0.1.0**. The diagram is the *destination*; the [roadmap](docs/03-roadmap.md) is the path.
 
 ## Tech stack
 

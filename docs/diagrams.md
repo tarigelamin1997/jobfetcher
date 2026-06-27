@@ -87,8 +87,8 @@ flowchart TB
     TP --> DD
   end
 
-  subgraph GLD["④ Gold — filter to candidates (LLM FilterStrategy)"]
-    PF["LLM filter · likely-fit<br/>on dissected fields vs profile"]
+  subgraph GLD["④ Gold — filter to candidates (FilterStrategy port)"]
+    PF["filter · likely-fit vs profile<br/>v0 default: deterministic<br/>(LLM strategy built · config-selectable)"]
   end
 
   SC["⑤ Score — LLM · DeepSeek<br/>runs on GOLD only"]
@@ -113,7 +113,7 @@ flowchart TB
 - **① Source (JSearch).** The query (`keywords + country + date_posted`) *is* the pre-filter — the API won't pre-filter for us, so the query is how we pay only for plausibly-relevant pages. Cost is bounded by a **request budget**, not storage.
 - **② Bronze.** Every raw result is written **untouched** — S3 `raw/…json` + a `bronze_posting` row (`raw_payload`). No filtering, ever: *whatever the API returned today is captured and replayable.*
 - **③ Silver.** A source **adapter** normalizes each payload into one common schema (the Pydantic **data contract**). The heavy step is the **LLM `Dissector`** (DeepSeek — [ADR-0016](adr/0016-llm-dissection-at-silver.md)) that extracts `skills[]`+levels, sector, normalized title, language from `job_description`/`job_title`; the rest is field-mapping. Every row carries `bronze_id + pipeline_version` (**origin-level lineage**). Dedup is **cluster-and-surface** — v0 is exact source-id only.
-- **④ Gold.** Silver **LLM-dissects every posting** (the market-wide analytics need *all* postings, not just gold); the **gold LLM `FilterStrategy`** then selects the likely-fit subset for scoring. Below-bar rows stay in bronze/silver for analytics.
+- **④ Gold.** Silver **LLM-dissects every posting** (the market-wide analytics need *all* postings, not just gold); the **gold `FilterStrategy`** then selects the likely-fit subset for scoring. **v0's default is a *deterministic* filter** — at 10–30 jobs/day an LLM gold-filter is redundant with the Scorer (P1); the **LLM strategy is built and config-selectable** behind the same port (a defended deviation from the build plan — see journal §23). Below-bar rows stay in bronze/silver for analytics.
 - **⑤ Score.** The **strong DeepSeek model** runs on gold only; score + CV attach to the **cluster** — done once per real job, every platform's apply-link kept.
 
 **Two properties worth discussing**
@@ -126,9 +126,11 @@ flowchart TB
 
 The directional roadmap — a **living hypothesis**, not a contract. Live status is the source of truth in [ledgers/phase-index](ledgers/phase-index.md); this is the *shape*. Discussed in [03-roadmap](03-roadmap.md).
 
+**v0 is nearly complete** — its internal stages (probe → dissect → schema → infra → fetch/silver → gold → score → notify) are **built and verified** through the agentic gate pipeline ([ADR-0019](adr/0019-agentic-build-orchestration.md)); **Steps 7–10 remain** (handler wiring → CI → deploy → live smoke). The migration markers (M1–M8) below are still all ⬜.
+
 ```mermaid
 flowchart LR
-  v0["v0.1 ⬜ next<br/>fetch → score → email"] --> M1["M1 ⬜<br/>CV tailoring"]
+  v0["v0.1 🚧 nearly done<br/>fetch → score → email<br/>(Steps 7–10: handler · CI · deploy)"] --> M1["M1 ⬜<br/>CV tailoring"]
   M1 --> M2["M2 ⬜<br/>multi-source + dedup"]
   M2 --> M3["M3 ⬜<br/>Step Functions"]
   M3 --> M4["M4 ⬜<br/>Notion + near-miss"]

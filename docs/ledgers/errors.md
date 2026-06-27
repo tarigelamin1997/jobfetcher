@@ -38,6 +38,32 @@
 - **AWS Support case filed 2026-06-23 — case ID `178220019100382`** (live-chat). Asks AWS to raise the new-account Bedrock on-demand per-day token quotas above 0 — notably **`L-E239925C`** "Model invocation max tokens per day for **Kimi K2 Thinking**" (currently `0.0` / non-adjustable; sibling `L-3587C5E5` = Kimi K2.5) — for account `198592435375`, us-east-1. Billing + model access confirmed; root *and* admin-IAM both throttle. **Re-test trigger:** when AWS confirms the bump, re-run the 1-token `converse` against `moonshot.kimi-k2-thinking` — a completion ⇒ Bedrock is usable again (re-point config; see the mitigation below).
 - **✅ MITIGATED 2026-06-24 — routed around via DeepSeek ([ADR-0017](../adr/0017-llm-transport-openai-compatible-deepseek.md)).** We stopped waiting on the Bedrock quota and moved the LLM **transport** to the **OpenAI-compatible API** (v0 provider = **DeepSeek API**, which has no new-account gate), behind the model-agnostic `LlmClient` port ([ADR-0012](../adr/0012-model-agnostic-llm.md)). The Bedrock quota is **still 0** — this is *not Resolved* — but it **no longer blocks** us: Bedrock is now one parked, config-swappable backend. AWS case `178220019100382` stays open as **optional** (flip config back to Bedrock if it ever lifts). The whole pipeline (silver dissection → gold → score) is **live-runnable** once the DeepSeek key lands in Secrets Manager (`jobfetcher/deepseek`). **✅ Verified 2026-06-24** — key stored (rotated) + $2 balance; `scripts/deepseek_smoke.py` returned **HTTP 200** from `deepseek-v4-flash` (prompt=11 / completion=5 tokens). The LLM path is **LIVE**; config model id = `deepseek-v4-flash`. *(One detour en route: DeepSeek's "free signup tokens" did not apply — the API returned `402 Insufficient Balance` until a small top-up; the key + integration were valid throughout.)*
 
+### ERR-002 — Docker Hub anonymous pulls return 403 (local Postgres for storage tests)   [Resolved]
+- Stage: dev-infra (the dedicated `jobfetcher-db` local Postgres for C-2 storage tests) · Layer: tooling/connectivity · Type: connectivity / dependency
+- Discovered: 2026-06-26 · Resolved: 2026-06-26 · Source: implementation (setting up local-Postgres tests)
+
+1. **What happened?** Every `docker pull` from **Docker Hub** returned `403 Forbidden` on the CloudFront blob CDN — even `hello-world` — while pulls from **MCR / GHCR / mirror.gcr.io** succeeded. So the `jobfetcher-db` docker-compose couldn't fetch `postgres:16-alpine`.
+2. **Why?** Docker Hub **anonymous-pull blocking** from this network/CDN — the registry refused unauthenticated blob fetches. **NOT** auth (no login configured/needed), **NOT** a corporate proxy, **NOT** disk/space. The "even hello-world fails, but other registries work" signature is the tell.
+3. **How?** C-2's storage tests run against a real local Postgres (not LocalStack — [ADR-0018](../adr/0018-persistence-sqlalchemy-data-api-repository.md)); standing up `jobfetcher-db` required the Postgres image from Docker Hub, which hit the 403 wall.
+4. **How fixed?** Added a **registry mirror** — `"registry-mirrors": ["https://mirror.gcr.io"]` in Docker Desktop → Settings → Docker Engine; a fresh `postgres:*-alpine` pull then succeeded. The compose image is also overridable via `${JOBFETCHER_DB_IMAGE:-postgres:16-alpine}`.
+5. **Prevention + Detection:** the registry mirror persists in Docker config; `docker-compose.yml` pins the image + allows the env override so a blocked registry is a one-line swap. **Detection:** a `docker pull` failing `403` on the blob CDN *while MCR/GHCR/mirror.gcr.io work* = anonymous-pull blocking → use the mirror (don't chase auth/proxy).
+- **Blast radius:** local storage tests (C-2 onward) only; **no production impact** (the deployed store is Aurora, not a container).
+- **Prevention implemented?** Yes — registry mirror + the `${JOBFETCHER_DB_IMAGE}` override (commit `90ff53d`).
+
+### ERR-003 — GitGuardian flagged a local-dev example password   [Resolved — false positive, hardened anyway]
+- Stage: dev-infra / PR hygiene (C-2 storage PR) · Layer: tooling · Type: config (secret-scan false positive)
+- Discovered: 2026-06-26 · Resolved: 2026-06-26 · Source: GitGuardian on the PR
+
+1. **What happened?** GitGuardian raised a **Generic Password** alert on a literal local-dev password (`postgres`/`jobfetcher`) committed in `docker-compose.yml` + an integration-test docstring. (The alert id `#18608761` actually traced to a *separate* `tradesense` repo, but the jobfetcher literal tripped the same heuristic.)
+2. **Why?** A **hardcoded credential literal** in a committed file matches the generic-password detector — even when it's a throwaway local-dev value, not a real secret. The scanner can't tell "example" from "real."
+3. **How?** The `jobfetcher-db` compose + a test docstring carried a bare local-dev password literal.
+4. **How fixed?** **Env-interpolated** the value — `${POSTGRES_PASSWORD:-jobfetcher}` in `docker-compose.yml` + the test docstring; the squash-merge kept the bare literal out of `main`.
+5. **Prevention + Detection:** example/local credentials are **env-interpolated with a default**, never bare literals; the per-PR secret scan (GitGuardian + the build's own `git diff` scan) is the **detection**. No real credential was ever exposed.
+- **Blast radius:** none — a false positive on a non-secret local-dev value.
+- **Prevention implemented?** Yes — the env-interpolation pattern (compose + test docstring).
+
 | ID | Severity | Stage | Symptom | Status |
 |---|---|---|---|---|
 | ERR-001 | Critical | pre-build (Bedrock) | base-id ValidationException + new-account daily token quota = 0 (non-adjustable) | **Mitigated** — routed around via DeepSeek / OpenAI-compatible ([ADR-0017]); quota still 0 but no longer blocking; AWS case `178220019100382` open (optional) |
+| ERR-002 | Low | dev-infra (local Postgres) | Docker Hub `403` on anonymous pulls (other registries OK) | **Resolved** — registry mirror `mirror.gcr.io` + `${JOBFETCHER_DB_IMAGE}` override |
+| ERR-003 | Info | dev-infra (PR hygiene) | GitGuardian generic-password on a local-dev literal | **Resolved** (false positive) — env-interpolated `${POSTGRES_PASSWORD}` |
