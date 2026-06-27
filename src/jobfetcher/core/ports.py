@@ -41,9 +41,11 @@ class LlmClient(Protocol):
 
 
 class SourceError(Exception):
-    """A job-source fetch failed in a way the run cannot recover from (e.g. no API key).
-    Transient/quota conditions (401/403/429/network) are NOT raised — the adapter stops
-    gracefully and yields what it already has. Mirrors the `LlmError` style."""
+    """A job-source fetch failed in a way the run cannot recover from: no resolvable API key,
+    or an auth/subscription rejection (HTTP 401/403) — a broken credential must fail LOUDLY,
+    else a rotated key becomes a silent zero-count "success". Quota/rate-limit (429) and
+    network blips are NOT raised — the adapter stops gracefully and yields what it already has.
+    Mirrors the `LlmError` style."""
 
 
 class SourceAdapter(Protocol):
@@ -56,9 +58,10 @@ class SourceAdapter(Protocol):
         """Yield raw posting dicts (the source's untouched per-job JSON), paginated across
         the spec's query matrix under its request/page budget.
 
-        **Never crashes the run on a transient condition:** auth/quota/rate-limit (401/403/
-        429) or a network error stops iteration gracefully, yielding whatever was already
-        fetched. A genuine misconfiguration (e.g. no resolvable API key) raises `SourceError`.
+        **Never crashes the run on a *transient* condition:** quota/rate-limit (429) or a
+        network error stops iteration gracefully, yielding whatever was already fetched. A
+        genuine misconfiguration — no resolvable API key, or an auth/subscription rejection
+        (HTTP 401/403) — raises `SourceError`, so a broken credential fails loudly.
         """
         ...
 

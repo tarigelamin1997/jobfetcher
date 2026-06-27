@@ -18,6 +18,12 @@ def test_clean_handles_br_and_nested_entities():
     assert clean("line1<br/>line2 &amp;amp; more") == "line1 line2 & more"
 
 
+def test_clean_strips_double_encoded_tags():
+    # C6: a double-encoded tag (`&amp;lt;b&amp;gt;`) only becomes a real tag after a SECOND
+    # unescape; the bounded unescape-until-stable loop removes it fully.
+    assert clean("Build &amp;lt;b&amp;gt;ETL&amp;lt;/b&amp;gt; pipelines") == "Build ETL pipelines"
+
+
 def test_clean_empty_and_none_return_empty():
     # negative: None / empty / whitespace-only in → "" out, never a crash.
     assert clean(None) == ""

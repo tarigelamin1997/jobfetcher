@@ -13,6 +13,7 @@ import unicodedata
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
+_MAX_UNESCAPE_PASSES = 5  # bounds the unescape loop; deeper nesting than this is pathological
 
 
 def clean(text: str | None) -> str:
@@ -23,10 +24,16 @@ def clean(text: str | None) -> str:
     """
     if not text:
         return ""
-    # Entities first (so a literal "&lt;b&gt;" becomes a tag we then strip), then tags.
-    out = html.unescape(text)
-    out = _TAG_RE.sub(" ", out)
-    out = html.unescape(out)  # second pass: tags may have hidden entities (e.g. &amp;amp;)
+    # C6: unescape REPEATEDLY until stable — a double-encoded tag (`&amp;lt;b&amp;gt;`) only
+    # becomes a real tag after the second unescape, so a fixed two passes can still miss
+    # deeper nesting. Bounded loop (escaping strictly shrinks the string, so it always halts).
+    out = text
+    for _ in range(_MAX_UNESCAPE_PASSES):
+        unescaped = html.unescape(out)
+        if unescaped == out:
+            break
+        out = unescaped
+    out = _TAG_RE.sub(" ", out)  # then strip the now-real tags
     out = unicodedata.normalize("NFKC", out)
     out = _WS_RE.sub(" ", out)
     return out.strip()

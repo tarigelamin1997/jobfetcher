@@ -68,6 +68,31 @@ def test_mapping_extracts_jd_and_metadata():
     assert meta.city == "Riyadh" and meta.country == "SA" and meta.language == "en"
 
 
+def test_mapping_prefers_query_country_over_raw():
+    # C3: the authoritative *query* country overrides the per-record job_country.
+    _jd, meta = jd_and_metadata_from_jsearch(_job("j1", job_country="SA"), query_country="ae")
+    assert meta.country == "ae"  # the queried scope wins
+
+
+def test_mapping_falls_back_to_raw_country_when_no_query():
+    # C3 fallback: with no query_country threaded, the source-stated job_country is kept.
+    _jd, meta = jd_and_metadata_from_jsearch(_job("j1", job_country="SA"))
+    assert meta.country == "SA"
+
+
+def test_fetch_attaches_query_country_side_channel(monkeypatch):
+    # C3: each yielded job carries the queried country on the transient side-channel key.
+    from jobfetcher.adapters.jsearch_source import QUERY_COUNTRY_KEY
+
+    _patch_pages(monkeypatch, [{"data": [_job("j0")]}])
+    out = list(
+        JSearchSourceAdapter(api_key="k").fetch(
+            _spec(countries=("ae",), max_pages=1), run_id="r"
+        )
+    )
+    assert out[0][QUERY_COUNTRY_KEY] == "ae"
+
+
 def test_mapping_tolerates_missing_fields():
     # negative: a sparse payload → no crash, sensible fallbacks, no JD.
     jd, meta = jd_and_metadata_from_jsearch({})
@@ -154,11 +179,31 @@ def test_fetch_empty_data_yields_nothing(monkeypatch):
 
 
 def test_fetch_429_stops_gracefully(monkeypatch):
-    # negative: a 429 mid-sweep stops politely, yielding what came before — never crashes.
+    # negative: a 429 (quota/rate) mid-sweep stops politely, yielding what came before — never
+    # crashes (C5: 429 stays graceful).
     err = urllib.error.HTTPError("u", 429, "rate", None, io.BytesIO(b""))
     _patch_pages(monkeypatch, [_full_page(10), err])
     out = list(JSearchSourceAdapter(api_key="k").fetch(_spec(max_pages=5), run_id="r"))
     assert len(out) == 10  # first page survived; the 429 stopped the rest
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_fetch_auth_failure_hard_fails(monkeypatch, code):
+    # C5: 401 (bad/missing key) and 403 (auth/subscription failure) must FAIL LOUDLY —
+    # a broken credential must never become a silent zero-count "success".
+    err = urllib.error.HTTPError("u", code, "auth", None, io.BytesIO(b""))
+    _patch_pages(monkeypatch, [err])
+    with pytest.raises(SourceError, match=str(code)):
+        list(JSearchSourceAdapter(api_key="k").fetch(_spec(), run_id="r"))
+
+
+def test_fetch_auth_failure_raises_even_after_results(monkeypatch):
+    # C5: an auth failure mid-sweep still raises — we do NOT silently return the partial
+    # results, because a revoked key invalidates the run's completeness guarantee.
+    err = urllib.error.HTTPError("u", 403, "auth", None, io.BytesIO(b""))
+    _patch_pages(monkeypatch, [_full_page(10), err])
+    with pytest.raises(SourceError):
+        list(JSearchSourceAdapter(api_key="k").fetch(_spec(max_pages=5), run_id="r"))
 
 
 def test_fetch_budget_caps_requests(monkeypatch):
@@ -176,3 +221,75 @@ def test_fetch_network_error_skips_query(monkeypatch):
     spec = _spec(titles=("de", "da"), max_pages=2)  # two queries
     out = list(JSearchSourceAdapter(api_key="k").fetch(spec, run_id="r"))
     assert [j["job_id"] for j in out] == ["ok"]  # query 1 skipped, query 2 yielded
+
+
+# --------------------------------------------------------------------------- malformed shapes (B1)
+def test_fetch_malformed_data_shapes_dont_crash(monkeypatch):
+    # negative (B1): `data` as a dict, then as a string, then a list with a non-dict item.
+    # Only valid dict items are yielded; the bad shapes are skipped, never crash.
+    _patch_pages(
+        monkeypatch,
+        [
+            {"data": {"unexpected": "object"}},  # dict, not list → skipped
+            {"data": "boom"},                     # string, not list → skipped
+            {"data": [_job("good"), "junk", 42]}, # list with non-dict items → yield only the dict
+        ],
+    )
+    spec = _spec(titles=("a", "b", "c"), max_pages=1)  # three queries, one page each
+    out = list(JSearchSourceAdapter(api_key="k").fetch(spec, run_id="r"))
+    assert [j["job_id"] for j in out] == ["good"]  # only the one valid dict survived
+
+
+def test_fetch_non_json_body_skips_query(monkeypatch):
+    # negative (B2): a JSON-decode failure (gateway HTML page) is transient → skip this query,
+    # continue to the next, never crash.
+    import json as _json
+
+    err = _json.JSONDecodeError("Expecting value", "<html>...", 0)
+    _patch_pages(monkeypatch, [err, {"data": [_job("ok")]}])
+    spec = _spec(titles=("de", "da"), max_pages=2)  # two queries
+    out = list(JSearchSourceAdapter(api_key="k").fetch(spec, run_id="r"))
+    assert [j["job_id"] for j in out] == ["ok"]  # query 1 skipped, query 2 yielded
+
+
+def test_fetch_read_timeout_skips_query(monkeypatch):
+    # negative (B3): a bare TimeoutError (not a URLError subclass on 3.11) is transient →
+    # skip this query, continue, never crash.
+    _patch_pages(monkeypatch, [TimeoutError("read timed out"), {"data": [_job("ok")]}])
+    spec = _spec(titles=("de", "da"), max_pages=2)  # two queries
+    out = list(JSearchSourceAdapter(api_key="k").fetch(spec, run_id="r"))
+    assert [j["job_id"] for j in out] == ["ok"]
+
+
+def test_fetch_budget_counts_failed_requests(monkeypatch):
+    # S1: a source erroring on every call must still be bounded by the request budget.
+    # budget=2, 3 titles × 2 countries = 6 possible queries → at most 2 real HTTP calls.
+    calls = {"n": 0}
+
+    def _always_error(query, country, page, spec, key):
+        calls["n"] += 1
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(jsearch_source, "_fetch_page", _always_error)
+    monkeypatch.setattr(jsearch_source.time, "sleep", lambda *_: None)
+    spec = _spec(titles=("a", "b", "c"), countries=("sa", "ae"), max_pages=1, budget=2)
+    out = list(JSearchSourceAdapter(api_key="k").fetch(spec, run_id="r"))
+    assert out == []
+    assert calls["n"] == 2  # the cap bounded the billed calls, despite every call erroring
+
+
+def test_get_key_json_secret_without_api_key_raises(monkeypatch):
+    # negative (M2): a secret that is valid JSON but lacks api_key/apiKey → SourceError,
+    # never the whole JSON blob returned as the "key".
+    class _FakeSecrets:
+        def get_secret_value(self, SecretId):  # noqa: N803 - boto3 kwarg name
+            return {"SecretString": '{"username": "u", "password": "p"}'}
+
+    class _FakeBoto3:
+        @staticmethod
+        def client(*a, **k):
+            return _FakeSecrets()
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", _FakeBoto3)
+    with pytest.raises(SourceError, match="no 'api_key'"):
+        get_key(_spec())

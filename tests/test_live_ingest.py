@@ -24,16 +24,15 @@ BUCKET = "jobfetcher-live-data"
 def _have_jsearch_key() -> bool:
     if os.environ.get("JSEARCH_API_KEY") or os.environ.get("RAPIDAPI_KEY"):
         return True
-    try:
-        from jobfetcher.adapters.jsearch_source import get_key
-        from jobfetcher.core.ports import SourceError
+    # C7: only a genuine missing-key condition (`SourceError`) means "skip" — any other error
+    # (a real bug in key resolution) must surface, NOT be masked as a missing credential.
+    from jobfetcher.adapters.jsearch_source import get_key
+    from jobfetcher.core.ports import SourceError
 
-        try:
-            get_key(_spec())
-            return True
-        except SourceError:
-            return False
-    except Exception:
+    try:
+        get_key(_spec())
+        return True
+    except SourceError:
         return False
 
 

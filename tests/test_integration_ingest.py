@@ -136,7 +136,7 @@ def test_fetch_to_bronze_lands_s3_and_rows(repo, raw_store):
         _spec(), run_id="run-i", source="jsearch", source_adapter=src,
         raw_store=raw_store, repo=repo,
     )
-    assert {bid for bid, _ in landed} == {"jsearch:ib1", "jsearch:ib2"}
+    assert {bid for bid, _, _ in landed} == {"jsearch:ib1", "jsearch:ib2"}
     # S3 object exists at the medallion key raw/{source}/{date}/{id}.json
     key = f"raw/jsearch/{date.today().isoformat()}/ib1.json"
     body = raw_store._client.get_object(Bucket=BUCKET, Key=key)["Body"].read()
@@ -180,13 +180,35 @@ def test_land_silver_writes_posting_with_fingerprint(repo, raw_store):
 
 
 def test_full_ingest_end_to_end(repo, raw_store):
+    from uuid import uuid4
+
     from jobfetcher.core.dissector import Dissector
 
+    # Unique ids per run: the local DB is persistent, so fixed ids would (correctly, by C2) be
+    # counted as `already` on a re-run. Fresh ids exercise the silvered path deterministically.
+    run_tag = uuid4().hex[:8]
+    id1, id2 = f"ie1-{run_tag}", f"ie2-{run_tag}"
     summary = ingest(
-        _spec(), run_id="run-e2e",
-        source_adapter=FakeSource([_job("ie1"), _job("ie2")]),
+        _spec(), run_id=f"run-e2e-{run_tag}",
+        source_adapter=FakeSource([_job(id1), _job(id2)]),
         raw_store=raw_store, repo=repo,
         dissector=Dissector(FakeLlm(CANNED_LLM_JSON), model_id="test-model"),
     )
-    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0}
-    assert repo.get_posting("jsearch:ie1") is not None
+    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0}
+    assert repo.get_posting(f"jsearch:{id1}") is not None
+
+
+def test_full_ingest_rerun_counts_already(repo, raw_store):
+    # C2 (integration): a second `ingest` over the same id against the REAL DB does not
+    # re-silver — it is counted as `already` (no wasted LLM call on a re-run).
+    from uuid import uuid4
+
+    from jobfetcher.core.dissector import Dissector
+
+    jid = f"iag-{uuid4().hex[:8]}"
+    dissector = Dissector(FakeLlm(CANNED_LLM_JSON), model_id="test-model")
+    common = dict(raw_store=raw_store, repo=repo, dissector=dissector)
+    first = ingest(_spec(), run_id="run-a1", source_adapter=FakeSource([_job(jid)]), **common)
+    assert first["silvered"] == 1 and first["already"] == 0
+    second = ingest(_spec(), run_id="run-a2", source_adapter=FakeSource([_job(jid)]), **common)
+    assert second["silvered"] == 0 and second["already"] == 1
