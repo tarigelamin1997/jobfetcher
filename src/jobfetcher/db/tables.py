@@ -13,6 +13,7 @@ from __future__ import annotations
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     Float,
     ForeignKey,
     Integer,
@@ -125,6 +126,20 @@ profile = Table(
 )
 
 
+run_log = Table(
+    "run_log",
+    metadata,
+    # The send-once guard (Step 7 / VG4): one row per (run_date, user) records that the daily
+    # digest was already sent, so a re-invocation for the same date never double-emails. The
+    # pipeline's other stages are idempotent via their own upserts; this table guards the email,
+    # the one side effect that cannot be made idempotent at the source (SES has no dedup key).
+    Column("run_date", Date, primary_key=True),
+    Column("user_id", Text, primary_key=True),
+    Column("run_id", Text),  # the run that actually sent (correlation/audit)
+    Column("digest_sent_at", _TS, nullable=False, server_default=text("now()")),
+)
+
+
 __all__ = [
     "metadata",
     "bronze_posting",
@@ -132,4 +147,5 @@ __all__ = [
     "cluster",
     "score",
     "profile",
+    "run_log",
 ]
