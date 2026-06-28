@@ -20,7 +20,9 @@ config = context.config
 # Resolve the DB URL from the environment and inject it (so alembic.ini holds no credential).
 _db = DbConfig.from_env()
 if _db is not None:
-    config.set_main_option("sqlalchemy.url", _db.connection_url)
+    # Escape `%` for configparser interpolation: the Aurora Data API URL carries `%`-encoded
+    # ARNs (e.g. `%3A`), which `set_main_option` would otherwise read as interpolation syntax.
+    config.set_main_option("sqlalchemy.url", _db.connection_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
