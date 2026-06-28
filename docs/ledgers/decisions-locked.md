@@ -86,6 +86,7 @@
 | IaC: Terraform | Tarig's showcase + most-recognized | journal §6 |
 | Testing: unit + LocalStack/moto (S3/Secrets) + **local Postgres for the DB** + dbt tests + live smoke | Reliability + clone-and-run confidence; DB tests via the aurora-data-api dialect (local↔cloud parity) | journal §6 · [ADR-0018] |
 | Enforcement = the gate trio, run as an **agentic per-unit pipeline** (builder→review→**independent fresh-context verifier**→scribe→guardian) + cross-unit fan-out; **CodeRabbit + human = extra independent eyes per PR** | The in-build reviewer can share the orchestrator's blind spots — an unbiased verifier caught real crash-bugs on Step 4 | [ADR-0013] · [ADR-0019] |
+| **CI = GitHub Actions** on PR→main + push→main (`ruff` + `pytest --cov --cov-fail-under=85` [`postgres:16-alpine` service] + `terraform validate` + **gitleaks** secret-scan; pre-commit = gitleaks + ruff); **VG7 enforced** in pre-commit + CI; green PR → `main` required status checks; **`ruff-format` deferred** (a separate one-time reformat — the tree predates it) | Cheap CI from day one for the release-centric model; behavioral checks (real DB + coverage floor, not presence-only); the format-the-whole-tree churn is a deliberate standalone commit, not folded in | build-plan Step 9 |
 
 ## v0 boundary & versioning
 | Decision | Why | Owner |

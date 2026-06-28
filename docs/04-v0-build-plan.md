@@ -130,11 +130,15 @@ Wire fetch → score → notify in one handler, idempotent for a given run date 
 - **📊 Coverage tooling.** `pytest-cov` added as a dev dep + `[tool.coverage]` in `pyproject.toml` — **opt-in `--cov`** (CI-ready for Step 9, no aggressive `fail_under`).
 - **⏳ Deferred (explicitly).** **VG7** (secret-scan: no pre-commit/CI yet) → **Step 9**. **VG6** (teardown) = an infra gate (validated at C-3, re-checked at Step 10) — not a pytest. The **live smoke run** = Step 10.
 
-### Step 9 — Minimal CI
+### Step 9 — Minimal CI ✅ built
 GitHub Actions: lint (`ruff`) → unit tests → `terraform validate`. Branch protection on `main` (PR-only). Secret scan in pre-commit.
 - **WHY:** the release-centric model needs CI from day one; cheap.
-- **WAIT-FOR:** a PR shows green required checks.
+- **WAIT-FOR:** a PR shows green required checks. **→ confirmed on the Step-9 PR.**
 - **FAILURE-MODE:** CI green but app broken → a check is presence-only; make it behavioral.
+- **✅ Built (feat/ci).** **`.github/workflows/ci.yml`** runs on `pull_request`→main + `push`→main with **3 jobs:** (1) **lint-and-test** — `ruff check` + `alembic upgrade head` + `pytest --cov --cov-fail-under=85`, with a **`postgres:16-alpine` service** so the integration layer runs in CI (the **live** DeepSeek/JSearch tests skip without keys); (2) **terraform-validate** — `init -backend=false` + `validate` (AWS-free, no credentials); (3) **secret-scan** — `gitleaks-action`. **`.pre-commit-config.yaml`** runs **gitleaks** (local secret scan) + **ruff** lint.
+- **🔒 VG7 now ENFORCED** (closes the Step-8-deferred item). gitleaks runs **both** in pre-commit **and** as the CI `secret-scan` job — it passes clean on the tree **and blocks a planted fake key** (proven, the negative case). The VG7 row in the validation gate is updated from "Step 9" → **enforced via gitleaks (pre-commit + CI)**; [`tests/README.md`](../tests/README.md) VG7 row → covered.
+- **⏭️ `ruff-format` deferred** — the tree predates it, so a one-time reformat is a separate deliberate commit (not folded into this CI commit); the pre-commit config carries `ruff` lint only for now, with the deferral noted inline.
+- **🛡️ Branch protection.** Once the Step-9 PR's CI is green, these checks are added to `main`'s branch protection as **required status checks** (lint-and-test · terraform-validate · secret-scan) — `main` stays PR-only ([ADR-0013](adr/0013-enforcement-gate-trio-branch-pr.md)).
 
 ### Step 10 — Deploy, first live run, tag
 `terraform apply`, populate secrets, trigger the Lambda manually once, confirm the email + DB state, then enable the EventBridge schedule. **Tag `v0.1.0`.**
@@ -154,7 +158,7 @@ GitHub Actions: lint (`ruff`) → unit tests → `terraform validate`. Branch pr
 | **VG4 — Idempotency** | Two handler runs for the same date → identical DB state, ≤1 email (ingest/gold/score idempotent via upserts; `notify` guarded once-per-`(run_date, user_id)` by the `run_log` table). **Email is at-least-once:** SES (external) + the `run_log` write can't be atomic, so the rare crash *between* a successful send and `mark_digest_sent` re-sends rather than drops — the safer default; transactional outbox = the scale-up (see the Step 7 VG4 decision). | Kill the handler mid-run, re-invoke → it resumes; no duplicate rows, ≤1 email. |
 | **VG5 — Notification** | Daily email arrives with correct matches, scores, and working apply links. | Zero matches above threshold → a valid "no matches today" email (not a crash, not silence). |
 | **VG6 — Teardown** | `terraform destroy` removes everything; bill returns to ~$0. | (N/A — destroy is the negative of apply.) |
-| **VG7 — Secrets hygiene** | Secret scan passes; no secret in the repo or logs. | Plant a fake key in a staged file → pre-commit/secret-scan **blocks** it. |
+| **VG7 — Secrets hygiene** (enforced via gitleaks — pre-commit + CI, Step 9) | Secret scan passes; no secret in the repo or logs. | Plant a fake key in a staged file → pre-commit/secret-scan **blocks** it (proven). |
 | **VG8 — Threshold is config** | Change `threshold` in the per-user config (no code change/redeploy) → the next run surfaces a different set of jobs accordingly. | Set threshold above every score → the run produces a valid "no matches" email; set it to 0 → all scored jobs surface. (Proves the gate reads config at runtime, not a hardcoded constant.) |
 
 All VGs must pass before tagging `v0.1.0`. Any failure → log an `ERR-NNN` in [ledgers/errors.md](ledgers/errors.md) (root cause + prevention + **detection**) before proceeding.

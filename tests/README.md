@@ -26,7 +26,7 @@
 | **VG4 — Idempotency** | `test_integration_handler.py::test_handler_end_to_end_then_idempotent` (two runs, same date → identical rows, ≤1 email) | `::test_handler_crash_mid_run_then_resume_sends_once` · `::test_handler_send_failure_not_double_marked_then_retry_sends_once` | ✅ |
 | **VG5 — Notification** | `test_notifier.py::test_render_digest_matches_carry_core_fields` · `::test_notify_sends_digest_with_surfaced_jobs_and_below_count` | `::test_render_digest_zero_matches_is_valid_no_matches_email` · `::test_notify_zero_matches_still_sends`; injection negatives `::test_render_digest_rejects_javascript_scheme_apply_url` · `::test_render_digest_attribute_breakout_apply_url_is_escaped` | ✅ |
 | **VG6 — Teardown** | `terraform destroy` → ~$0 | (N/A — destroy is the negative of apply) | 🏗️ infra gate (validated at C-3; re-checked at Step 10) — *not a pytest* |
-| **VG7 — Secrets hygiene** | secret scan passes | plant a fake key → blocked | ⏳ **Step 9** (pre-commit / CI secret scan — not yet enforced) |
+| **VG7 — Secrets hygiene** | gitleaks scan passes clean on the tree | a planted realistic fake key (an OpenAI- or AWS-style token) is **detected + blocked** (verified at Step 9) | ✅ enforced — pre-commit `gitleaks` hook ([`.pre-commit-config.yaml`](../.pre-commit-config.yaml)) + the CI `secret-scan` job ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) |
 | **VG8 — Threshold is config** | `test_scorer.py::test_vg8_threshold_60_splits_in_between` | `::test_vg8_threshold_0_surfaces_all` · `::test_vg8_threshold_above_all_surfaces_none`; the `SearchSpec`/`Profile` contract tests guard the config layer | ✅ |
 
 ## Unit-pyramid items (build-plan Step 8)
