@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from datetime import date
 
     from .models import DissectedPosting
     from .profile import Profile
@@ -244,6 +245,33 @@ class Repository(Protocol):
         surfaced/below split uses the one config knob — this method does not re-derive it.
 
         "Surfaced" matches Step 5's `surfaced`/`strong_fit` cut. Raises `RepositoryError` on a
+        backend failure."""
+        ...
+
+    def upsert_profile(
+        self,
+        *,
+        user_id: str,
+        profile: "dict[str, Any]",
+        threshold: int,
+        hard_floor: int,
+        near_miss_band: int,
+    ) -> None:
+        """Seed (or update) the single-user `profile` row: the JSONB payload + the three
+        threshold knobs. Idempotent on `user_id` — the Step-7 handler calls this once to seed
+        from the loaded `Profile`/config when no row exists yet. Raises `RepositoryError` on a
+        backend failure."""
+        ...
+
+    def was_digest_sent(self, *, user_id: str, run_date: "date") -> bool:
+        """True if the daily digest has already been sent for `(user_id, run_date)` — the
+        send-once guard (VG4). A re-invocation for the same date checks this BEFORE sending so it
+        never double-emails. Raises `RepositoryError` on a backend failure."""
+        ...
+
+    def mark_digest_sent(self, *, user_id: str, run_date: "date", run_id: str) -> None:
+        """Record that the digest was sent for `(user_id, run_date)` (idempotent upsert on the
+        composite PK). Called only after a successful send. Raises `RepositoryError` on a
         backend failure."""
         ...
 

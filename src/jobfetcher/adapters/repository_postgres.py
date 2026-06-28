@@ -10,6 +10,7 @@ hardcoded credential.
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from sqlalchemy import Engine, select, text, update
@@ -186,6 +187,44 @@ class PostgresRepository:
             "hard_floor": row["hard_floor"],
             "near_miss_band": row["near_miss_band"],
         }
+
+    def upsert_profile(
+        self,
+        *,
+        user_id: str,
+        profile: dict[str, Any],
+        threshold: int,
+        hard_floor: int,
+        near_miss_band: int,
+    ) -> None:
+        # Idempotent on `user_id`: the handler seeds the single-user row once (when none exists);
+        # a re-run overwrites with the same values — never duplicates. Mirrors the inline upsert
+        # the integration tests use, lifted onto the port so the handler doesn't reach into
+        # SQLAlchemy directly.
+        stmt = (
+            pg_insert(tables.profile)
+            .values(
+                user_id=user_id,
+                profile=profile,
+                threshold=threshold,
+                hard_floor=hard_floor,
+                near_miss_band=near_miss_band,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id"],
+                set_={
+                    "profile": profile,
+                    "threshold": threshold,
+                    "hard_floor": hard_floor,
+                    "near_miss_band": near_miss_band,
+                },
+            )
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"upsert_profile failed for {user_id!r}: {e}") from e
 
     def get_silver_postings(
         self, *, limit: int | None = None
@@ -396,3 +435,36 @@ class PostgresRepository:
             else:
                 below += 1
         return surfaced, below
+
+    def was_digest_sent(self, *, user_id: str, run_date: date) -> bool:
+        stmt = select(tables.run_log.c.run_id).where(
+            (tables.run_log.c.user_id == user_id)
+            & (tables.run_log.c.run_date == run_date)
+        )
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(stmt).first()
+        except SQLAlchemyError as e:
+            raise RepositoryError(
+                f"was_digest_sent failed for {user_id!r}/{run_date}: {e}"
+            ) from e
+        return row is not None
+
+    def mark_digest_sent(self, *, user_id: str, run_date: date, run_id: str) -> None:
+        # Idempotent upsert on the composite PK (run_date, user_id): recording the same day twice
+        # refreshes the run_id rather than erroring, so a benign re-mark never crashes a re-run.
+        stmt = (
+            pg_insert(tables.run_log)
+            .values(run_date=run_date, user_id=user_id, run_id=run_id)
+            .on_conflict_do_update(
+                index_elements=["run_date", "user_id"],
+                set_={"run_id": run_id},
+            )
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(
+                f"mark_digest_sent failed for {user_id!r}/{run_date}: {e}"
+            ) from e
