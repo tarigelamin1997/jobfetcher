@@ -1,0 +1,21 @@
+# Pre-commit hooks — the local enforcement edge (build-plan Step 9 / VG7).
+#
+#   pip install pre-commit && pre-commit install     # one-time, wires the git hook
+#   pre-commit run --all-files                       # run every hook over the tree
+#
+# gitleaks is the VG7 secret scan (mirrored in the CI `secret-scan` job); ruff lints (matching
+# the CI `ruff check .` gate). NOTE: `ruff-format` is intentionally NOT a hook — the existing
+# tree predates ruff-format and isn't format-clean, so adding it now would reformat ~54 files
+# (out of scope for minimal CI; noise on every commit). The project's standard is `ruff check`
+# (lint); a deliberate one-time `ruff format` can adopt the formatter later if wanted.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]

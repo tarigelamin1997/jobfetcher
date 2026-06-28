@@ -1,0 +1,83 @@
+name: CI
+
+# Minimal v0 CI (build-plan Step 9). Runs on PRs into main and on pushes to main.
+# Three independent jobs: lint+test (with a real Postgres service), terraform validate,
+# and a secret scan (VG7). The live DeepSeek/JSearch tests skip cleanly (no key in CI),
+# so this exercises the unit + integration layers; full-suite coverage (~89%) clears the floor.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    env:
+      # One URL for BOTH alembic and the integration fixtures. Must match the service creds
+      # below — the integration tests read $JOBFETCHER_DB_URL and use it directly (no Docker).
+      JOBFETCHER_DB_URL: postgresql+psycopg2://postgres:postgres@localhost:5432/jobfetcher
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: jobfetcher
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d jobfetcher"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install (editable + dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Migrate schema (alembic)
+        run: alembic upgrade head
+
+      - name: Test (unit + integration, coverage gate)
+        run: pytest --cov=src/jobfetcher --cov-report=term --cov-fail-under=85
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      # No backend block in terraform/ → -backend=false validates config without AWS creds.
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false
+        working-directory: terraform
+
+      - name: Terraform validate
+        run: terraform validate
+        working-directory: terraform
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # gitleaks scans full history, not just the tip
+      - name: Gitleaks (VG7)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
