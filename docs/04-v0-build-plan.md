@@ -116,13 +116,19 @@ Wire fetch → score → notify in one handler, idempotent for a given run date 
 - **🌍 Terraform (additive).** [lambda.tf](../terraform/lambda.tf) handler entry-point → `jobfetcher.handlers.pipeline.handler`; added `SEARCH_CONFIG_PATH` / `PROFILE_PATH` env; **fixed `DATA_BUCKET` → `JOBFETCHER_DATA_BUCKET`** (the name the code actually reads — a latent Step-10 runtime crash, fixed here). **Packaging/zip + the real apply are deferred to Step 10.**
 - **⚠️ KEY DECISION — VG4 "≤1 email" is at-least-once (the dual-write window).** `notify` sends via SES (external) **then** writes the `run_log` guard — two writes that **can't be atomic** (SES isn't in the DB transaction). In a rare crash window — SES succeeds but the immediately-following `mark_digest_sent` fails — the next run re-sends (a duplicate digest). The build chose **at-least-once on the email** (send, then record) as the **safer default**: a rare duplicate is far better than a silently-missed digest. **VG4 holds for the normal cases** (a same-date double-run sends ≤1; a crash mid-run resumes with no duplicate rows + ≤1 email — both asserted); the residual window is **acknowledged, not hidden**. **Rejected:** guard-*before*-send (risks a *lost* digest if the send then fails — worse); a transactional outbox (overkill for a daily cron at 10–30 jobs/day) — the documented scale-up if it ever matters. (Same spirit as the VG3 best-effort call: state the limitation plainly.) Recorded in [decisions-locked](ledgers/decisions-locked.md).
 
-### Step 8 — Tests (the pyramid, v0 slice)
+### Step 8 — Tests (the pyramid, v0 slice) ✅ built
 - **Unit:** normalization, fingerprint, score-output parsing, threshold routing, email rendering.
 - **Integration:** the handler against **LocalStack/moto** (S3, Secrets) + a **real local Postgres** for the DB (LocalStack doesn't mock the Aurora Data API; the `sqlalchemy-aurora-data-api` dialect gives local↔cloud parity — [ADR-0018](adr/0018-persistence-sqlalchemy-data-api-repository.md)); the LLM mocked.
 - **Live smoke:** one real end-to-end run against deployed infra.
 - **WHY:** reliability + clone-and-run confidence; tests are the negative-case engine for the gate.
-- **WAIT-FOR:** all green locally + one clean live smoke run.
+- **WAIT-FOR:** all green locally + one clean live smoke run. **"all green locally" = met** (180 unit + ~26 integration + ~3 live green; `ruff` clean); **"one clean live smoke run" = Step 10** (against deployed infra).
 - **FAILURE-MODE:** flaky integration → pin LocalStack versions; don't paper over with retries.
+- **✅ Built (feat/test-roundup).** The pyramid is complete + green — **180 unit + ~26 integration + ~3 live**, `ruff` clean, **89% full-suite coverage** (unit-only ~81%; the integration tests cover the `Repository`/handler DB paths). The build *closed two gates that were invisible to CI*:
+  - **VG3 offline negative** — `test_llm_openai.py::test_temperature_from_config_is_in_request_payload` asserts the client sends the *configured* temperature in its request body, making the temp-≠-0 regression **CI-enforceable without a key** (the live determinism test skips without a DeepSeek key, so VG3 never ran in CI before).
+  - **`SearchSpec` contract negatives** — `tests/test_search_spec.py` (9 tests: empty `job_titles`/`countries`, bad ISO-2, blank value, extra-key via `extra="forbid"`) closes the config-contract gap at the **VG1 + VG8** layer (`Profile` already had its negative suite; `SearchSpec` didn't).
+- **🗺️ Test inventory → [`tests/README.md`](../tests/README.md).** The authoritative **VG1–VG8 → test traceability map** (positive + negative per gate), the pyramid layers (unit / coverage / integration / live / live-smoke), and the how-to-run for each. **VG2/VG4/VG5/VG8 + all 5 unit-pyramid items** are fully covered (positive + negative).
+- **📊 Coverage tooling.** `pytest-cov` added as a dev dep + `[tool.coverage]` in `pyproject.toml` — **opt-in `--cov`** (CI-ready for Step 9, no aggressive `fail_under`).
+- **⏳ Deferred (explicitly).** **VG7** (secret-scan: no pre-commit/CI yet) → **Step 9**. **VG6** (teardown) = an infra gate (validated at C-3, re-checked at Step 10) — not a pytest. The **live smoke run** = Step 10.
 
 ### Step 9 — Minimal CI
 GitHub Actions: lint (`ruff`) → unit tests → `terraform validate`. Branch protection on `main` (PR-only). Secret scan in pre-commit.

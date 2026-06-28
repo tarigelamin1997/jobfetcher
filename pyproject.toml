@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.4", "testcontainers[postgres]>=4", "moto[s3]>=5"]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.4", "testcontainers[postgres]>=4", "moto[s3]>=5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -27,6 +27,21 @@ where = ["src"]
 testpaths = ["tests"]
 markers = [
     "integration: hits a live external resource — the DeepSeek API (key + balance) or a real Postgres (Docker / $JOBFETCHER_DB_URL); deselect with -m 'not integration'",
+]
+
+# Coverage is measured on demand (Step 9 wires it into CI); `--cov` is intentionally NOT
+# in addopts so plain `pytest` works without the plugin. Run:
+#   pytest --cov=src/jobfetcher --cov-report=term
+[tool.coverage.run]
+source = ["src/jobfetcher"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "\\.\\.\\.",                       # abstract-method / Protocol stubs
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "pragma: no cover",
 ]
 
 [tool.ruff]
