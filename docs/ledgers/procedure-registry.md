@@ -6,7 +6,7 @@
 |---|---|---|
 | ADR authoring (with rejected alternatives) | ✅ Written | [adr/README](../adr/README.md) |
 | Error/incident logging (Five Questions) | ✅ Written | [05-methodology](../05-methodology.md#adopt-cheap-high-leverage-even-solo--value-is-memory-across-time) + [errors.md](errors.md) |
-| Validation-gate standard (behavioral + negative case) | ✅ Written | [05-methodology](../05-methodology.md) + applied in [04-v0-build-plan](../04-v0-build-plan.md) |
+| Validation-gate standard (behavioral + negative case) | ✅ Written → **mapped to tests** (Step 8) | [05-methodology](../05-methodology.md) + applied in [04-v0-build-plan](../04-v0-build-plan.md); the **VG1–VG8 → test traceability map** (positive + negative per gate) lives in [`tests/README.md`](../../tests/README.md) |
 | Secrets management (Secrets Manager, `jobfetcher/<service>`) | ✅ Written | [decisions-locked](decisions-locked.md) (Security) · pattern in [`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py) `get_key()` |
 | **Gate trio** (entry/code/exit) as slash-commands | ✅ Written | [`.claude/commands/`](../../.claude/commands/) (`start-step` · `review-step` · `close-step`) · [ADR-0013](../adr/0013-enforcement-gate-trio-branch-pr.md) |
 | **Agentic build pipeline** (per-unit gate stages: builder→review→scribe→guardian; cross-unit fan-out; worktree isolation) | ✅ Written | [ADR-0019](../adr/0019-agentic-build-orchestration.md) — first run C-2 |

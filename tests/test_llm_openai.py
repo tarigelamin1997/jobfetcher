@@ -72,3 +72,26 @@ def test_no_key_raises_auth(monkeypatch):
 def test_env_key_is_used(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "envkey")
     assert llm_openai._resolve_api_key(LlmConfig()) == "envkey"
+
+
+def _capture_payload(monkeypatch) -> dict:
+    """Intercept the POST and return the parsed JSON request body the client sent."""
+    captured: dict = {}
+
+    def _fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data)
+        return _FakeResp({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(llm_openai.urllib.request, "urlopen", _fake_urlopen)
+    return captured
+
+
+@pytest.mark.parametrize("temp", [0.0, 0.7])
+def test_temperature_from_config_is_in_request_payload(monkeypatch, temp):
+    """VG3 (CI-enforceable): the client must send the *configured* temperature in the
+    request body — not a hardcoded one. Asserting both 0.0 and a non-zero value makes
+    this non-vacuous: a client that hardcoded any single constant would fail one branch."""
+    captured = _capture_payload(monkeypatch)
+    client = OpenAICompatLlmClient(LlmConfig(temperature=temp), api_key="test-key")
+    client.complete(system="s", user="u")
+    assert captured["body"]["temperature"] == temp
