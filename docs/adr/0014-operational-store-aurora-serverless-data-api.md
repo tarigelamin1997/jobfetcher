@@ -1,7 +1,7 @@
 # ADR-0014 — Operational store: Aurora Serverless v2 + RDS Data API (no VPC)
 
 ## Status
-Accepted (resolves **D-v0-1**)
+Accepted (resolves **D-v0-1**) · **✅ Validated live (v0.1.0, 2026-06-29)** — `terraform apply` → the **14-resource** stack; the **Data API confirmed end-to-end** (schema migrated via `alembic upgrade head` *and* the pipeline ran over it: fetch → … → notify, `statusCode 200`); **scale-to-0** confirmed; then `terraform destroy` → ~$0. The Data-API URL/param gotchas surfaced only on the live path → [ERR-004](../ledgers/errors.md) (`%`-encoded ARNs vs configparser) + [ERR-005](../ledgers/errors.md) (`aurora_cluster_arn` connect-kwarg).
 
 ## Context
 [ADR-0003](0003-postgres-over-dynamodb.md) chose managed PostgreSQL but left the *flavor + connectivity* as a v0 sub-decision (**D-v0-1**). The fetch Lambda must call the **public JSearch API** (internet) and also reach S3, Secrets Manager, and (later) Bedrock. **How the Lambda talks to Postgres decides the entire networking posture** (VPC or not), the cost floor, and the failure surface.

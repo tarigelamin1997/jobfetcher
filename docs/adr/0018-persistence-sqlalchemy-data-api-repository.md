@@ -1,7 +1,7 @@
 # ADR-0018 — Persistence access: SQLAlchemy + aurora-data-api dialect, behind a `Repository` port
 
 ## Status
-Accepted
+Accepted · **✅ Validated live (v0.1.0, 2026-06-29)** — the *same* `Repository` + SQLAlchemy/Alembic code ran on **local Postgres** (psycopg2, tests/CI) **and** on **Aurora via the Data API** (deployed), proving the one-code-path-two-backends claim. The live Data-API path also exposed **two gotchas invisible to the local/CI psycopg2 path**: [ERR-004](../ledgers/errors.md) (configparser `%`-interpolation choked on the `%`-encoded ARNs in the Data-API URL — escape `%`→`%%` in `migrations/env.py`) and [ERR-005](../ledgers/errors.md) (the dialect's connect-kwarg is `aurora_cluster_arn`, not `cluster_arn`). Detection gap noted: no test exercises the Data-API path — only the live deploy caught these.
 
 ## Context
 [ADR-0014](0014-operational-store-aurora-serverless-data-api.md) put the operational store on **Aurora Serverless v2 + the RDS Data API** (Lambda outside any VPC). That settles *where* data lives and *how the Lambda reaches it* (HTTPS Data API), but leaves two build questions open: (1) **how the application code issues SQL** (raw boto3 `rds-data` vs an abstraction), and (2) **how the storage layer is tested** — and **LocalStack does not meaningfully mock the RDS Data API**, so the build-plan's "LocalStack + local Postgres" testing line needs a concrete mechanism. The choice also interacts with [ADR-0015](0015-type-replaceable-pipeline-stages.md)'s type-replaceability tenet, whose ports list did **not** include a storage seam.

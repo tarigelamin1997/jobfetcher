@@ -1,7 +1,7 @@
 # ADR-0008 — Region: us-east-1
 
 ## Status
-Accepted
+Accepted · **✅ Deployed live in us-east-1 (v0.1.0, 2026-06-29)** — the full 14-resource stack applied + ran end-to-end in the region (Bedrock unused — parked per [ADR-0017](0017-llm-transport-openai-compatible-deepseek.md); the LLM is DeepSeek over HTTPS).
 
 ## Context
 The stack needs a region with reliable **Bedrock model availability** (Claude, Kimi, …), low cost, and easy co-location with any future warehouse. Data residency is **not** a hard constraint (Tarig did not select it). The old plan used eu-north-1 with an EU cross-region inference profile.

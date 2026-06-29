@@ -10,7 +10,7 @@ EventBridge (daily) → **one Lambda**: fetch from **one source** → land raw i
 **Explicitly NOT in v0:** CV tailoring · multi-source · clustering dedup (one source ⇒ only exact-id re-fetch dedup) · Step Functions · Notion · near-miss/graduation · warehouse/dbt · full observability. Each is a later migration.
 
 ## v0 contract (for [ledgers/interface-contracts](ledgers/interface-contracts.md))
-- **Consumes:** `search_config` (queries/locations), candidate `profile` JSON, source API key, Bedrock access, a verified SES sender+recipient.
+- **Consumes:** `search_config` (queries/locations), candidate `profile` JSON, source API key, a **DeepSeek API key** (OpenAI-compatible LLM transport — [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md); Bedrock parked), a verified SES sender+recipient.
 - **Produces:** `posting` rows (status `fetched`), `score` rows (status `scored`) in Postgres; raw payloads in S3 `raw/`; one daily email. A documented schema other migrations build on.
 
 ---
@@ -140,11 +140,13 @@ GitHub Actions: lint (`ruff`) → unit tests → `terraform validate`. Branch pr
 - **⏭️ `ruff-format` deferred** — the tree predates it, so a one-time reformat is a separate deliberate commit (not folded into this CI commit); the pre-commit config carries `ruff` lint only for now, with the deferral noted inline.
 - **🛡️ Branch protection — ✅ set.** `main` now **requires** the 3 CI status checks (lint-and-test · terraform-validate · secret-scan) to merge; the external **GitGuardian / CodeRabbit** checks are intentionally **not** required (so a false-positive can't block a merge — as happened on the Step-9 PR, dismissed via the GitHub UI). `strict=false` (no forced rebases), `enforce_admins=false` (docs-direct + self-merge preserved); `main` stays PR-only ([ADR-0013](adr/0013-enforcement-gate-trio-branch-pr.md)).
 
-### Step 10 — Deploy, first live run, tag
-`terraform apply`, populate secrets, trigger the Lambda manually once, confirm the email + DB state, then enable the EventBridge schedule. **Tag `v0.1.0`.**
+### Step 10 — Deploy, first live run, tag ✅ SHIPPED (`v0.1.0`, 2026-06-29)
+
+**Package the Lambda** (`python scripts/build_lambda.py` — vendor Linux wheels via `pip --platform manylinux2014_x86_64 --only-binary`, no Docker; bundle the `jobfetcher` pkg + config; prune runtime-provided boto3/botocore; direct `filename` zip <50 MB — [ADR-0020](adr/0020-lambda-deployment-packaging.md)), **`terraform apply`** (the 14-resource stack), populate secrets, **migrate via `alembic upgrade head` over the Data API**, trigger the Lambda manually, confirm the email + DB state, then enable the EventBridge schedule, **`terraform destroy`** to ~$0. **Tag `v0.1.0`.**
 - **WHY:** v0 is "done" only when it delivers a real scored shortlist on a schedule.
 - **WAIT-FOR:** the validation gate below passes (positive + negative).
 - **FAILURE-MODE:** scheduled run doesn't fire → check the EventBridge rule + Lambda permission.
+- **✅ ACTUAL (live):** the stack applied → schema migrated → invoke → **`statusCode 200`** (fetched 10 → bronzed 10 → silvered 8 → gold 8 → scored 8 → notify sent) on real UAE Data-Engineer postings; **two emails delivered (SES 0 bounces)** — a VG5 zero-path digest and, on an idempotent re-run (**VG4 live**, `already: 8` skipped), a VG5 matches-path shortlist; then `terraform destroy` → 14 destroyed, ~$0 (Secrets Manager keys preserved). The live path caught **2 Data-API deploy-only bugs** — [ERR-004](ledgers/errors.md) (`migrations/env.py` `%`→`%%`) + [ERR-005](ledgers/errors.md) (`handlers/pipeline.py` `cluster_arn`→`aurora_cluster_arn`) — plus a Lambda timeout 300→900s, all fixed (PR #13). **Scale finding:** the single Lambda fits the daily incremental run but **can't** drive the full 18-query × 30-day backfill in 15 min → reinforces **M3** (Step Functions).
 
 ---
 

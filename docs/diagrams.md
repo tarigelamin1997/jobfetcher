@@ -8,7 +8,7 @@
 
 ## 1 · Full-stack architecture (target)
 
-The complete two-plane design (high-level). **v0 is a small subset** (one Lambda → fetch → score → email); everything else arrives by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
+The complete two-plane design (high-level). **The shipped v0.1.0 is a small subset** (one Lambda → fetch → score → SES email, on Aurora SLv2 via the RDS Data API + S3 — **deployed + live-validated 2026-06-29**); everything else arrives by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
 
 ```mermaid
 flowchart TB
@@ -23,13 +23,13 @@ flowchart TB
     subgraph MED["Medallion"]
       BR["Bronze<br/>raw · immutable"]
       SI["Silver<br/>clean · LLM dissect · dedup"]
-      GO["Gold<br/>profile filter"]
+      GO["Gold<br/>profile filter<br/>(v0: deterministic default)"]
     end
     ORC --> BR --> SI --> GO --> SC["Score<br/>LLM · DeepSeek (provider-agnostic)"]
     SC -->|">= threshold"| CV["cv_tailor (M1)<br/>DOCX + PDF"]
-    SC --> NT["notify<br/>SES + Notion"]
+    SC --> NT["notify<br/>SES digest (+ Notion M4)<br/>run_log send-once / day"]
     CV --> NT
-    PG[("Postgres<br/>+ pgvector")]
+    PG[("Postgres — Aurora SLv2<br/>via RDS Data API · + pgvector")]
     S3[("S3<br/>raw + CVs")]
     SM["Secrets Manager"]
     CF["Profile / Config<br/>threshold 60"]

@@ -84,6 +84,8 @@
 | Public repo PII-scrubbed; real profile gitignored → private S3 | Privacy + clone-and-runnable sample | [ADR-0007] |
 | Cost ceiling ~$50/mo OK; some credits; `terraform destroy` → $0 | Optimize for signal, stay cost-aware | journal §6 |
 | IaC: Terraform | Tarig's showcase + most-recognized | journal §6 |
+| **Lambda packaging = vendor Linux wheels via `pip --platform manylinux2014_x86_64 --only-binary` (no Docker), bundle the `jobfetcher` pkg + config, prune runtime-provided boto3/botocore, direct `filename` zip (<50 MB)** — built by `scripts/build_lambda.py` before `terraform apply`; the package targets Linux even when built on Windows | Docker-free build on a thermally-limited Windows host; small zip ⇒ cheap cold start; Data API ⇒ no psycopg2, boto3 is runtime-provided | [ADR-0020] |
+| **Aurora Data-API connect params (live-only contract)** — the aurora-data-api dialect's connect-kwarg is **`aurora_cluster_arn`** (not `cluster_arn`), and Data-API URLs carry **`%`-encoded ARNs** that must be `%%`-escaped before configparser (Alembic) sees them | Both are reachable *only* on the live Data-API path (local/CI = psycopg2) — caught at deploy, not by tests | [ERR-004] · [ERR-005] · [ADR-0018] |
 | Testing: unit + LocalStack/moto (S3/Secrets) + **local Postgres for the DB** + dbt tests + live smoke | Reliability + clone-and-run confidence; DB tests via the aurora-data-api dialect (local↔cloud parity) | journal §6 · [ADR-0018] |
 | Enforcement = the gate trio, run as an **agentic per-unit pipeline** (builder→review→**independent fresh-context verifier**→scribe→guardian) + cross-unit fan-out; **CodeRabbit + human = extra independent eyes per PR** | The in-build reviewer can share the orchestrator's blind spots — an unbiased verifier caught real crash-bugs on Step 4 | [ADR-0013] · [ADR-0019] |
 | **CI = GitHub Actions** on PR→main + push→main (`ruff` + `pytest --cov --cov-fail-under=85` [`postgres:16-alpine` service] + `terraform validate` + **gitleaks** secret-scan; pre-commit = gitleaks + ruff); **VG7 enforced** in pre-commit + CI; `main` **now requires** the 3 checks (lint-and-test/terraform-validate/secret-scan) — external **GitGuardian/CodeRabbit excluded** so a false-positive can't block a merge; `enforce_admins=false` (docs-direct preserved); **`ruff-format` deferred** (a separate one-time reformat — the tree predates it) | Cheap CI from day one for the release-centric model; behavioral checks (real DB + coverage floor, not presence-only); the format-the-whole-tree churn is a deliberate standalone commit, not folded in | build-plan Step 9 |
@@ -92,7 +94,8 @@
 | Decision | Why | Owner |
 |---|---|---|
 | v0 = single Lambda · one source · score · email | Irreducible working core; leaner v0 = more migrations | [04-v0-build-plan] |
+| **v0.1.0 SHIPPED + deployed live (2026-06-29)** — 14-resource Terraform stack applied, schema migrated + pipeline ran end-to-end over the Data API (`statusCode 200`, VG4 + VG5 live, SES 0 bounces), then destroyed to ~$0; scale finding: single Lambda ⇏ the full 18-query × 30-day backfill in 15 min → reinforces **M3** | v0 is "done" only when it delivers a real scored shortlist on real AWS; the backfill limit is the first re-derived P2 bottleneck | [phase-index] · roadmap |
 | CV = M1 (first migration) | High value, clean first release | roadmap |
 | Semver: v0.x per migration → v1.0.0 at M8 → v1.x/v2.0 | Clean evolution story | roadmap |
 
-*Reference labels like [ADR-000X] resolve under [../adr/](../adr/).*
+*Reference labels like [ADR-000X] resolve under [../adr/](../adr/); [ERR-00X] under [errors.md](errors.md); [phase-index] / [04-v0-build-plan] under their docs.*

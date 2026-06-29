@@ -6,7 +6,7 @@
 
 ## What we actually commit to
 
-1. **v0 — the minimal working core** (fully designed; see [04-v0-build-plan](04-v0-build-plan.md)).
+1. **v0 — the minimal working core** — ✅ **SHIPPED (tag `v0.1.0`, 2026-06-29):** built, deployed to AWS, validated live end-to-end, torn down to ~$0 (see [04-v0-build-plan](04-v0-build-plan.md)). **Everything past here is re-derived from real v0 usage via the protocol below** — the M1–M8 list is direction, not commitment.
 2. **The migratable architecture** — built so migrations stay clean and observable (requirements below).
 3. **Release discipline** — every migration is a clean, semver-tagged, documented GitHub release.
 
@@ -35,10 +35,10 @@ The order reflects: value-first · dependency-respecting · capability-arrives-w
 
 | Release | Adds | Bottleneck it breaks (the *why*) |
 |---|---|---|
-| **v0.1** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → **daily email**. Terraform, Secrets Manager, tests, minimal CI. | "I have no automated scored shortlist at all." The irreducible working loop. |
-| **M1 · v0.2** | **CV tailoring** (reliable renderer, one master CV, draft→review). | "I see good matches but still hand-tailor every CV." (Tarig's chosen first migration.) |
+| **v0.1** ✅ **shipped (`v0.1.0`, 2026-06-29)** | One Lambda: 1 source → S3 + Postgres → LLM score (DeepSeek) → **daily email**. Terraform (14-resource stack: Aurora SLv2 + Data API · S3 · least-priv IAM · EventBridge · SES), Secrets Manager, tests, minimal CI. **Deployed to AWS, validated live end-to-end, then torn down to ~$0.** | "I have no automated scored shortlist at all." The irreducible working loop — **done**. |
+| **M1 · v0.2** | **CV tailoring** (reliable renderer, one master CV, draft→review). | "I see good matches but still hand-tailor every CV." (Tarig's *pre-drawn* first-migration hypothesis — **re-confirmed via the P2 protocol after v0.1 usage, not auto-committed.**) |
 | **M2 · v0.3** | **Multi-source + clustering dedup + Suspected-Duplicates.** | "One source misses jobs" → add source #2 (**Adzuna** is the candidate) → *which creates the cross-source duplicate problem* → clustering dedup. Capability + its justification arrive together. (v0 is JSearch-only, so v0 needs only exact-id dedup — [ADR-0010](adr/0010-job-source-jsearch.md).) |
-| **M3 · v0.4** | **Single Lambda → Step Functions.** | "The one Lambda now does fetch-multi→dedup→score→CV→email — too big to retry/observe cleanly." Orchestration is *earned*. |
+| **M3 · v0.4** | **Single Lambda → Step Functions / chunking.** | "The one Lambda now does fetch-multi→dedup→score→CV→email — too big to retry/observe cleanly." Orchestration is *earned*. **Now-evidenced bottleneck (v0.1 finding):** the single Lambda fits the daily incremental run but **can't run the full 18-query × 30-day backfill inside the 15-min Lambda max** — so M3 already has real usage data behind it, not just a hypothesis. |
 | **M4 · v0.5** | **Notion workspace + near-miss/graduation.** | "Email alone can't track status or watch near-misses." Adds Status/Suspected-Dup/Near-Miss DBs + watch→re-score→graduate; stands up the calibration-correction surface. |
 | **M5 · v0.6** | **dbt marts on Postgres** — the [constellation model](adr/0011-dimensional-analytical-model.md): `dim_skill` + `fct_job_skill` bridge **first**, then point-in-time profile + score facts, then `dim_sector` (tests/lineage/incremental; grown per question). | "I can't answer market/skill questions over accumulated data." DE-depth headliner — after data has accumulated. |
 | **M6 · v0.7** | **Skill-Demand tracker + Sector Intelligence** (on the marts). | "I have models but no career-strategy output." Depends on M5. |
