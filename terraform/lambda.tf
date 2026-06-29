@@ -33,7 +33,8 @@ resource "aws_lambda_function" "pipeline" {
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
 
-  timeout     = 300 # 5 min — daily batch with LLM calls + ~15s Aurora cold-resume
+  timeout     = 900 # 15 min (max) — each posting is an LLM dissect/score + a Data-API write
+  # (~30s over the network), so the daily batch needs real headroom (vs the Aurora cold-resume too).
   memory_size = 512
 
   # Config only — NO secret VALUES. The handler fetches secret values at runtime

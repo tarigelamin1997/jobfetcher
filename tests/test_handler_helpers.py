@@ -39,8 +39,9 @@ def test_resolve_db_url_builds_data_api_url_from_arns():
     }
     url = resolve_db_url(env)
     assert url.startswith("postgresql+auroradataapi://:@/jobfetcher?")
-    # the ARNs are carried as url-encoded query params
-    assert "cluster_arn=arn%3Aaws%3Ards%3Aus-east-1%3A1%3Acluster%2Fjf" in url
+    # the ARNs are carried as url-encoded query params; the cluster param is the dialect's
+    # `aurora_cluster_arn` connect kwarg (verified live in the Step-10 deploy)
+    assert "aurora_cluster_arn=arn%3Aaws%3Ards%3Aus-east-1%3A1%3Acluster%2Fjf" in url
     assert "secret_arn=arn%3Aaws%3Asecretsmanager%3Aus-east-1%3A1%3Asecret%2Fjf" in url
 
 

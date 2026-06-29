@@ -92,7 +92,9 @@ def resolve_db_url(env: dict[str, str]) -> str:
             "no DB connection configured — set $JOBFETCHER_DB_URL (local) or all of "
             f"${_DB_CLUSTER_ARN_ENV}/${_DB_SECRET_ARN_ENV}/${_DB_NAME_ENV} (Aurora Data API)"
         )
-    params = urllib.parse.urlencode({"cluster_arn": cluster_arn, "secret_arn": secret_arn})
+    # The sqlalchemy-aurora-data-api dialect maps query params straight to its `connect()` kwargs,
+    # whose name is `aurora_cluster_arn` (not `cluster_arn`) — verified live in the Step-10 deploy.
+    params = urllib.parse.urlencode({"aurora_cluster_arn": cluster_arn, "secret_arn": secret_arn})
     return f"postgresql+auroradataapi://:@/{db_name}?{params}"
 
 
