@@ -1,10 +1,34 @@
 # Changelog
 
-All notable changes to JobFetcher are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/); the project ships **semantic-versioned releases per migration** ([roadmap](docs/03-roadmap.md), [ADR-0013](docs/adr/0013-enforcement-gate-trio-branch-pr.md)). Until **v0.1** ships, everything lives under *Unreleased*.
+All notable changes to JobFetcher are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/); the project ships **semantic-versioned releases per migration** ([roadmap](docs/03-roadmap.md), [ADR-0013](docs/adr/0013-enforcement-gate-trio-branch-pr.md)). **v0.1.0 shipped 2026-06-29.**
 
 The ***why*** behind every entry is the [session decision journal](docs/01-session-decision-journal.md); formal decisions are [ADRs](docs/adr/); the raw reasoning trail is the [working document](docs/session-log/working-document.md).
 
-## [Unreleased] — v0.1 in progress (Step 6 / notify)
+## [Unreleased]
+
+*Next: run the **bottleneck (P2) protocol** on the live v0 — surface the top-3 bottlenecks to the next real capability, rank by leverage, pick **M1**.*
+
+## [v0.1.0] — 2026-06-29 — v0 SHIPPED
+
+**The minimal working core is built, deployed, and live-validated end-to-end** — then torn down to ~$0. EventBridge → one Lambda: **JSearch fetch → S3 + Postgres (Aurora Serverless v2, RDS Data API) → DeepSeek dissect + 7-factor ATS score → SES daily digest**, with Terraform infra, Secrets Manager, the v0 test pyramid, and minimal CI. This is the whole v0 arc: **Steps 0–10** (probe · silver `Dissector` · schema + `Repository` · Terraform infra · fetch/silver landing · gold filter + `Profile` · Scorer · Notifier · single-Lambda handler · test round-up · CI · deploy + live run).
+
+### 🚀 Shipped — the live validation (2026-06-29, the Step-10 deploy)
+
+- **`terraform apply` → the 14-resource stack** (Aurora SLv2 + Data API, S3, Lambda, EventBridge, SES sender, least-privilege IAM); SES sender + recipient verified; schema created on Aurora via **`alembic upgrade head` over the Data API**.
+- **The full pipeline ran end-to-end on real AWS:** invoke → `statusCode 200` → **fetched 10 → bronzed 10 → silvered 8 → gold 8 → scored 8 → notify sent**. Real UAE Data-Engineer postings scored (GSSTech, Contango, Michael Page, …). **Two emails delivered, SES 0 bounces:** a no-matches digest (threshold 60, all 8 below — **VG5 zero-path**) and, on an **idempotent re-run** (`already: 8` skipped — **VG4 live**), a populated 7-job shortlist (threshold lowered to 20 — **VG5 matches-path**). The `run_log` send-once guard recorded both runs.
+- **`terraform destroy` → 14 destroyed**, independently verified GONE (Aurora / Lambda / S3); the two Secrets Manager keys preserved (reusable). Back to ~$0.
+
+### Fixed — 2 deploy-only bugs the live run caught (PR #13)
+
+Invisible to local psycopg2 tests + CI's `postgres` service — neither exercises the Aurora **RDS Data API** path:
+
+- **`migrations/env.py`** — configparser choked on the `%`-encoded ARNs; escape `%` → `%%`.
+- **`handlers/pipeline.py`** — the Data-API dialect's connect kwarg is **`aurora_cluster_arn`**, not `cluster_arn`; would break **every** deploy.
+- **Lambda timeout 300 → 900s** — each posting ≈30s (an LLM call + a Data-API write).
+
+### 📈 Scale finding (a genuine P2 bottleneck → reinforces M3)
+
+The single Lambda **can't** run the **full** 18-query × 30-day backfill inside the 15-min max (throughput ≈30s/posting × hundreds of jobs); the daily **incremental** run (~10–30 new jobs) fits comfortably. The smoke run used a minimal config (1 country, 3 days). This is a real future migration signal → **M3 (Step Functions)**.
 
 ### 🏆 Milestones
 
@@ -14,7 +38,11 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ### Added
 
-- **Step 6 — Notifier (SES daily digest, in PR #8):** HTML + plaintext digest of the day's scored matches; a zero-matches "no matches today" email (VG5). Apply-URL `href` is **scheme-allowlisted to http/https** as an email-injection guard, verified un-bypassable (the fresh verifier's should-fix).
+- **Step 10 — deploy + first live run (this release):** the 14-resource Terraform stack applied to real AWS, schema migrated over the Data API, the full pipeline run + validated end-to-end (see the live-validation block above), then destroyed to ~$0. Tagged **`v0.1.0`**.
+- **Step 9 — minimal CI:** GitHub Actions on PR→main + push→main — 3 jobs: `ruff` + `alembic upgrade head` + `pytest --cov --cov-fail-under=85` (against `postgres:16-alpine`; live DeepSeek/JSearch tests skip without keys) · `terraform validate` (AWS-free) · **gitleaks** secret-scan (**VG7** — pre-commit + CI, blocks a planted fake key). Green CI → `main`'s required status checks.
+- **Step 8 — test round-up:** the v0 pyramid complete + green — **180 unit + ~26 integration + ~3 live**, `ruff` clean, **89% full-suite coverage**; closed the two CI-invisible gaps (a **VG3 offline negative** — temp-≠-0 caught without a key — and **`SearchSpec` contract negatives**); added [`tests/README.md`](tests/README.md) (the VG1–VG8 → test traceability map) + `pytest-cov` tooling.
+- **Step 7 — single Lambda `handler`:** `handlers/pipeline.py` wires `ingest → apply_gold_filter → score_gold → notify` behind one entry point — seeds the `profile` row, threads the correlation `run_id`, env-resolves the DB engine (local URL vs Aurora Data API) + config paths, `{statusCode, run_id, …counts}` summary, a stage failure → `500` → next run resumes. **VG4 idempotent** via upserts + a **`run_log` send-once guard** (migration 0003, PK `(run_date, user_id)`); the email is **at-least-once** (the SES↔`run_log` dual-write can't be atomic).
+- **Step 6 — Notifier (SES daily digest):** HTML + plaintext digest of the day's scored matches; a zero-matches "no matches today" email (VG5). Apply-URL `href` is **scheme-allowlisted to http/https** as an email-injection guard, verified un-bypassable (the fresh verifier's should-fix).
 - **Step 5 — Scorer (7-factor ATS):** explainable scoring at temp 0 on `deepseek-v4-pro`; `UNIQUE(score.cluster_id)` enforced (migration 0002); VG8 (threshold-is-config) proven.
 - **Step 4b — gold filter + `Profile` contract:** v0 default is a **deterministic** `FilterStrategy` (an LLM gold-filter is redundant with the Scorer at 10–30 jobs/day — built and config-selectable, but off by default); **1:1 clusters** (`cluster_id = posting_id`) close the score-keys-on-`cluster_id` gap until real clustering arrives (M2). New `Profile` contract + sanitized sample.
 - **Step 4 — fetch + bronze→silver landing:** the source fetch and the bronze→silver landing path, wired through to the `Dissector` and `Repository`.

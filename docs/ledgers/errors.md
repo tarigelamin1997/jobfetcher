@@ -62,8 +62,34 @@
 - **Blast radius:** none — a false positive on a non-secret local-dev value.
 - **Prevention implemented?** Yes — the env-interpolation pattern (compose + test docstring).
 
+### ERR-004 — Alembic over the Data API crashes on `%`-encoded ARNs (configparser interpolation)   [Resolved]
+- Stage: Step 10 deploy (schema creation on live Aurora via `alembic upgrade head` over the Data API) · Layer: persistence / migrations · Type: config (string interpolation)
+- Discovered: 2026-06-29 · Resolved: 2026-06-29 · Source: implementation (live v0.1.0 deploy)
+
+1. **What happened?** Running `alembic upgrade head` against live Aurora over the **RDS Data API** crashed inside `migrations/env.py` when it set the connection URL. The aurora-data-api URL embeds the cluster + secret **ARNs**, which are `%`-encoded (`arn:aws:rds:…` → `…%3A…`); Alembic's `config.set_main_option(...)` routes the value through Python's `configparser`, whose **`%`-interpolation** tried to expand `%3A` / `%2F` as interpolation tokens and raised on the malformed reference.
+2. **Why?** `configparser` treats `%` as the interpolation sigil; a literal `%` in a value must be **doubled (`%%`)** to survive. The Data-API URL is the first migration URL to *contain* `%`-encoded ARNs, so the bug had never been reachable before.
+3. **How?** Local migrations + tests run **psycopg2** against a container Postgres, whose URL is `postgresql://user:pass@host/db` — **no ARNs, no `%`** — so `configparser` never had anything to interpolate. CI's postgres service has the same psycopg2 URL. The Data-API path that carries the `%`-encoded ARNs is **only exercised on a real deploy**, so the crash first appeared at `alembic upgrade head` on live Aurora.
+4. **How fixed?** In `migrations/env.py`, **escape `%`→`%%`** in the resolved Data-API URL before handing it to `config.set_main_option(...)`, so configparser stores the literal ARN characters. Migration then ran clean and created the v0 schema on live Aurora.
+5. **Prevention + Detection:** the escape is in `env.py` so any future migration over the Data API is safe. **Detection — the real gap:** *no test exercises the Aurora Data-API path* (local = psycopg2, CI = postgres service), so neither the unit pyramid nor CI could ever surface a Data-API-URL-specific bug — **only the live deploy did.** The honest detection lesson is that a **live smoke run against real Aurora** is the gate that catches Data-API-specific bugs; a future **minimal live-Data-API test** (run only with credentials, skipped in CI) would catch this class earlier.
+- **Blast radius:** schema creation on deploy — *blocks every deploy* (no schema ⇒ no pipeline) until fixed; no data impact (caught before any run).
+- **Prevention implemented?** Yes — the `%`→`%%` escape in `migrations/env.py` (v0.1.0 deploy fix). Detection gap (a live-Data-API test) noted, not yet built.
+
+### ERR-005 — aurora-data-api dialect rejects `cluster_arn` connect-kwarg (wrong param name)   [Resolved]
+- Stage: Step 10 deploy (Lambda `resolve_db_url` building the SQLAlchemy URL) · Layer: persistence / connectivity · Type: config (wrong kwarg name)
+- Discovered: 2026-06-29 · Resolved: 2026-06-29 · Source: implementation (live v0.1.0 deploy)
+
+1. **What happened?** The pipeline's first DB call on live Aurora raised **`connect() got an unexpected keyword argument 'cluster_arn'`**. `handlers/pipeline.py` `resolve_db_url` built the SQLAlchemy URL with a `cluster_arn=` query parameter; the **`sqlalchemy-aurora-data-api`** dialect maps URL query params **straight through to its `connect()` kwargs**, where the parameter is named **`aurora_cluster_arn`** — so `cluster_arn` arrived as an unknown kwarg and `connect()` rejected it.
+2. **Why?** The dialect's documented connect kwarg is `aurora_cluster_arn` (and `secret_arn`), not the shorter `cluster_arn` the code assumed. The query-param→kwarg pass-through means the name must match the dialect's `connect()` signature **exactly**.
+3. **How?** Same structural blind spot as ERR-004: the aurora-data-api dialect's `connect()` is **only invoked on the real Data-API path**. Local psycopg2 and CI's postgres service use a *different dialect entirely*, so they never call `aurora_data_api.connect()` and never validate its kwarg names. The wrong name was reachable only on a live deploy — and it would have broken **every** deploy, not an edge case.
+4. **How fixed?** Renamed the query param in `resolve_db_url` to **`aurora_cluster_arn`** (matching the dialect's `connect()` kwarg). The pipeline then connected to live Aurora over the Data API and ran end-to-end (`statusCode 200`, fetched 10 → … → email sent).
+5. **Prevention + Detection:** the corrected kwarg name is in `resolve_db_url`. **Detection — the same real gap as ERR-004:** *no test exercises the Aurora Data-API path*, so the dialect's actual `connect()` signature is never validated by local tests or CI; only the **live smoke run against real Aurora** caught it. The detection lesson stands: a **live deploy is the gate** for Data-API-dialect bugs, and a future **minimal live-Data-API test** would pin the kwarg contract earlier.
+- **Blast radius:** the Lambda's DB connection — *blocks every deploy / every run* (no connection ⇒ no pipeline) until fixed; no data impact (caught on the first live invocation).
+- **Prevention implemented?** Yes — the `aurora_cluster_arn` rename in `handlers/pipeline.py` (v0.1.0 deploy fix). Detection gap (a live-Data-API test) noted, not yet built.
+
 | ID | Severity | Stage | Symptom | Status |
 |---|---|---|---|---|
 | ERR-001 | Critical | pre-build (Bedrock) | base-id ValidationException + new-account daily token quota = 0 (non-adjustable) | **Mitigated** — routed around via DeepSeek / OpenAI-compatible ([ADR-0017]); quota still 0 but no longer blocking; AWS case `178220019100382` open (optional) |
 | ERR-002 | Low | dev-infra (local Postgres) | Docker Hub `403` on anonymous pulls (other registries OK) | **Resolved** — registry mirror `mirror.gcr.io` + `${JOBFETCHER_DB_IMAGE}` override |
 | ERR-003 | Info | dev-infra (PR hygiene) | GitGuardian generic-password on a local-dev literal | **Resolved** (false positive) — env-interpolated `${POSTGRES_PASSWORD}` |
+| ERR-004 | High | Step 10 deploy (Alembic over Data API) | `configparser` `%`-interpolation choked on `%`-encoded ARNs in the Data-API URL | **Resolved** — escape `%`→`%%` in `migrations/env.py`; caught only by the live deploy (no Data-API test) |
+| ERR-005 | High | Step 10 deploy (Lambda DB connect) | `connect() got an unexpected keyword argument 'cluster_arn'` (dialect wants `aurora_cluster_arn`) | **Resolved** — renamed kwarg in `handlers/pipeline.py`; would have broken every deploy; caught only by the live run |

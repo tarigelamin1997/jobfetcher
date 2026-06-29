@@ -126,11 +126,11 @@ flowchart TB
 
 The directional roadmap — a **living hypothesis**, not a contract. Live status is the source of truth in [ledgers/phase-index](ledgers/phase-index.md); this is the *shape*. Discussed in [03-roadmap](03-roadmap.md).
 
-**v0 is nearly complete** — its internal stages (probe → dissect → schema → infra → fetch/silver → gold → score → notify) are **built and verified** through the agentic gate pipeline ([ADR-0019](adr/0019-agentic-build-orchestration.md)); **Steps 7–10 remain** (handler wiring → CI → deploy → live smoke). The migration markers (M1–M8) below are still all ⬜.
+**v0 is SHIPPED** — all 10 steps (probe → dissect → schema → infra → fetch/silver → gold → score → notify → handler → CI → deploy) built and verified through the agentic gate pipeline ([ADR-0019](adr/0019-agentic-build-orchestration.md)), then **deployed to AWS, validated live end-to-end, and torn down to ~$0** (tag **`v0.1.0`**, 2026-06-29). The migration markers (M1–M8) below are still all ⬜ — **next = the bottleneck protocol → M1**.
 
 ```mermaid
 flowchart LR
-  v0["v0.1 🚧 nearly done<br/>fetch → score → email<br/>(Steps 7–10: handler · CI · deploy)"] --> M1["M1 ⬜<br/>CV tailoring"]
+  v0["v0.1 ✅ shipped (v0.1.0)<br/>fetch → score → email<br/>deployed · live-validated · torn down to $0"] --> M1["M1 ⬜<br/>CV tailoring"]
   M1 --> M2["M2 ⬜<br/>multi-source + dedup"]
   M2 --> M3["M3 ⬜<br/>Step Functions"]
   M3 --> M4["M4 ⬜<br/>Notion + near-miss"]
