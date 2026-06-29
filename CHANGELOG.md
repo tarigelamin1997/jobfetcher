@@ -8,6 +8,17 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 *Next: run the **bottleneck (P2) protocol** on the live v0 — surface the top-3 bottlenecks to the next real capability, rank by leverage, pick **M1**.*
 
+## [v0.1.1] — 2026-06-29 — documentation refresh
+
+An all-round documentation update over **[v0.1.0]** reflecting the deployed reality — **no pipeline change** (v0.1.0's code, including the two Data-API deploy fixes, stands).
+
+### Changed
+- **README** rewritten for the deployed + live-validated v0.1.0 (as-built flow, tech-stack table, how-to-deploy/run + the local test pyramid, the live-validation proof, the evolutionary roadmap).
+- **`docs/02-architecture.md`** — the as-built deployed v0 (14-resource stack, RDS Data API, deterministic gold-filter default, the `run_log` send-once guard, the scale finding); **`docs/03-roadmap.md`** — v0 shipped, **M3 now evidence-backed** (the single-Lambda full-backfill limit), M1 = a hypothesis re-derived via the bottleneck protocol.
+- **ADRs** — status touches on 0008 / 0014 / 0018 (validated live v0.1.0) + **NEW [ADR-0020]** (Lambda deployment packaging — Linux wheels via `pip --platform`, no Docker, boto3 pruned), indexed.
+- **Ledgers** — interface-contracts → **shipped**; decisions-locked + the Aurora Data-API connect-param live-only contract + ADR-0020 + a v0.1.0-deployed row; procedure-registry + the Lambda-packaging/deploy procedure; build-plan Step 10 → the *actual* deploy (build-lambda · apply/migrate/invoke/validate/destroy · the 2 bugs · the tag).
+- **Diagrams** — `docs/diagrams.md` reflects the as-built + shipped v0; a fresh **Eraser** v0.1.0 architecture diagram (personal/portfolio view, not committed).
+
 ## [v0.1.0] — 2026-06-29 — v0 SHIPPED
 
 **The minimal working core is built, deployed, and live-validated end-to-end** — then torn down to ~$0. EventBridge → one Lambda: **JSearch fetch → S3 + Postgres (Aurora Serverless v2, RDS Data API) → DeepSeek dissect + 7-factor ATS score → SES daily digest**, with Terraform infra, Secrets Manager, the v0 test pyramid, and minimal CI. This is the whole v0 arc: **Steps 0–10** (probe · silver `Dissector` · schema + `Repository` · Terraform infra · fetch/silver landing · gold filter + `Profile` · Scorer · Notifier · single-Lambda handler · test round-up · CI · deploy + live run).
