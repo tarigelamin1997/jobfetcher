@@ -154,3 +154,28 @@ def test_resolve_deadline_none_without_real_context():
     # local runs / tests pass None (or an object without the Lambda method) → no time budget
     assert resolve_deadline(None) is None
     assert resolve_deadline(object()) is None
+
+
+# --------------------------------------------------------------------------- H-3 gold filter
+def test_resolve_filter_strategy_default_and_explicit(monkeypatch):
+    from jobfetcher.adapters.filter_deterministic import DeterministicFilterStrategy
+    from jobfetcher.adapters.filter_llm import LlmFilterStrategy
+    from jobfetcher.handlers.pipeline import resolve_filter_strategy
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")  # llm path builds a client (no call)
+    assert isinstance(resolve_filter_strategy({}), DeterministicFilterStrategy)
+    assert isinstance(
+        resolve_filter_strategy({"GOLD_FILTER_STRATEGY": "deterministic"}),
+        DeterministicFilterStrategy,
+    )
+    assert isinstance(
+        resolve_filter_strategy({"GOLD_FILTER_STRATEGY": "LLM"}), LlmFilterStrategy
+    )
+
+
+def test_resolve_filter_strategy_rejects_junk():
+    # negative: a typo'd strategy must fail loudly, never silently fall back to a default
+    from jobfetcher.handlers.pipeline import resolve_filter_strategy
+
+    with pytest.raises(ValueError, match="GOLD_FILTER_STRATEGY"):
+        resolve_filter_strategy({"GOLD_FILTER_STRATEGY": "fuzzy"})

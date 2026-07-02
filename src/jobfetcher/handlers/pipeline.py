@@ -72,6 +72,7 @@ _DB_SECRET_ARN_ENV = "DB_SECRET_ARN"
 _DB_NAME_ENV = "DB_NAME"
 _RECIPIENT_ENV = "RECIPIENT_EMAIL"
 _MAX_WORKERS_ENV = "PIPELINE_MAX_WORKERS"
+_GOLD_FILTER_ENV = "GOLD_FILTER_STRATEGY"
 
 # Seconds reserved before the Lambda's hard timeout: in-flight LLM calls + the tail of DB
 # writes + notify must finish inside this margin (H-2 deadline guard).
@@ -153,6 +154,23 @@ def resolve_deadline(context: Any) -> Deadline | None:
     return Deadline(get_remaining() / 1000.0 - _DEADLINE_MARGIN_S)
 
 
+def resolve_filter_strategy(env: dict[str, str]) -> Any:
+    """The gold `FilterStrategy` from `$GOLD_FILTER_STRATEGY` (H-3): `deterministic`
+    (default) or `llm` (the `LlmFilterStrategy` on the cheap dissect model — semantic
+    adjacency the token rule can't judge). Raises `ValueError` on anything else — a
+    misconfigured stage must fail loudly, never silently fall back."""
+    choice = (env.get(_GOLD_FILTER_ENV) or "deterministic").strip().lower()
+    if choice == "deterministic":
+        return DeterministicFilterStrategy()
+    if choice == "llm":
+        from ..adapters.filter_llm import LlmFilterStrategy
+
+        return LlmFilterStrategy(OpenAICompatLlmClient(LlmConfig(model=_DISSECT_MODEL)))
+    raise ValueError(
+        f"${_GOLD_FILTER_ENV} must be 'deterministic' or 'llm', got {choice!r}"
+    )
+
+
 # --------------------------------------------------------------------------- handler
 def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[str, Any]:
     """The one v0 Lambda. Returns a `{statusCode, run_id, ...stage counts}` summary.
@@ -201,7 +219,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         dissector = Dissector(
             OpenAICompatLlmClient(LlmConfig(model=_DISSECT_MODEL)), model_id=_DISSECT_MODEL
         )
-        strategy = DeterministicFilterStrategy()
+        strategy = resolve_filter_strategy(env)  # H-3: deterministic (default) | llm
         scorer = Scorer(
             OpenAICompatLlmClient(LlmConfig(model=_SCORE_MODEL)), model_id=_SCORE_MODEL
         )
