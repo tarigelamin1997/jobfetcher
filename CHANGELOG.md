@@ -6,7 +6,23 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
-*Next: run the **bottleneck (P2) protocol** on the live v0 — surface the top-3 bottlenecks to the next real capability, rank by leverage, pick **M1**.*
+*Next migration candidate (P2): the **digest email UX** — the format is poor and the job apply-links must be visible. Queued after v0.2.0.*
+
+## [v0.2.0] — 2026-07-02 — M1: pipeline hardening
+
+**The bottleneck-driven first migration.** The P2 protocol ran the tool live on the full 18-query GCC sweep and measured three real bottlenecks (overruling the pre-drawn *M1 = CV tailoring* hypothesis): serial throughput that timed out, a single provider `503` that killed a whole run, and a gold filter loose enough to pay the pro-model to reject obvious junk — plus AWS blind-retrying the dead run. All fixed and **re-validated live on the exact workload that failed** ([ADR-0021](docs/adr/0021-m1-pipeline-hardening.md)).
+
+### Changed
+- **Throughput (H-2):** silver dissection + scoring now run their LLM calls on a bounded **`ThreadPoolExecutor`** (default 8, `$PIPELINE_MAX_WORKERS`); **all DB writes stay on the main thread**. A **deadline guard** (`context.get_remaining_time_in_millis()` − 60s) stops starting new work before the timeout, returns `partial: true` with a `deferred` count, and skips notify so the idempotent re-run sends the digest. **Measured ~13× faster (~1.1→~14–15 dissections/min); a run can no longer time out.**
+- **Precision (H-3):** the deterministic gold filter now requires **all** of a target title's tokens in the posting title ("Data Architect" → `data`+`architect`), not any single shared token; the built `LlmFilterStrategy` is now selectable via `$GOLD_FILTER_STRATEGY`. **The six live junk titles (Alliances Manager, Computer Vision Engineer, …) are eliminated.**
+- **Lambda infra:** `memory_size` 512→**1024 MB** (CPU scales with memory for the worker threads); **`aws_lambda_function_event_invoke_config { maximum_retry_attempts = 0 }`** codifies the fix for the async zombie-retry.
+
+### Added
+- **Retry + jitter (H-1):** `OpenAICompatLlmClient.complete()` retries only transient failures (429/5xx + connection/timeout) with exponential backoff + full jitter (`LlmConfig.max_retries`, `backoff_base_s`); auth/model-not-found fail fast. `land_silver` now isolates `LlmError` symmetrically with `score_gold` — one blip skips one posting, never the run.
+- **[ADR-0021]** (M1 pipeline hardening, with the measured before/after table + the honest M3 caveat); **ERR-006** (503 no-retry crash) + **ERR-007** (async auto-retry re-fetch) in the error log; new unit tests (retry policy, failure isolation, concurrency wall-clock, deadline deferral, subset-title, strategy resolution) — **212 unit + integration green**.
+
+### Live validation (2026-07-02)
+- Re-ran the ~132-posting backlog the pre-fix code died on: `statusCode 200`, backlog fully dissected + scored, **0 run-fatal errors** (15 dissect + 0 score failures isolated), and a **populated 21-job digest sent** — real GCC Data-Engineer roles scored 60–95 across all six countries. (Bonus finding: the market is *not* thin; the earlier "no matches" was the tiny Oman/Architect sample.)
 
 ## [v0.1.1] — 2026-06-29 — documentation refresh
 

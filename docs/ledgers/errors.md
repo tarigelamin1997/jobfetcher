@@ -86,6 +86,30 @@
 - **Blast radius:** the Lambda's DB connection — *blocks every deploy / every run* (no connection ⇒ no pipeline) until fixed; no data impact (caught on the first live invocation).
 - **Prevention implemented?** Yes — the `aurora_cluster_arn` rename in `handlers/pipeline.py` (v0.1.0 deploy fix). Detection gap (a live-Data-API test) noted, not yet built.
 
+### ERR-006 — one DeepSeek 503 killed the whole run (no retry + asymmetric failure isolation)   [Resolved]
+- Stage: M1 P2 live run (silver dissection + scoring) · Layer: LLM transport / orchestration · Type: missing resilience (no retry) + inconsistent error handling
+- Discovered: 2026-07-02 · Resolved: 2026-07-02 (M1/H-1, PR #14) · Source: live full-sweep run (`complete01`)
+
+1. **What happened?** A completing invoke returned **`statusCode 500`** with `LlmError: HTTP 503: {"error":{"message":"Service is too busy. We advise users to temporarily switch to alternative LLM API service providers."}}`. One transient DeepSeek overload aborted an entire pipeline run — gold/score/notify never ran.
+2. **Why?** Two gaps compounded. (a) `OpenAICompatLlmClient.complete()` made **exactly one** HTTP attempt — any non-401/404 status (incl. 503) raised `LlmError` immediately, no retry/backoff. (b) **Asymmetric isolation:** `score_gold` caught `(ScorerError, LlmError)` per item, but `land_silver` caught only `DissectionError` — so an `LlmError` raised inside `Dissector.dissect` propagated raw and crashed the run.
+3. **How?** Provider overload (`503`) is transient and common at scale, but the client treated it as fatal, and the dissection path had no isolation net for it. Local/CI tests mock the LLM and never exercise a real provider 503, so the gap was invisible until a live run hit an actual DeepSeek overload.
+4. **How fixed?** H-1 (PR #14): `complete()` retries **only transient** failures (HTTP 429/500/502/503/504 + connection/timeout) with **exponential backoff + full jitter** (`LlmConfig.max_retries=3`, `backoff_base_s=1.0`); 401/404/other-4xx still fail fast. `land_silver` now catches `(DissectionError, LlmError)` → skip one posting, never the run (symmetric with `score_gold`). Re-validated live (revalidate01): **15 dissect failures + 0 score failures isolated**, `statusCode 200`, digest sent.
+5. **Prevention + Detection:** retry policy lives in `adapters/llm_openai.py` (config-tunable); isolation is symmetric across both LLM stages. **Detection:** unit tests assert retry-to-success, exhausted-retries, never-retry-401, fail-fast-4xx, and the `land_silver` LlmError-skip; the live re-validation is the behavioral gate. **Lesson:** a mocked-LLM test suite can't catch provider-resilience gaps — a live run under real load is the gate, and every external call needs an explicit transient-vs-fatal policy.
+- **Blast radius:** a whole run per transient blip (no partial progress past the failing stage) until fixed. No data corruption (bronze immutable; upserts idempotent).
+- **Prevention implemented?** Yes — retry+jitter + symmetric isolation (v0.2.0 / [ADR-0021](../adr/0021-m1-pipeline-hardening.md)).
+
+### ERR-007 — AWS async auto-retry re-fetched a timed-out run (quota + token burn)   [Resolved]
+- Stage: M1 P2 live run (async invoke of the full sweep) · Layer: infra / Lambda invocation config · Type: platform default mismatched to a long idempotent-but-expensive job
+- Discovered: 2026-07-02 · Resolved: 2026-07-02 (M1/H-2, PR #15/#17) · Source: live poll (bronze crept 155→161 after a timeout)
+
+1. **What happened?** After the serial full-sweep run timed out (15-min cap), the DB showed bronze climbing again minutes later — **a second invocation had started on its own**, re-fetching the whole sweep from scratch.
+2. **Why?** The function was invoked **asynchronously** (`--invocation-type Event`), and **AWS retries a failed async invocation up to 2× by default**. A 15-min run that times out looks like a failure, so AWS re-queued it — each retry re-ran fetch (JSearch quota) + re-dissected (tokens) on a run that would only time out again.
+3. **How?** The default async retry policy is sensible for short idempotent handlers, but wrong for a long-running batch that resumes on its *own* schedule (EventBridge tomorrow / a manual re-invoke). No `event_invoke_config` was set, so the default (2 retries) applied.
+4. **How fixed?** Mitigated live via CLI (`put-function-event-invoke-config --maximum-retry-attempts 0`), then codified in Terraform: **`aws_lambda_function_event_invoke_config { maximum_retry_attempts = 0 }`** (H-2). Combined with H-2's deadline guard (runs now return `partial` cleanly instead of timing out), the failure that triggered the retry is itself gone. Verified post-deploy: `get-function-event-invoke-config` → `MaximumRetryAttempts: 0`.
+5. **Prevention + Detection:** the retry-0 config is in `terraform/lambda.tf` (IaC, no drift). **Detection:** a live invoke no longer spawns a re-fetch; the deadline guard makes timeouts impossible. **Lesson:** platform defaults (async retry) must be matched to the job's shape — a long, self-resuming, expensive job must opt out of blind platform retries.
+- **Blast radius:** wasted JSearch quota (a scarce free-tier resource) + LLM tokens per retry; no data corruption (idempotent upserts + `already`-skip + the `run_log` send-once guard meant even overlapping runs produced one email).
+- **Prevention implemented?** Yes — `maximum_retry_attempts=0` in Terraform + the deadline guard (v0.2.0 / [ADR-0021](../adr/0021-m1-pipeline-hardening.md)).
+
 | ID | Severity | Stage | Symptom | Status |
 |---|---|---|---|---|
 | ERR-001 | Critical | pre-build (Bedrock) | base-id ValidationException + new-account daily token quota = 0 (non-adjustable) | **Mitigated** — routed around via DeepSeek / OpenAI-compatible ([ADR-0017]); quota still 0 but no longer blocking; AWS case `178220019100382` open (optional) |

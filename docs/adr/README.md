@@ -26,5 +26,6 @@ These are the **foundational** decisions made during the design session — the 
 | [0018](0018-persistence-sqlalchemy-data-api-repository.md) | Persistence access: SQLAlchemy + aurora-data-api dialect, behind a `Repository` port | Accepted |
 | [0019](0019-agentic-build-orchestration.md) | Agentic build orchestration: per-unit gate pipeline (builder→review→scribe→guardian) + cross-unit fan-out | Accepted |
 | [0020](0020-lambda-deployment-packaging.md) | Lambda deployment packaging: vendor Linux wheels via `pip --platform` (no Docker), bundle + prune boto3, direct zip | Accepted · ✅ Validated live (v0.1.0) |
+| [0021](0021-m1-pipeline-hardening.md) | M1 pipeline hardening: LLM retry+jitter & symmetric isolation · in-Lambda concurrency + deadline guard · subset-title gold filter + selectable LLM filter | Accepted · ✅ Validated live (v0.2.0) |
 
 > Full reasoning narrative: [01-session-decision-journal](../01-session-decision-journal.md). Crisp decision list: [ledgers/decisions-locked](../ledgers/decisions-locked.md).
