@@ -194,7 +194,7 @@ def test_full_ingest_end_to_end(repo, raw_store):
         raw_store=raw_store, repo=repo,
         dissector=Dissector(FakeLlm(CANNED_LLM_JSON), model_id="test-model"),
     )
-    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0}
+    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0}
     assert repo.get_posting(f"jsearch:{id1}") is not None
 
 

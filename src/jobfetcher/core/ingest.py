@@ -10,6 +10,8 @@ failure skips one posting without losing the raw or crashing the run.
 from __future__ import annotations
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +42,27 @@ _DEFAULT_HARD_FLOOR = 50
 _DEFAULT_NEAR_MISS_BAND = 10
 
 log = logging.getLogger(__name__)
+
+# LLM calls are pure I/O — this many run concurrently per stage (H-2). DB writes always stay
+# on the main thread (the Data-API dialect's thread-safety is deliberately not relied on).
+DEFAULT_MAX_WORKERS = 8
+
+# Sentinel returned by a worker whose task started after the deadline: the item was neither
+# processed nor failed — it is deferred to the next (idempotent) run.
+_DEFERRED = object()
+
+
+class Deadline:
+    """A wall-clock budget for LLM work (H-2). Workers check `expired` before starting an
+    LLM call; past the deadline, remaining items are *deferred* (counted, not lost) and the
+    run returns partial-but-clean instead of being killed by the Lambda timeout."""
+
+    def __init__(self, seconds: float) -> None:
+        self._until = time.monotonic() + max(seconds, 0.0)
+
+    @property
+    def expired(self) -> bool:
+        return time.monotonic() >= self._until
 
 
 def fetch_to_bronze(
@@ -111,6 +134,38 @@ def land_silver(
     `language` (from `spec.language`) is recorded on the posting metadata — never hardcoded.
     `query_country` (the country actually queried) is the authoritative geo scope (C3): it
     overrides the unreliable per-record `job_country` when set."""
+    prepared = _prepare_silver(
+        bronze_id,
+        raw_payload,
+        run_id=run_id,
+        source=source,
+        source_job_id=source_job_id,
+        dissector=dissector,
+        language=language,
+        query_country=query_country,
+        pipeline_version=pipeline_version,
+    )
+    if prepared is None:
+        return None
+    dissected, kwargs = prepared
+    return repo.save_posting(dissected, **kwargs)
+
+
+def _prepare_silver(
+    bronze_id: str,
+    raw_payload: dict[str, Any],
+    *,
+    run_id: str,
+    source: str,
+    source_job_id: str,
+    dissector: "Dissector",
+    language: str = "en",
+    query_country: str | None = None,
+    pipeline_version: str = "v0",
+) -> tuple[Any, dict[str, Any]] | None:
+    """The pure-LLM half of `land_silver` — map → clean → fingerprint → dissect, **no DB**
+    (H-2: this is what runs on the worker threads). Returns `(dissected, save_kwargs)` for
+    the main-thread `repo.save_posting`, or `None` on an isolated dissection failure."""
     jd_text, meta = jd_and_metadata_from_jsearch(
         raw_payload, language=language, query_country=query_country
     )
@@ -133,21 +188,20 @@ def land_silver(
     except (DissectionError, LlmError) as exc:
         log.warning("dissection failed for %s (run_id=%s): %s", bronze_id, run_id, exc)
         return None
-    return repo.save_posting(
-        dissected,
-        posting_id=f"{source}:{source_job_id}",
-        bronze_id=bronze_id,
-        source=source,
-        source_job_id=source_job_id,
-        run_id=run_id,
-        company=raw_payload.get("employer_name"),
-        apply_url=raw_payload.get("job_apply_link"),
-        description=raw_payload.get("job_description"),
-        state=raw_payload.get("job_state"),
-        pipeline_version=pipeline_version,
-        fingerprint=fp,
-        status="silver",
-    )
+    return dissected, {
+        "posting_id": f"{source}:{source_job_id}",
+        "bronze_id": bronze_id,
+        "source": source,
+        "source_job_id": source_job_id,
+        "run_id": run_id,
+        "company": raw_payload.get("employer_name"),
+        "apply_url": raw_payload.get("job_apply_link"),
+        "description": raw_payload.get("job_description"),
+        "state": raw_payload.get("job_state"),
+        "pipeline_version": pipeline_version,
+        "fingerprint": fp,
+        "status": "silver",
+    }
 
 
 def ingest(
@@ -160,11 +214,19 @@ def ingest(
     dissector: "Dissector",
     source: str = "jsearch",
     pipeline_version: str = "v0",
+    max_workers: int = DEFAULT_MAX_WORKERS,
+    deadline: Deadline | None = None,
 ) -> dict[str, int]:
     """End-to-end Step-4 run: fetch→bronze, then derive silver for each *distinct, new*
     posting. Returns a small summary of counts. `bronzed` == distinct ids landed this run;
-    `silvered` + `skipped` + `already` partition them: `skipped` = dissection failures,
-    `already` = an existing posting we did NOT re-dissect (C2: a re-run wastes no LLM call)."""
+    `silvered` + `skipped` + `already` + `deferred` partition them: `skipped` = dissection
+    failures, `already` = an existing posting we did NOT re-dissect (C2: a re-run wastes no
+    LLM call), `deferred` = not attempted because the `deadline` passed (the next idempotent
+    run picks them up).
+
+    **Concurrency model (H-2):** dissections (pure LLM I/O) run on up to `max_workers`
+    threads; every `repo` write stays on the main thread — the Data-API dialect's
+    thread-safety is never relied on."""
     landed = fetch_to_bronze(
         spec,
         run_id=run_id,
@@ -176,29 +238,54 @@ def ingest(
     silvered = 0
     skipped = 0
     already = 0
+    deferred = 0
+
+    # Main-thread pass: partition into already-silvered vs to-dissect (repo reads stay here).
+    work: list[tuple[str, dict[str, Any], str | None]] = []
     for bronze_id, raw, query_country in landed:
         posting_id = f"{source}:{raw['job_id']}"
         # C2: a posting that already exists must NOT be re-dissected — that is wasted LLM cost
         # on a re-run. Skip the silver/LLM pass entirely and count it.
         if repo.get_posting(posting_id) is not None:
             already += 1
-            continue
-        result = land_silver(
+        else:
+            work.append((bronze_id, raw, query_country))
+
+    def _dissect_task(item: tuple[str, dict[str, Any], str | None]):
+        if deadline is not None and deadline.expired:
+            return _DEFERRED  # out of time budget — leave for the next run, don't start LLM work
+        bronze_id, raw, query_country = item
+        return _prepare_silver(
             bronze_id,
             raw,
             run_id=run_id,
             source=source,
             source_job_id=raw["job_id"],
             dissector=dissector,
-            repo=repo,
             language=spec.language,
             query_country=query_country,
             pipeline_version=pipeline_version,
         )
-        if result is None:
-            skipped += 1
-        else:
-            silvered += 1
+
+    if work:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_dissect_task, item) for item in work]
+            for fut in as_completed(futures):
+                outcome = fut.result()
+                if outcome is _DEFERRED:
+                    deferred += 1
+                elif outcome is None:
+                    skipped += 1
+                else:
+                    dissected, kwargs = outcome
+                    repo.save_posting(dissected, **kwargs)  # main thread — the only writer
+                    silvered += 1
+    if deferred:
+        log.warning(
+            "ingest deadline reached (run_id=%s): %d dissection(s) deferred to the next run",
+            run_id,
+            deferred,
+        )
 
     return {
         "fetched": len(landed),
@@ -206,6 +293,7 @@ def ingest(
         "silvered": silvered,
         "skipped": skipped,
         "already": already,
+        "deferred": deferred,
     }
 
 
@@ -291,6 +379,8 @@ def score_gold(
     repo: "Repository",
     scorer: "Scorer",
     user_id: str = DEFAULT_USER_ID,
+    max_workers: int = DEFAULT_MAX_WORKERS,
+    deadline: Deadline | None = None,
 ) -> dict[str, int]:
     """Step-5 scoring: load the candidate profile + its **runtime** threshold knobs, then for
     each gold candidate -> score it (LLM) -> derive its `fit_category` from the config bands
@@ -305,8 +395,13 @@ def score_gold(
     run** (mirrors `land_silver`): one un-scorable posting must not lose the rest of the
     shortlist — but a DB failure (`RepositoryError`) stays loud and aborts the run.
 
-    Returns `{gold, scored, surfaced, failed}` — `gold` = candidates examined; `scored` +
-    `failed` partition them; `surfaced` = those at/above the threshold (a subset of `scored`).
+    Returns `{gold, scored, surfaced, failed, deferred}` — `gold` = candidates examined;
+    `scored` + `failed` + `deferred` partition them; `surfaced` = those at/above the
+    threshold (a subset of `scored`); `deferred` = not attempted (deadline passed — the next
+    idempotent run scores them).
+
+    **Concurrency model (H-2):** scoring calls (pure LLM I/O) run on up to `max_workers`
+    threads; the `save_score`/`mark_scored` writes stay on the main thread.
     """
     row = repo.get_profile(user_id)
     if row is None:
@@ -324,36 +419,64 @@ def score_gold(
     scored = 0
     surfaced = 0
     failed = 0
-    for posting_id, cluster_id, dissected in candidates:
+    deferred = 0
+
+    def _score_task(candidate: tuple) -> Any:
+        posting_id, _cluster_id, dissected = candidate
+        if deadline is not None and deadline.expired:
+            return _DEFERRED  # out of time budget — leave for the next run
         try:
-            result = scorer.score(dissected, profile)
+            return scorer.score(dissected, profile)
         except (ScorerError, LlmError) as exc:
             log.warning("scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)
-            failed += 1
-            continue
+            return None
 
-        fit_category = derive_fit_category(
-            result.score,
-            threshold=threshold,
-            hard_floor=hard_floor,
-            near_miss_band=near_miss_band,
+    if candidates:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_score_task, c): c for c in candidates}
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result is _DEFERRED:
+                    deferred += 1
+                    continue
+                if result is None:
+                    failed += 1
+                    continue
+                posting_id, cluster_id, _dissected = futures[fut]
+                fit_category = derive_fit_category(
+                    result.score,
+                    threshold=threshold,
+                    hard_floor=hard_floor,
+                    near_miss_band=near_miss_band,
+                )
+                repo.save_score(  # main thread — the only writer
+                    cluster_id=cluster_id,
+                    score=result.score,
+                    fit_category=fit_category,
+                    strengths=result.strengths,
+                    gaps=result.gaps,
+                    strategic_assessment=result.strategic_assessment,
+                    poster_type=result.poster_type,
+                    legitimacy_verified=result.legitimacy_verified,
+                )
+                repo.mark_scored(posting_id)
+                scored += 1
+                if result.score >= threshold:
+                    surfaced += 1
+    if deferred:
+        log.warning(
+            "scoring deadline reached (run_id=%s): %d candidate(s) deferred to the next run",
+            run_id,
+            deferred,
         )
-        repo.save_score(
-            cluster_id=cluster_id,
-            score=result.score,
-            fit_category=fit_category,
-            strengths=result.strengths,
-            gaps=result.gaps,
-            strategic_assessment=result.strategic_assessment,
-            poster_type=result.poster_type,
-            legitimacy_verified=result.legitimacy_verified,
-        )
-        repo.mark_scored(posting_id)
-        scored += 1
-        if result.score >= threshold:
-            surfaced += 1
 
-    return {"gold": len(candidates), "scored": scored, "surfaced": surfaced, "failed": failed}
+    return {
+        "gold": len(candidates),
+        "scored": scored,
+        "surfaced": surfaced,
+        "failed": failed,
+        "deferred": deferred,
+    }
 
 
 def notify(

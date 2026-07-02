@@ -224,14 +224,14 @@ def _scorer_for(scores):
 
 def test_vg8_threshold_0_surfaces_all():
     repo = _FakeScoreRepo(_profile_row(0), _candidates(), None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]))
-    assert summary == {"gold": 3, "scored": 3, "surfaced": 3, "failed": 0}
+    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]), max_workers=1)
+    assert summary == {"gold": 3, "scored": 3, "surfaced": 3, "failed": 0, "deferred": 0}
     assert all(v["fit_category"] == "strong_fit" for v in repo.saved.values())
 
 
 def test_vg8_threshold_above_all_surfaces_none():
     repo = _FakeScoreRepo(_profile_row(101), _candidates(), None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]))
+    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]), max_workers=1)
     assert summary["surfaced"] == 0
     assert not any(v["fit_category"] == "strong_fit" for v in repo.saved.values())
 
@@ -240,7 +240,8 @@ def test_vg8_threshold_60_splits_in_between():
     # SAME scores (30, 65, 90), only the config threshold changes → a DIFFERENT surfaced set,
     # with NO code change. This is the VG8 proof.
     repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]))
+    # max_workers=1: the FakeLlm replies map to candidates by call order (order-sensitive)
+    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]), max_workers=1)
     assert summary["surfaced"] == 2  # 65 and 90 clear 60; 30 does not
     assert repo.saved["c-high"]["fit_category"] == "strong_fit"
     assert repo.saved["c-mid"]["fit_category"] == "strong_fit"
@@ -261,8 +262,9 @@ def test_score_gold_skips_failed_scoring_and_continues():
             return ScoreResult.model_validate(json.loads(_score_json(80)))
 
     repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_OneBoomScorer())
-    assert summary == {"gold": 3, "scored": 2, "surfaced": 2, "failed": 1}
+    # max_workers=1: "the 2nd call" must map to p-mid deterministically (order-sensitive)
+    summary = score_gold(run_id="r", repo=repo, scorer=_OneBoomScorer(), max_workers=1)
+    assert summary == {"gold": 3, "scored": 2, "surfaced": 2, "failed": 1, "deferred": 0}
     assert repo.status["p-mid"] == "gold_candidate"  # the failed one is NOT marked scored
 
 
@@ -273,7 +275,29 @@ def test_score_gold_skips_llm_transport_error():
 
     repo = _FakeScoreRepo(_profile_row(60), [("p", "c", _dissected())], None)
     summary = score_gold(run_id="r", repo=repo, scorer=_BoomScorer())
-    assert summary == {"gold": 1, "scored": 0, "surfaced": 0, "failed": 1}
+    assert summary == {"gold": 1, "scored": 0, "surfaced": 0, "failed": 1, "deferred": 0}
+
+
+def test_score_gold_defers_on_expired_deadline():
+    """H-2 negative: an expired deadline → all candidates deferred, no scorer calls, no saves;
+    the run returns cleanly for the idempotent re-run to finish."""
+    from jobfetcher.core.ingest import Deadline
+
+    class _CountingScorer:
+        calls = 0
+
+        def score(self, dissected, profile):
+            type(self).calls += 1
+            return ScoreResult.model_validate(json.loads(_score_json(80)))
+
+    repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
+    summary = score_gold(
+        run_id="r", repo=repo, scorer=_CountingScorer(), deadline=Deadline(0)
+    )
+    assert summary == {"gold": 3, "scored": 0, "surfaced": 0, "failed": 0, "deferred": 3}
+    assert _CountingScorer.calls == 0
+    assert repo.saved == {}  # nothing written
+    assert all(v == "gold_candidate" for v in repo.status.values())  # nothing marked
 
 
 def test_score_gold_uses_default_knobs_when_null():
@@ -281,5 +305,5 @@ def test_score_gold_uses_default_knobs_when_null():
     row = {"profile": _profile().model_dump(), "threshold": None,
            "hard_floor": None, "near_miss_band": None}
     repo = _FakeScoreRepo(row, _candidates(), None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]))
+    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]), max_workers=1)
     assert summary["surfaced"] == 2  # default threshold 60 → 65 & 90 surface
