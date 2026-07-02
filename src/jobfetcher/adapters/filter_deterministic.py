@@ -6,8 +6,12 @@ nothing the Scorer doesn't already do. A cheap rule-based filter cuts the obviou
 the Scorer does the fine judgment, so a borderline posting is kept, not dropped.
 
 Rule (likely-fit iff ALL hold):
-  1. **title** — token overlap between the posting title (normalized or raw) and the spec's
-     `job_titles` (the queried roles). Loose: a single shared meaningful token passes.
+  1. **title** — for SOME spec `job_title`, ALL of its meaningful tokens appear in the posting
+     title (normalized or raw): "Data Architect" needs `data` AND `architect`. (H-3: the old
+     any-single-shared-token rule passed *Azure Architect* / *Alliances Manager* for a
+     "Data Architect" spec — measured live; each junk pass costs a pro-model scoring call.
+     Semantic adjacency, e.g. "Analytics Architect", is deliberately NOT this filter's job —
+     that's the LlmFilterStrategy, selectable via $GOLD_FILTER_STRATEGY.)
   2. **location** — the posting's queried geo (`country`, then `city`) matches the spec's
      `targeting.countries` / `cities`. An empty target set means "no constraint" (matches all).
   3. **no dealbreaker** — none of `profile.preferences.avoid_keywords` appears in the title.
@@ -53,13 +57,14 @@ class DeterministicFilterStrategy:
 
     @staticmethod
     def _title_matches(spec: "SearchSpec", posting: "DissectedPosting") -> bool:
-        target = set()
-        for t in spec.targeting.job_titles:
-            target |= _tokens(t)
-        if not target:
+        # H-3 subset rule: SOME target title must have ALL its meaningful tokens present in
+        # the posting title. Titles that tokenize to nothing (all stopwords) can't constrain.
+        targets = [_tokens(t) for t in spec.targeting.job_titles]
+        targets = [t for t in targets if t]
+        if not targets:
             return True  # no targeting → don't constrain
         posting_tokens = _tokens(posting.normalized_title) | _tokens(posting.raw_title)
-        return bool(target & posting_tokens)
+        return any(target <= posting_tokens for target in targets)
 
     @staticmethod
     def _location_matches(spec: "SearchSpec", posting: "DissectedPosting") -> bool:

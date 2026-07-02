@@ -97,6 +97,68 @@ def test_deterministic_empty_targeting_is_permissive():
     assert DeterministicFilterStrategy().filter(_spec(cities=[]), _profile(), _posting()) is True
 
 
+# ------------------------------------------------------------- H-3: subset title matching
+# The six REAL junk titles the live P2 run (2026-07-02) passed to the pro-model scorer under
+# the old any-single-shared-token rule, querying "Data Architect" — every one scored ≤15.
+_LIVE_JUNK_TITLES = [
+    "Analytics Architect",
+    "Enterprise Architect",
+    "Arangodb Architect",
+    "Alliances Manager - Data & AI",
+    "Computer Vision Engineer",
+    "Azure Architect",
+]
+
+
+@pytest.mark.parametrize("junk_title", _LIVE_JUNK_TITLES)
+def test_h3_live_junk_titles_are_rejected(junk_title):
+    """H-3 negative (the measured live failure): none of the junk that a 'Data Architect'
+    query passed through the old single-token rule may pass the subset rule."""
+    spec = _spec(titles=["Data Architect"], countries=["om"])
+    junk = _posting(title=junk_title, country="om", city="Muscat", location="Muscat")
+    assert DeterministicFilterStrategy().filter(spec, _profile(), junk) is False
+
+
+@pytest.mark.parametrize(
+    ("spec_title", "posting_title"),
+    [
+        ("Data Architect", "Data Architect"),
+        ("Data Architect", "Senior Data Architect"),  # seniority tokens are stopworded
+        ("Data Architect", "Lead Data Solutions Architect (Cloud)"),  # extra tokens fine
+        ("Data Engineer", "Lead Data Engineer"),
+        ("Data Platform Engineer", "Senior Data Platform Engineer"),
+    ],
+)
+def test_h3_target_variants_still_pass(spec_title, posting_title):
+    """H-3 positive: real variants of the target titles (seniority prefixes, extra tokens)
+    must keep passing — the subset rule requires the target's tokens, not an exact string."""
+    spec = _spec(titles=[spec_title])
+    posting = _posting(title=posting_title)
+    assert DeterministicFilterStrategy().filter(spec, _profile(), posting) is True
+
+
+def test_h3_any_of_multiple_targets_suffices():
+    # a "Data Engineer" posting passes a spec targeting engineer+architect (ANY target)
+    spec = _spec(titles=["Data Architect", "Data Engineer"])
+    posting = _posting(title="Data Engineer")
+    assert DeterministicFilterStrategy().filter(spec, _profile(), posting) is True
+
+
+def test_h3_partial_target_overlap_is_rejected():
+    # negative: sharing ONE token of the target ("architect" but not "data") no longer passes
+    spec = _spec(titles=["Data Architect"])
+    posting = _posting(title="Software Architect")
+    assert DeterministicFilterStrategy().filter(spec, _profile(), posting) is False
+
+
+def test_h3_normalized_and_raw_titles_are_pooled():
+    # tokens may come from either title field — raw says "Sr. DE", normalized carries the rest
+    spec = _spec(titles=["Data Engineer"])
+    posting = _posting(title="Sr. Data Wrangler")
+    posting = posting.model_copy(update={"normalized_title": "Data Engineer"})
+    assert DeterministicFilterStrategy().filter(spec, _profile(), posting) is True
+
+
 # --------------------------------------------------------------------------- LLM strategy
 def test_llm_filter_true():
     llm = FakeLlm(json.dumps({"likely_fit": True, "reason": "matches role"}))
