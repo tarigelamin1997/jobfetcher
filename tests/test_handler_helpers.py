@@ -12,6 +12,8 @@ from jobfetcher.handlers.pipeline import (
     _DEFAULT_PROFILE_PATH,
     _DEFAULT_SEARCH_CONFIG_PATH,
     resolve_db_url,
+    resolve_deadline,
+    resolve_max_workers,
     resolve_profile_path,
     resolve_run_date,
     resolve_run_id,
@@ -111,3 +113,44 @@ def test_resolve_run_date_defaults_to_utc_today():
 def test_resolve_run_date_raises_on_malformed_override():
     with pytest.raises(ValueError):
         resolve_run_date({"run_date": "not-a-date"})
+
+
+# --------------------------------------------------------------------------- H-2 knobs
+def test_resolve_max_workers_default_and_override():
+    assert resolve_max_workers({}) == 8
+    assert resolve_max_workers({"PIPELINE_MAX_WORKERS": "4"}) == 4
+    assert resolve_max_workers({"PIPELINE_MAX_WORKERS": "  16 "}) == 16
+
+
+def test_resolve_max_workers_rejects_junk_and_zero():
+    # negative: a misconfigured knob must fail loudly, never silently fall back
+    with pytest.raises(ValueError):
+        resolve_max_workers({"PIPELINE_MAX_WORKERS": "many"})
+    with pytest.raises(ValueError, match="must be >= 1"):
+        resolve_max_workers({"PIPELINE_MAX_WORKERS": "0"})
+
+
+def test_resolve_deadline_from_lambda_context():
+    class _Ctx:
+        def get_remaining_time_in_millis(self):
+            return 900_000  # 15 min left
+
+    deadline = resolve_deadline(_Ctx())
+    assert deadline is not None
+    assert not deadline.expired  # 900s - 60s margin is comfortably in the future
+
+
+def test_resolve_deadline_expired_when_context_nearly_out_of_time():
+    # negative: less remaining time than the safety margin → the deadline is already expired
+    class _Ctx:
+        def get_remaining_time_in_millis(self):
+            return 5_000  # 5s left < the 60s margin
+
+    deadline = resolve_deadline(_Ctx())
+    assert deadline is not None and deadline.expired
+
+
+def test_resolve_deadline_none_without_real_context():
+    # local runs / tests pass None (or an object without the Lambda method) → no time budget
+    assert resolve_deadline(None) is None
+    assert resolve_deadline(object()) is None

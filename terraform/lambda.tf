@@ -33,9 +33,11 @@ resource "aws_lambda_function" "pipeline" {
   filename         = data.archive_file.lambda.output_path
   source_code_hash = data.archive_file.lambda.output_base64sha256
 
-  timeout     = 900 # 15 min (max) — each posting is an LLM dissect/score + a Data-API write
+  timeout = 900 # 15 min (max) — each posting is an LLM dissect/score + a Data-API write
   # (~30s over the network), so the daily batch needs real headroom (vs the Aurora cold-resume too).
-  memory_size = 512
+  # H-2: dissect/score run up to $PIPELINE_MAX_WORKERS (default 8) concurrent LLM calls, and the
+  # handler's deadline guard stops new work ~60s before this timeout (partial runs resume).
+  memory_size = 1024 # Lambda CPU scales with memory — 8 worker threads + TLS need the headroom
 
   # Config only — NO secret VALUES. The handler fetches secret values at runtime
   # via the Data API / Secrets Manager using the names/ARNs below; config files are
@@ -45,15 +47,24 @@ resource "aws_lambda_function" "pipeline" {
       ENV = var.env
       # The env-var name the S3RawStore adapter actually reads (s3_raw.py: $JOBFETCHER_DATA_BUCKET).
       JOBFETCHER_DATA_BUCKET = aws_s3_bucket.data.id
-      DB_CLUSTER_ARN       = aws_rds_cluster.main.arn
-      DB_SECRET_ARN        = aws_rds_cluster.main.master_user_secret[0].secret_arn
-      DB_NAME              = var.db_name
-      DEEPSEEK_SECRET_NAME = var.deepseek_secret_name
-      JSEARCH_SECRET_NAME  = var.jsearch_secret_name
-      SES_SENDER           = var.sender_email
-      RECIPIENT_EMAIL      = var.recipient_email
-      SEARCH_CONFIG_PATH   = var.search_config_path
-      PROFILE_PATH         = var.profile_path
+      DB_CLUSTER_ARN         = aws_rds_cluster.main.arn
+      DB_SECRET_ARN          = aws_rds_cluster.main.master_user_secret[0].secret_arn
+      DB_NAME                = var.db_name
+      DEEPSEEK_SECRET_NAME   = var.deepseek_secret_name
+      JSEARCH_SECRET_NAME    = var.jsearch_secret_name
+      SES_SENDER             = var.sender_email
+      RECIPIENT_EMAIL        = var.recipient_email
+      SEARCH_CONFIG_PATH     = var.search_config_path
+      PROFILE_PATH           = var.profile_path
     }
   }
+}
+
+# H-2 / ERR-007: a timed-out async invoke must NEVER be blind-retried by AWS — the live P2 run
+# showed the default (2 retries) re-fetching the whole sweep after a timeout, burning JSearch
+# quota + LLM tokens on a run that would only time out again. Retries are the pipeline's own
+# job (idempotent resume via EventBridge tomorrow / a manual re-invoke), not the platform's.
+resource "aws_lambda_function_event_invoke_config" "pipeline" {
+  function_name          = aws_lambda_function.pipeline.function_name
+  maximum_retry_attempts = 0
 }
