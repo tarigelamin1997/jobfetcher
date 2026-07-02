@@ -24,6 +24,10 @@ class LlmConfig(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, ge=1)
     timeout_s: float = Field(default=60.0, gt=0.0)
+    # Transient-failure policy (ERR-006): retries apply ONLY to 429/5xx/connection errors —
+    # auth (401) and model-not-found (404) always fail fast. 0 disables retrying.
+    max_retries: int = Field(default=3, ge=0)
+    backoff_base_s: float = Field(default=1.0, gt=0.0)
 
 
 _DB_URL_ENV = "JOBFETCHER_DB_URL"

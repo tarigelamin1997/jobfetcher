@@ -8,6 +8,7 @@ from typing import Any
 
 from jobfetcher.core.dissector import Dissector, DissectionError
 from jobfetcher.core.ingest import fetch_to_bronze, ingest, land_silver
+from jobfetcher.core.ports import LlmError
 from jobfetcher.core.search_spec import SearchSpec
 from tests.helpers import CANNED_LLM_JSON, FakeLlm
 
@@ -206,6 +207,24 @@ def test_land_silver_skips_on_dissection_error():
     class _D(Dissector):
         def dissect(self, jd_text, metadata):
             raise DissectionError("forced")
+
+    pid = land_silver(
+        "jsearch:a", _job("a"), run_id="r", source="jsearch", source_job_id="a",
+        dissector=_D(FakeLlm()), repo=repo,
+    )
+    assert pid is None
+    assert repo.postings == {}
+
+
+def test_land_silver_skips_on_llm_error():
+    # ERR-006 negative: a provider-level LlmError (a 503 that outlived the client retries)
+    # must be isolated exactly like a DissectionError — skip the posting, never crash the
+    # run. (Before H-1 this propagated and killed the whole pipeline — seen live.)
+    repo = FakeRepo()
+
+    class _D(Dissector):
+        def dissect(self, jd_text, metadata):
+            raise LlmError("HTTP 503: service busy")
 
     pid = land_silver(
         "jsearch:a", _job("a"), run_id="r", source="jsearch", source_job_id="a",

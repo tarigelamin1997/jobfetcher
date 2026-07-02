@@ -126,9 +126,11 @@ def land_silver(
         meta.location,
     )
 
+    # Failure isolation is symmetric with `score_gold` (ERR-006): a provider-level LlmError
+    # (e.g. a 503 that outlived the client's retries) skips THIS posting, never the run.
     try:
         dissected = dissector.dissect(jd, meta)
-    except DissectionError as exc:
+    except (DissectionError, LlmError) as exc:
         log.warning("dissection failed for %s (run_id=%s): %s", bronze_id, run_id, exc)
         return None
     return repo.save_posting(
