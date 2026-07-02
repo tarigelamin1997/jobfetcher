@@ -216,6 +216,57 @@ def test_land_silver_skips_on_dissection_error():
     assert repo.postings == {}
 
 
+# --------------------------------------------------------------------------- H-2 concurrency
+def test_ingest_dissects_concurrently():
+    """H-2 behavioral proof: 12 postings × a 0.15s dissect on 4 workers must beat the serial
+    wall-clock (~1.8s) by a wide margin — if the pool were secretly serial this fails."""
+    import time as _time
+
+    repo, store = FakeRepo(), FakeRawStore()
+
+    class _SlowDissector(Dissector):
+        def dissect(self, jd_text, metadata):
+            _time.sleep(0.15)
+            return super().dissect(jd_text, metadata)
+
+    jobs = [_job(f"j{i}") for i in range(12)]
+    t0 = _time.monotonic()
+    summary = ingest(
+        _spec(), run_id="r", source_adapter=FakeSource(jobs), raw_store=store, repo=repo,
+        dissector=_SlowDissector(FakeLlm(CANNED_LLM_JSON), model_id="test-model"),
+        max_workers=4,
+    )
+    elapsed = _time.monotonic() - t0
+    assert summary["silvered"] == 12 and summary["deferred"] == 0
+    assert len(repo.postings) == 12  # every result was saved (main-thread writes)
+    assert elapsed < 1.2, f"expected concurrent (<1.2s), got {elapsed:.2f}s (serial ~1.8s)"
+
+
+def test_ingest_defers_on_expired_deadline():
+    """H-2 negative: a deadline that is already past → NO dissection starts (zero LLM calls),
+    everything is counted `deferred`, and the run returns cleanly instead of timing out."""
+    from jobfetcher.core.ingest import Deadline
+
+    repo, store = FakeRepo(), FakeRawStore()
+
+    class _CountingDissector(Dissector):
+        calls = 0
+
+        def dissect(self, jd_text, metadata):
+            type(self).calls += 1
+            return super().dissect(jd_text, metadata)
+
+    summary = ingest(
+        _spec(), run_id="r", source_adapter=FakeSource([_job("a"), _job("b")]),
+        raw_store=store, repo=repo,
+        dissector=_CountingDissector(FakeLlm(CANNED_LLM_JSON), model_id="test-model"),
+        deadline=Deadline(0),  # expired immediately
+    )
+    assert summary["deferred"] == 2 and summary["silvered"] == 0
+    assert _CountingDissector.calls == 0  # no LLM work started past the deadline
+    assert summary["bronzed"] == 2  # bronze still landed — only the LLM half is deferred
+
+
 def test_land_silver_skips_on_llm_error():
     # ERR-006 negative: a provider-level LlmError (a 503 that outlived the client retries)
     # must be isolated exactly like a DissectionError — skip the posting, never crash the
@@ -242,7 +293,7 @@ def test_ingest_end_to_end_summary():
         _spec(), run_id="r", source_adapter=src, raw_store=store, repo=repo,
         dissector=_dissector(),
     )
-    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0}
+    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0}
     assert set(repo.postings) == {"jsearch:a", "jsearch:b"}
 
 
@@ -258,7 +309,7 @@ def test_ingest_counts_dissection_skips():
         _spec(), run_id="r", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=_D(FakeLlm()),
     )
-    assert summary == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 1, "already": 0}
+    assert summary == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 1, "already": 0, "deferred": 0}
 
 
 def test_ingest_rerun_does_not_redissect_existing_posting():
@@ -280,12 +331,12 @@ def test_ingest_rerun_does_not_redissect_existing_posting():
         _spec(), run_id="r1", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=dissector,
     )
-    assert first == {"fetched": 1, "bronzed": 1, "silvered": 1, "skipped": 0, "already": 0}
+    assert first == {"fetched": 1, "bronzed": 1, "silvered": 1, "skipped": 0, "already": 0, "deferred": 0}
     assert dissector.calls == 1
 
     second = ingest(
         _spec(), run_id="r2", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=dissector,
     )
-    assert second == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 0, "already": 1}
+    assert second == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 0, "already": 1, "deferred": 0}
     assert dissector.calls == 1  # NOT re-dissected on the re-run

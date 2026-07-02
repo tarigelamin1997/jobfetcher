@@ -38,10 +38,12 @@ from ..adapters.ses_notifier import SesNotifier
 from ..config import LlmConfig
 from ..core.dissector import Dissector
 from ..core.ingest import (
+    DEFAULT_MAX_WORKERS,
     DEFAULT_USER_ID,
     _DEFAULT_HARD_FLOOR,
     _DEFAULT_NEAR_MISS_BAND,
     _DEFAULT_THRESHOLD,
+    Deadline,
     apply_gold_filter,
     ingest,
     notify,
@@ -69,6 +71,11 @@ _DB_CLUSTER_ARN_ENV = "DB_CLUSTER_ARN"
 _DB_SECRET_ARN_ENV = "DB_SECRET_ARN"
 _DB_NAME_ENV = "DB_NAME"
 _RECIPIENT_ENV = "RECIPIENT_EMAIL"
+_MAX_WORKERS_ENV = "PIPELINE_MAX_WORKERS"
+
+# Seconds reserved before the Lambda's hard timeout: in-flight LLM calls + the tail of DB
+# writes + notify must finish inside this margin (H-2 deadline guard).
+_DEADLINE_MARGIN_S = 60.0
 
 
 # --------------------------------------------------------------------------- pure helpers
@@ -124,13 +131,40 @@ def resolve_profile_path(env: dict[str, str]) -> str:
     return env.get(_PROFILE_ENV) or _DEFAULT_PROFILE_PATH
 
 
+def resolve_max_workers(env: dict[str, str]) -> int:
+    """`$PIPELINE_MAX_WORKERS` (H-2 concurrency knob) or the documented default. Pure.
+    Raises `ValueError` on a non-integer or a value < 1 — a clear misconfig, never a
+    silent fallback."""
+    raw = (env.get(_MAX_WORKERS_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_MAX_WORKERS
+    workers = int(raw)  # ValueError on junk, deliberately
+    if workers < 1:
+        raise ValueError(f"${_MAX_WORKERS_ENV} must be >= 1, got {workers}")
+    return workers
+
+
+def resolve_deadline(context: Any) -> Deadline | None:
+    """A `Deadline` from the Lambda context's remaining time minus a safety margin (H-2),
+    or `None` when there is no real context (local runs / tests → no time budget). Pure."""
+    get_remaining = getattr(context, "get_remaining_time_in_millis", None)
+    if not callable(get_remaining):
+        return None
+    return Deadline(get_remaining() / 1000.0 - _DEADLINE_MARGIN_S)
+
+
 # --------------------------------------------------------------------------- handler
-def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[str, Any]:  # noqa: ARG001
+def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[str, Any]:
     """The one v0 Lambda. Returns a `{statusCode, run_id, ...stage counts}` summary.
 
     On any stage failure: log it with `run_id`, return `{statusCode: 500, ...}` so the run is
     retried (and resumes — upserts skip done work, `run_log` blocks a double email). On success:
     `{statusCode: 200, ...}` with the per-stage counts.
+
+    **Deadline guard (H-2):** LLM stages stop *starting* new work `_DEADLINE_MARGIN_S` before
+    the Lambda timeout and report the remainder as `deferred`; the summary then carries
+    `partial: true` and **notify is skipped** — the digest goes out on the completing re-run
+    (sending early would trip the send-once `run_log` guard with an incomplete shortlist).
     """
     event = event or {}
     run_id = resolve_run_id(event)
@@ -143,6 +177,8 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         spec = SearchSpec.from_yaml(resolve_search_config_path(env))
         profile = Profile.from_yaml(resolve_profile_path(env))
         recipient = (env.get(_RECIPIENT_ENV) or "").strip()
+        max_workers = resolve_max_workers(env)
+        deadline = resolve_deadline(context)
 
         repo = PostgresRepository(resolve_db_url(env))
 
@@ -181,6 +217,8 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             repo=repo,
             dissector=dissector,
             source=spec.source,
+            max_workers=max_workers,
+            deadline=deadline,
         )
         rlog.info("stage=ingest done %s", ingest_counts)
 
@@ -192,13 +230,31 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         rlog.info("stage=gold done %s", gold_counts)
 
         rlog.info("stage=score start")
-        score_counts = score_gold(run_id=run_id, repo=repo, scorer=scorer, user_id=user_id)
+        score_counts = score_gold(
+            run_id=run_id,
+            repo=repo,
+            scorer=scorer,
+            user_id=user_id,
+            max_workers=max_workers,
+            deadline=deadline,
+        )
         rlog.info("stage=score done %s", score_counts)
 
-        # --- notify: send-once guard (VG4). Skip entirely if the digest already went out today.
-        if repo.was_digest_sent(user_id=user_id, run_date=run_date):
-            rlog.info("stage=notify skipped — digest already sent for %s", run_date.isoformat())
+        # --- notify: send-once guard (VG4). Skip entirely if the digest already went out today,
+        # or if this run is PARTIAL (deadline deferred work) — an early digest would trip the
+        # send-once guard with an incomplete shortlist; the completing re-run sends it.
+        partial = bool(ingest_counts.get("deferred") or score_counts.get("deferred"))
+        if partial:
+            rlog.warning(
+                "stage=notify skipped — partial run (deferred: ingest=%s score=%s); "
+                "the completing re-run sends the digest",
+                ingest_counts.get("deferred", 0),
+                score_counts.get("deferred", 0),
+            )
             notify_counts: dict[str, int] = {"surfaced": 0, "below_threshold": 0, "sent": 0}
+        elif repo.was_digest_sent(user_id=user_id, run_date=run_date):
+            rlog.info("stage=notify skipped — digest already sent for %s", run_date.isoformat())
+            notify_counts = {"surfaced": 0, "below_threshold": 0, "sent": 0}
         else:
             rlog.info("stage=notify start recipient=%s", recipient)
             notify_counts = notify(
@@ -227,6 +283,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         "statusCode": 200,
         "run_id": run_id,
         "run_date": run_date.isoformat(),
+        "partial": partial,
         "ingest": ingest_counts,
         "gold": gold_counts,
         "score": score_counts,

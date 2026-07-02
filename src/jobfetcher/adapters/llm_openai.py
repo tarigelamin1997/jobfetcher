@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -60,10 +61,13 @@ class OpenAICompatLlmClient:
     def __init__(self, config: LlmConfig | None = None, *, api_key: str | None = None) -> None:
         self.config = config or LlmConfig()
         self._api_key = api_key  # resolved lazily on first call
+        self._key_lock = threading.Lock()  # H-2: first call may race across worker threads
 
     def _key(self) -> str:
         if not self._api_key:
-            self._api_key = _resolve_api_key(self.config)
+            with self._key_lock:
+                if not self._api_key:  # double-check under the lock
+                    self._api_key = _resolve_api_key(self.config)
         if not self._api_key:
             raise LlmAuthError(
                 f"no API key found (env ${_ENV_KEY} or Secrets Manager '{self.config.secret_name}')"
