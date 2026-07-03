@@ -29,6 +29,8 @@ def _valid_spec_dict() -> dict:
         "employment_types": [],
         "remote": "off",
         "threshold": 60,
+        "hard_floor": 50,
+        "near_miss_band": 10,
         "budget": {"max_pages_per_query": 5, "request_budget_per_run": 70},
     }
 
@@ -47,6 +49,55 @@ def test_sample_search_spec_loads_and_validates():
 def test_valid_dict_constructs():
     spec = SearchSpec.model_validate(_valid_spec_dict())
     assert spec.targeting.countries == ["sa"]
+
+
+def test_all_three_strictness_knobs_are_user_set():
+    # the three shortlist knobs load from config (not code defaults) — this is what makes them
+    # user-editable end-to-end
+    spec = SearchSpec.model_validate(_valid_spec_dict())
+    assert (spec.threshold, spec.hard_floor, spec.near_miss_band) == (60, 50, 10)
+
+
+def test_sample_carries_the_three_knobs():
+    spec = SearchSpec.from_yaml(SAMPLE)
+    assert 0 <= spec.hard_floor <= spec.threshold <= 100
+    assert spec.near_miss_band >= 0
+
+
+# ── negatives for the new strictness knobs ──────────────────────────────────
+
+
+@pytest.mark.parametrize("field", ["hard_floor", "near_miss_band"])
+def test_missing_strictness_knob_is_loud(field):
+    # required, no default — omitting either fails loudly (the "nothing assumed" contract)
+    data = _valid_spec_dict()
+    del data[field]
+    with pytest.raises(ValidationError):
+        SearchSpec.model_validate(data)
+
+
+def test_hard_floor_above_threshold_is_loud():
+    # the give-up floor cannot sit above the shortlist bar — cross-field model validator
+    data = _valid_spec_dict()
+    data["hard_floor"] = 70  # > threshold 60
+    with pytest.raises(ValidationError, match="hard_floor"):
+        SearchSpec.model_validate(data)
+
+
+def test_hard_floor_equal_to_threshold_is_allowed():
+    # equal is fine (the current 60/50/10 default has floor < threshold; equal collapses stretch)
+    data = _valid_spec_dict()
+    data["hard_floor"] = 60
+    spec = SearchSpec.model_validate(data)
+    assert spec.hard_floor == spec.threshold == 60
+
+
+@pytest.mark.parametrize("field,bad", [("threshold", 101), ("hard_floor", -1), ("near_miss_band", 200)])
+def test_strictness_knob_out_of_range_is_loud(field, bad):
+    data = _valid_spec_dict()
+    data[field] = bad
+    with pytest.raises(ValidationError):
+        SearchSpec.model_validate(data)
 
 
 # ── negatives (contract fails loudly) ───────────────────────────────────────

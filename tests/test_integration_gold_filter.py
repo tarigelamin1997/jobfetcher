@@ -75,7 +75,7 @@ def _spec() -> SearchSpec:
             "targeting": {"job_titles": ["Data Engineer"], "countries": ["sa"],
                           "cities": [], "states": []},
             "date_posted": "week", "language": "en", "employment_types": [],
-            "remote": "off", "threshold": 60,
+            "remote": "off", "threshold": 60, "hard_floor": 50, "near_miss_band": 10,
             "budget": {"max_pages_per_query": 1, "request_budget_per_run": 10},
         }
     )

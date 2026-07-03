@@ -29,7 +29,7 @@ def _spec(titles=None, countries=None, cities=None) -> SearchSpec:
                 "states": [],
             },
             "date_posted": "week", "language": "en", "employment_types": [],
-            "remote": "off", "threshold": 60,
+            "remote": "off", "threshold": 60, "hard_floor": 50, "near_miss_band": 10,
             "budget": {"max_pages_per_query": 1, "request_budget_per_run": 10},
         }
     )
