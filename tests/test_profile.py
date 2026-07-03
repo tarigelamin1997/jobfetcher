@@ -23,6 +23,18 @@ def test_sample_profile_loads_and_validates():
     assert prof.preferences.avoid_keywords  # dealbreakers present
 
 
+def test_from_yaml_text_parses_and_validates():
+    # the source-agnostic loader the S3 config path uses (ADR-0022)
+    prof = Profile.from_yaml_text(SAMPLE.read_text(encoding="utf-8"))
+    assert prof.name and len(prof.skills) >= 1
+
+
+def test_from_yaml_text_empty_is_loud():
+    # negative: empty document -> {} -> ValidationError (name + >=1 skill required)
+    with pytest.raises(ValidationError):
+        Profile.from_yaml_text("")
+
+
 def test_sample_has_no_contact_pii():
     # the sample must stay sanitized: no actual contact PII *values* leak in. Check the data
     # (parsed YAML), not the comments — the header legitimately mentions "email/phone/address".

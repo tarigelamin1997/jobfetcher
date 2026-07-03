@@ -6,7 +6,12 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
-*Next migration candidate (P2): the **digest email UX** — the format is poor and the job apply-links must be visible. Queued after v0.2.0.*
+### Added — user-editable settings, no redeploy (toward "fully customizable per user")
+- **The 3 shortlist-strictness knobs are now user config** — `threshold` + `hard_floor` + `near_miss_band` are all fields on the `SearchSpec` (before, only `threshold` was; floor/band were code constants), validated `hard_floor <= threshold`. ([#18])
+- **Fixed the write-once trap** — the handler seeded the `profile` row only on the first run, freezing the entire profile + knobs; it now **re-syncs from the config every run**, so editing a config file actually takes effect. ([#18])
+- **[ADR-0022] Runtime config in S3** — the two config YAMLs moved out of the Lambda zip; the handler reads them from **S3 at runtime**. **Change a setting = edit the YAML + `python scripts/push_config.py`** (validates then uploads) → the next run uses it, **no rebuild/redeploy**. `SearchSpec`/`Profile` gain `from_yaml_text`; new `adapters/s3_config.py` (`S3ConfigStore` + `read_config_text` s3://-or-local dispatch); Terraform seeds the config to S3 with `ignore_changes` (never clobbers a runtime edit); the build no longer bundles config.
+
+*Next migration candidate (P2): the **digest email UX** — the format is poor and the job apply-links must be visible.*
 
 ## [v0.2.0] — 2026-07-02 — M1: pipeline hardening
 

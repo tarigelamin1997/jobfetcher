@@ -124,6 +124,13 @@ class SearchSpec(BaseModel):
         return self
 
     @classmethod
+    def from_yaml_text(cls, text: str) -> "SearchSpec":
+        """Parse + validate a YAML string (source-agnostic: a local file, an S3 object, …).
+        Raises `ValidationError` on any missing/invalid field."""
+        data = yaml.safe_load(text) or {}
+        return cls.model_validate(data)
+
+    @classmethod
     def from_yaml(cls, path: str | Path) -> "SearchSpec":
         p = Path(path)
         if not p.exists():
@@ -131,8 +138,7 @@ class SearchSpec(BaseModel):
                 f"search config not found: {p}  "
                 "(copy config/search_config.sample.yml -> config/search_config.local.yml and fill it)"
             )
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        return cls.model_validate(data)  # raises ValidationError on any missing/invalid field
+        return cls.from_yaml_text(p.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

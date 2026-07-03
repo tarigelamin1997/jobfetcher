@@ -57,11 +57,10 @@ PYTHON_VERSION = "3.11"
 # Things that must NOT end up in the package (runtime-provided or unused at runtime).
 FORBIDDEN_TOP_LEVEL = ("boto3", "botocore", "psycopg2", "alembic")
 
-# Required proof artifacts.
+# Required proof artifacts. Config YAMLs are NOT bundled (ADR-0022): they live in S3 and are
+# read at runtime, so a settings change needs no rebuild. `scripts/push_config.py` uploads them.
 REQUIRED_PRESENT = (
     "jobfetcher/handlers/pipeline.py",
-    "config/profile.local.yml",
-    "config/search_config.local.yml",
 )
 
 
@@ -100,20 +99,6 @@ def copy_source() -> None:
     dest = STAGING / "jobfetcher"
     shutil.copytree(SRC_PKG, dest, ignore=_ignore_pycache)
     print(f"[3/6] copy source: {SRC_PKG} -> {dest}")
-
-
-def copy_config() -> None:
-    dest = STAGING / "config"
-    dest.mkdir(parents=True, exist_ok=True)
-    for name in ("profile.local.yml", "search_config.local.yml"):
-        src = CONFIG_DIR / name
-        if not src.exists():
-            sys.exit(
-                f"FAIL: {src} is missing. Seed it from the sample first:\n"
-                f"  cp config/{name.replace('.local.', '.sample.')} config/{name}"
-            )
-        shutil.copy2(src, dest / name)
-    print(f"[4/6] copy config YAMLs -> {dest}")
 
 
 def prune_runtime_provided() -> None:
@@ -232,7 +217,7 @@ def main() -> None:
     clean_staging()
     install_deps()
     copy_source()
-    copy_config()
+    # config YAMLs are NOT bundled (ADR-0022) — they live in S3, read at runtime
     prune_runtime_provided()
     guards_and_report()
 
