@@ -40,9 +40,6 @@ from ..core.dissector import Dissector
 from ..core.ingest import (
     DEFAULT_MAX_WORKERS,
     DEFAULT_USER_ID,
-    _DEFAULT_HARD_FLOOR,
-    _DEFAULT_NEAR_MISS_BAND,
-    _DEFAULT_THRESHOLD,
     Deadline,
     apply_gold_filter,
     ingest,
@@ -200,18 +197,20 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
 
         repo = PostgresRepository(resolve_db_url(env))
 
-        # Seed the single-user profile row once (idempotent). The threshold knobs come from the
-        # SearchSpec (threshold) + the documented defaults — the DB row is the runtime authority
-        # thereafter (VG8), so seeding is a one-time bootstrap, never an override of a live knob.
-        if repo.get_profile(user_id) is None:
-            rlog.info("seeding profile row for user_id=%s", user_id)
-            repo.upsert_profile(
-                user_id=user_id,
-                profile=profile.model_dump(),
-                threshold=spec.threshold if spec.threshold is not None else _DEFAULT_THRESHOLD,
-                hard_floor=_DEFAULT_HARD_FLOOR,
-                near_miss_band=_DEFAULT_NEAR_MISS_BAND,
-            )
+        # Re-sync the single-user profile row from the config files EVERY run (idempotent upsert):
+        # the config is the single source of truth for the user's profile + shortlist strictness,
+        # so editing either config file and redeploying actually takes effect (VG8). This replaces
+        # the old seed-once bootstrap, which froze the profile + knobs after the first run — a user
+        # could not change any setting without a raw DB edit. The three strictness knobs are all
+        # user-set on the SearchSpec now; ingest.py keeps _DEFAULT_* only as the NULL-row safety net.
+        rlog.info("syncing profile row from config for user_id=%s", user_id)
+        repo.upsert_profile(
+            user_id=user_id,
+            profile=profile.model_dump(),
+            threshold=spec.threshold,
+            hard_floor=spec.hard_floor,
+            near_miss_band=spec.near_miss_band,
+        )
 
         # Build the adapters (one place; each reads its own env var / secret path).
         source_adapter = JSearchSourceAdapter()

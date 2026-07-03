@@ -32,7 +32,7 @@ def _spec(*, titles=("data engineer",), countries=("sa",), max_pages=3, budget=1
             "language": "en",
             "employment_types": [],
             "remote": "off",
-            "threshold": 60,
+            "threshold": 60, "hard_floor": 50, "near_miss_band": 10,
             "budget": {"max_pages_per_query": max_pages, "request_budget_per_run": budget},
         }
     )

@@ -32,7 +32,17 @@ date_posted: month               # all | today | 3days | week | month  (30-day b
 language: en                     # English metadata + populates job_city/country + the UTC ts
 employment_types: []             # e.g. ["FULLTIME"]; [] = no employment-type filter
 remote: "off"                    # "off" (on-site) | "include" (flag) | "only" (remote_jobs_only)
-threshold: 60                    # gates the shortlist + CV (0..100)
+
+# ── How strict is your shortlist? (the three matching knobs, each 0..100) ──
+# Every job gets a 0-100 fit score. These three decide what you receive + how each
+# job is labelled. Edit freely — a change takes effect on the next run (the config
+# is the source of truth, re-synced every run).
+threshold: 60                    # ONLY email me jobs scoring at least this. Higher = stricter.
+hard_floor: 50                   # below this a job is "misaligned" + ignored (must be <= threshold).
+near_miss_band: 10               # how far below threshold still counts as "almost" (a near-miss).
+# NOTE: today only `threshold` changes what lands in your inbox. hard_floor + near_miss_band
+# also tag every job (strong_fit | near_miss | stretch | misaligned) to power the upcoming
+# near-miss-watch feature (resurface a job that was *almost* a fit once you gain a skill).
 
 # ── Request-budget guardrails (free Basic = 200 req/mo) ──────────────────
 budget:

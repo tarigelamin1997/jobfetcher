@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DatePosted(str, Enum):
@@ -95,7 +95,14 @@ class SearchSpec(BaseModel):
     language: str
     employment_types: list[str]          # e.g. ["FULLTIME"]; [] = no employment-type filter
     remote: RemoteMode
-    threshold: int = Field(..., ge=0, le=100)
+
+    # Shortlist strictness — the three "how strict is my shortlist" knobs (all user-set, all
+    # required). `threshold` gates the emailed shortlist today; `hard_floor` + `near_miss_band`
+    # also label every job (strong_fit | near_miss | stretch | misaligned via derive_fit_category)
+    # — the near-miss/stretch labels feed the upcoming near-miss-watch feature (a later migration).
+    threshold: int = Field(..., ge=0, le=100)       # only surface jobs scoring at least this
+    hard_floor: int = Field(..., ge=0, le=100)      # below this = misaligned (ignored entirely)
+    near_miss_band: int = Field(..., ge=0, le=100)  # width of the "almost" band just below threshold
 
     budget: Budget
 
@@ -105,6 +112,16 @@ class SearchSpec(BaseModel):
         if not str(v).strip():
             raise ValueError(f"{info.field_name} must be non-empty")
         return v
+
+    @model_validator(mode="after")
+    def _floor_below_threshold(self) -> "SearchSpec":
+        # The give-up floor can't sit above the shortlist bar — that would make the whole
+        # 0..threshold range "misaligned" and leave no room for near_miss/stretch.
+        if self.hard_floor > self.threshold:
+            raise ValueError(
+                f"hard_floor ({self.hard_floor}) must be <= threshold ({self.threshold})"
+            )
+        return self
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "SearchSpec":

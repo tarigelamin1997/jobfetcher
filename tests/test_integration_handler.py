@@ -155,7 +155,7 @@ class _FakeLlm:
 
 
 # --------------------------------------------------------------------------- env / config
-def _write_config(tmp_path: Path) -> tuple[str, str]:
+def _write_config(tmp_path: Path, *, threshold: int = 60) -> tuple[str, str]:
     search = tmp_path / "search.yml"
     search.write_text(
         "source: jsearch\n"
@@ -170,7 +170,9 @@ def _write_config(tmp_path: Path) -> tuple[str, str]:
         "language: en\n"
         "employment_types: []\n"
         "remote: 'off'\n"
-        "threshold: 60\n"
+        f"threshold: {threshold}\n"
+        "hard_floor: 50\n"
+        "near_miss_band: 10\n"
         "budget:\n"
         "  max_pages_per_query: 1\n"
         "  request_budget_per_run: 5\n",
@@ -234,14 +236,14 @@ def _sent_messages():
     ]
 
 
-def _invoke(tmp_path: Path) -> dict[str, Any]:
+def _invoke(tmp_path: Path, *, threshold: int = 60, run_date: date = RUN_DATE) -> dict[str, Any]:
     from jobfetcher.handlers.pipeline import handler
 
-    search_path, profile_path = _write_config(tmp_path)
+    search_path, profile_path = _write_config(tmp_path, threshold=threshold)
     os.environ["SEARCH_CONFIG_PATH"] = search_path
     os.environ["PROFILE_PATH"] = profile_path
     os.environ["RECIPIENT_EMAIL"] = "to@jobfetcher.test"
-    return handler({"run_id": uuid4().hex[:8], "run_date": RUN_DATE.isoformat()}, None)
+    return handler({"run_id": uuid4().hex[:8], "run_date": run_date.isoformat()}, None)
 
 
 # --------------------------------------------------------------------------- tests
@@ -276,6 +278,32 @@ def test_handler_end_to_end_then_idempotent(repo, patched, tmp_path):
     assert _count(repo, "score") == score1
     assert _count(repo, "run_log") == 1
     assert len(_sent_messages()) == 1  # STILL exactly one email — no duplicate
+
+
+def test_handler_resyncs_settings_from_config_on_every_run(repo, patched, tmp_path):
+    """The write-once fix: a user's config edit must actually take effect. Run 1 seeds the
+    profile row (threshold 60 → both score-90 jobs surface). Then the user raises the bar to 95
+    and re-runs: the EXISTING profile row must be RE-SYNCED to 95 (not frozen at 60), so the
+    shortlist now surfaces 0. Pre-fix this was impossible — the seed-once guard left the row at
+    60 forever and the edit was silently ignored."""
+    from jobfetcher.core.ingest import DEFAULT_USER_ID
+
+    _truncate(repo)
+
+    # run 1 @ threshold 60 → row created, both jobs (score 90) surface
+    out1 = _invoke(tmp_path, threshold=60)
+    assert out1["statusCode"] == 200
+    assert out1["notify"]["surfaced"] == 2
+    row1 = repo.get_profile(DEFAULT_USER_ID)
+    assert (row1["threshold"], row1["hard_floor"], row1["near_miss_band"]) == (60, 50, 10)
+
+    # run 2 @ threshold 95, DIFFERENT run_date (so notify runs again) → row RE-SYNCED to 95,
+    # and now nothing surfaces (90 < 95). The profile row already existed — the fix updates it.
+    out2 = _invoke(tmp_path, threshold=95, run_date=date(2026, 6, 29))
+    assert out2["statusCode"] == 200
+    row2 = repo.get_profile(DEFAULT_USER_ID)
+    assert row2["threshold"] == 95  # the edit took effect (pre-fix: still 60)
+    assert out2["notify"]["surfaced"] == 0  # the higher bar changed what the user receives
 
 
 def _moto_notifier_factory():
