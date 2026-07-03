@@ -16,7 +16,8 @@ from jobfetcher.core.ports import SourceError
 from jobfetcher.core.search_spec import SearchSpec
 
 
-def _spec(*, titles=("data engineer",), countries=("sa",), max_pages=3, budget=100) -> SearchSpec:
+def _spec(*, titles=("data engineer",), countries=("sa",), max_pages=3, budget=100,
+          employment_types=()) -> SearchSpec:
     return SearchSpec.model_validate(
         {
             "source": "jsearch",
@@ -30,7 +31,7 @@ def _spec(*, titles=("data engineer",), countries=("sa",), max_pages=3, budget=1
             },
             "date_posted": "week",
             "language": "en",
-            "employment_types": [],
+            "employment_types": list(employment_types),
             "remote": "off",
             "threshold": 60, "hard_floor": 50, "near_miss_band": 10,
             "budget": {"max_pages_per_query": max_pages, "request_budget_per_run": budget},
@@ -293,3 +294,43 @@ def test_get_key_json_secret_without_api_key_raises(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "boto3", _FakeBoto3)
     with pytest.raises(SourceError, match="no 'api_key'"):
         get_key(_spec())
+
+
+# --------------------------------------------------------------------------- employment_types (v0.3.1)
+def _capture_fetch_url(monkeypatch) -> dict:
+    """Intercept `_fetch_page`'s HTTP call → capture the request URL (with query params)."""
+    captured: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"data": []}'
+
+    def _fake_urlopen(req, timeout=0):
+        captured["url"] = req.full_url
+        return _Resp()
+
+    monkeypatch.setattr(jsearch_source.urllib.request, "urlopen", _fake_urlopen)
+    return captured
+
+
+def test_fetch_page_wires_employment_types_when_set(monkeypatch):
+    # the filter now actually reaches the JSearch query (it was defined but never sent)
+    from jobfetcher.core.search_spec import EmploymentType
+
+    captured = _capture_fetch_url(monkeypatch)
+    spec = _spec(employment_types=(EmploymentType.fulltime, EmploymentType.contractor))
+    jsearch_source._fetch_page("data engineer", "sa", 1, spec, "k")
+    assert "employment_types=FULLTIME%2CCONTRACTOR" in captured["url"]  # comma url-encoded
+
+
+def test_fetch_page_omits_employment_types_when_empty(monkeypatch):
+    # [] = no filter → the param is absent entirely (not an empty string)
+    captured = _capture_fetch_url(monkeypatch)
+    jsearch_source._fetch_page("data engineer", "sa", 1, _spec(employment_types=()), "k")
+    assert "employment_types" not in captured["url"]

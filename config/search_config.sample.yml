@@ -34,7 +34,7 @@ targeting:
 # ── Knobs — also explicit, no silent defaults ─────────────────────────────
 date_posted: month               # all | today | 3days | week | month  (30-day backfill)
 language: en                     # English metadata + populates job_city/country + the UTC ts
-employment_types: []             # e.g. ["FULLTIME"]; [] = no employment-type filter
+employment_types: []             # FULLTIME | PARTTIME | CONTRACTOR | INTERN; [] = no filter (a bad value fails at load)
 remote: "off"                    # "off" (on-site) | "include" (flag) | "only" (remote_jobs_only)
 
 # ── How strict is your shortlist? (the three matching knobs, each 0..100) ──

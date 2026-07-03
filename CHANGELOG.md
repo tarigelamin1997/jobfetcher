@@ -8,6 +8,11 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 *Next migration candidate (P2): the **digest email UX** — the format is poor and the job apply-links must be visible.*
 
+## [v0.3.1] — 2026-07-03 — employment_types fix (first patch release)
+
+### Fixed
+- **`employment_types` was a silent no-op with no validation** — it was typed `list[str]` (any string accepted) **and** never actually passed to the JSearch query. Now it's an **`EmploymentType` enum** (`FULLTIME`/`PARTTIME`/`CONTRACTOR`/`INTERN`) — a typo fails **loudly at config-load** (like `date_posted`/`remote`) — **and** it's wired into the `/search` request, so setting it actually narrows results. `[]` still means no filter.
+
 ## [v0.3.0] — 2026-07-03 — user-customizable settings (no redeploy)
 
 **Toward "fully customizable per user."** The job-seeker settings became genuinely user-owned + editable without a rebuild — a settings change is now one command, not a deploy.

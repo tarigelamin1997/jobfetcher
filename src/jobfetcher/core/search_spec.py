@@ -38,6 +38,16 @@ class RemoteMode(str, Enum):
     only = "only"        # remote only (remote_jobs_only=true)
 
 
+class EmploymentType(str, Enum):
+    """JSearch's employment-type vocabulary — the only values the `/search` filter accepts.
+    An enum (not a free `str`) so a typo fails loudly at config-load, like DatePosted/RemoteMode."""
+
+    fulltime = "FULLTIME"
+    parttime = "PARTTIME"
+    contractor = "CONTRACTOR"
+    intern = "INTERN"
+
+
 class Targeting(BaseModel):
     """The four user-named fields. All required; titles/countries must be non-empty."""
 
@@ -93,7 +103,7 @@ class SearchSpec(BaseModel):
     # knobs (explicit — no defaults)
     date_posted: DatePosted
     language: str
-    employment_types: list[str]          # e.g. ["FULLTIME"]; [] = no employment-type filter
+    employment_types: list[EmploymentType]  # FULLTIME|PARTTIME|CONTRACTOR|INTERN; [] = no filter
     remote: RemoteMode
 
     # Shortlist strictness — the three "how strict is my shortlist" knobs (all user-set, all
