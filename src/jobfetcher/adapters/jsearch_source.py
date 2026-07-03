@@ -90,17 +90,20 @@ def get_key(spec: SearchSpec) -> str:
 # --------------------------------------------------------------------------- HTTP fetch
 def _fetch_page(query: str, country: str, page: int, spec: SearchSpec, key: str) -> dict:
     """One JSearch `/search` call → parsed JSON. Productionized from the probe's `fetch`."""
-    params = urllib.parse.urlencode(
-        {
-            "query": query,
-            "country": country,
-            "page": str(page),
-            "num_pages": "1",
-            "date_posted": spec.date_posted.value,
-            "language": spec.language,
-            "remote_jobs_only": "true" if spec.remote is RemoteMode.only else "false",
-        }
-    )
+    query_params = {
+        "query": query,
+        "country": country,
+        "page": str(page),
+        "num_pages": "1",
+        "date_posted": spec.date_posted.value,
+        "language": spec.language,
+        "remote_jobs_only": "true" if spec.remote is RemoteMode.only else "false",
+    }
+    # Employment-type filter (only when set) — the JSearch `/search` param is a comma-separated
+    # list of FULLTIME|PARTTIME|CONTRACTOR|INTERN. Empty spec = no filter (param omitted).
+    if spec.employment_types:
+        query_params["employment_types"] = ",".join(e.value for e in spec.employment_types)
+    params = urllib.parse.urlencode(query_params)
     req = urllib.request.Request(
         f"https://{HOST}/search?{params}",
         headers={"X-RapidAPI-Key": key, "X-RapidAPI-Host": HOST},

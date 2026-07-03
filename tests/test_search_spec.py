@@ -159,6 +159,22 @@ def test_blank_job_title_is_loud():
         SearchSpec.model_validate(data)
 
 
+def test_valid_employment_types_load(monkeypatch):
+    data = _valid_spec_dict()
+    data["employment_types"] = ["FULLTIME", "CONTRACTOR"]
+    spec = SearchSpec.model_validate(data)
+    assert [e.value for e in spec.employment_types] == ["FULLTIME", "CONTRACTOR"]
+
+
+@pytest.mark.parametrize("bad", ["fulltime", "FULL_TIME", "PERMANENT", "full-time"])
+def test_bad_employment_type_is_loud(bad):
+    # the v0.3.1 fix: an unknown/typo value now fails at load (was: silently accepted + ignored)
+    data = _valid_spec_dict()
+    data["employment_types"] = [bad]
+    with pytest.raises(ValidationError):
+        SearchSpec.model_validate(data)
+
+
 def test_unknown_key_is_loud():
     data = _valid_spec_dict()
     data["unexpected"] = "nope"
