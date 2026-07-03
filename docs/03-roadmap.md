@@ -48,7 +48,7 @@ The order reflects: value-first · dependency-respecting · capability-arrives-w
 
 **Future migrations (v1.x / v2.0)** — built *only if/when* a real bottleneck justifies each: **Debezium CDC** (batch→streaming, when volume/latency demands), **multi-user** (v2.0, the `user_id` dimension), **feedback hub**, **BI dashboard** over marts, **Snowflake** (if Postgres analytics becomes a real bottleneck), **MWAA/Airflow** (if Step Functions can't express the DAG). Each is a documented scale-path today, not a plan.
 
-**Semver:** v0.x per migration → **v1.0.0 at M8** (feature-complete single-user) → v1.x for additive future migrations, v2.0 for breaking changes (e.g. multi-user). Light CI from v0; CD hardening at M8.
+**Semver:** a **minor** bump (`v0.x.0`) per migration / real capability; a **patch** bump (`v0.x.y`) for small fixes + improvements between migrations (a bug fix or a tiny wiring doesn't need a whole minor); **`v1.0.0` at M8** (feature-complete single-user) → v1.x for additive future migrations, v2.0 for breaking changes (e.g. multi-user). Light CI from v0; CD hardening at M8.
 
 ---
 

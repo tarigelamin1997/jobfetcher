@@ -1,17 +1,27 @@
 # Changelog
 
-All notable changes to JobFetcher are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/); the project ships **semantic-versioned releases per migration** ([roadmap](docs/03-roadmap.md), [ADR-0013](docs/adr/0013-enforcement-gate-trio-branch-pr.md)). **v0.1.0 shipped 2026-06-29.**
+All notable changes to JobFetcher are recorded here. Format follows [Keep a Changelog](https://keepachangelog.com/); the project ships **semantic-versioned releases** ([roadmap](docs/03-roadmap.md), [ADR-0013](docs/adr/0013-enforcement-gate-trio-branch-pr.md)): a **minor** bump (`v0.x.0`) per migration / real capability, a **patch** bump (`v0.x.y`) for small fixes + improvements between migrations, and `v1.0.0` at M8. **v0.1.0 shipped 2026-06-29.**
 
 The ***why*** behind every entry is the [session decision journal](docs/01-session-decision-journal.md); formal decisions are [ADRs](docs/adr/); the raw reasoning trail is the [working document](docs/session-log/working-document.md).
 
 ## [Unreleased]
 
-### Added — user-editable settings, no redeploy (toward "fully customizable per user")
-- **The 3 shortlist-strictness knobs are now user config** — `threshold` + `hard_floor` + `near_miss_band` are all fields on the `SearchSpec` (before, only `threshold` was; floor/band were code constants), validated `hard_floor <= threshold`. ([#18])
-- **Fixed the write-once trap** — the handler seeded the `profile` row only on the first run, freezing the entire profile + knobs; it now **re-syncs from the config every run**, so editing a config file actually takes effect. ([#18])
-- **[ADR-0022] Runtime config in S3** — the two config YAMLs moved out of the Lambda zip; the handler reads them from **S3 at runtime**. **Change a setting = edit the YAML + `python scripts/push_config.py`** (validates then uploads) → the next run uses it, **no rebuild/redeploy**. `SearchSpec`/`Profile` gain `from_yaml_text`; new `adapters/s3_config.py` (`S3ConfigStore` + `read_config_text` s3://-or-local dispatch); Terraform seeds the config to S3 with `ignore_changes` (never clobbers a runtime edit); the build no longer bundles config.
-
 *Next migration candidate (P2): the **digest email UX** — the format is poor and the job apply-links must be visible.*
+
+## [v0.3.0] — 2026-07-03 — user-customizable settings (no redeploy)
+
+**Toward "fully customizable per user."** The job-seeker settings became genuinely user-owned + editable without a rebuild — a settings change is now one command, not a deploy.
+
+### Added
+- **The 3 shortlist-strictness knobs are now user config** — `threshold` + `hard_floor` + `near_miss_band` are all fields on the `SearchSpec` (before, only `threshold` was; floor/band were code constants), validated `hard_floor <= threshold`. ([#18])
+- **[ADR-0022] Runtime config in S3** — the two config YAMLs moved out of the Lambda zip; the handler reads them from **S3 at runtime**. **Change a setting = edit the YAML + `python scripts/push_config.py`** (validates then uploads) → the next run uses it, **no rebuild/redeploy**. `SearchSpec`/`Profile` gain `from_yaml_text`; new `adapters/s3_config.py` (`S3ConfigStore` + `read_config_text` s3://-or-local dispatch); Terraform seeds the config to S3 with `ignore_changes` (never clobbers a runtime edit); the build no longer bundles config. ([#19])
+
+### Fixed
+- **The write-once trap** — the handler seeded the `profile` row only on the first run, freezing the entire profile + knobs; it now **re-syncs from the config every run**, so editing a config file actually takes effect. ([#18])
+
+### Validation (live, 2026-07-03)
+- **Filter-only change:** threshold **60 → 95 → 60** via `push_config.py` only — the DB `profile` row re-synced each time and the shortlist tracked it (**21 → 1 → 27** jobs), two digests delivered. **Zero redeploy.**
+- **Fetch-driving change:** `countries` GCC → **Egypt** → **8 real Egyptian Data-Engineer jobs fetched** (a country never in the DB before), proving `job_titles`/`countries` drive the live JSearch query from S3, not just a re-filter. **Zero redeploy.**
 
 ## [v0.2.0] — 2026-07-02 — M1: pipeline hardening
 
