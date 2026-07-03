@@ -40,3 +40,28 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
 
 # Versioning OFF at v0: bronze is already immutable-by-convention (date-partitioned,
 # never overwritten) and versioning adds storage cost + teardown friction. (P1)
+
+# ── Runtime config (ADR-0022) ──────────────────────────────────────────────
+# The two config YAMLs live in S3 (read by the Lambda at runtime), NOT bundled in the zip —
+# so a settings change is `scripts/push_config.py`, no rebuild/redeploy. Terraform SEEDS them
+# on first apply from the local files; `ignore_changes = all` means a later `apply` NEVER
+# clobbers a runtime edit (the update path is push_config.py / the eventual UI, not Terraform).
+resource "aws_s3_object" "search_config" {
+  bucket = aws_s3_bucket.data.id
+  key    = var.search_config_key
+  source = "${path.module}/../config/search_config.local.yml"
+
+  lifecycle {
+    ignore_changes = all
+  }
+}
+
+resource "aws_s3_object" "profile" {
+  bucket = aws_s3_bucket.data.id
+  key    = var.profile_key
+  source = "${path.module}/../config/profile.local.yml"
+
+  lifecycle {
+    ignore_changes = all
+  }
+}

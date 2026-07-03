@@ -3,7 +3,11 @@
 # Every field below is REQUIRED and validated by src/jobfetcher/core/search_spec.py (SearchSpec)
 # at load — NOTHING is assumed. Copy this to config/search_config.local.yml (gitignored)
 # and fill it for your own search. An incomplete/invalid file fails loudly.
-# Decided in ADR-0010 (addendum) + plan §20/§21.
+#
+# To CHANGE your settings on a deployed stack: edit config/search_config.local.yml, then run
+#   python scripts/push_config.py
+# It validates + uploads to S3; the next pipeline run uses it — NO rebuild/redeploy (ADR-0022).
+# Decided in ADR-0010 (addendum) + ADR-0022 + plan §20/§21/§38.
 
 source: jsearch                  # ADR-0010 (the source adapter)
 

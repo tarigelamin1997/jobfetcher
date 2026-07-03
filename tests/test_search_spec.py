@@ -46,6 +46,19 @@ def test_sample_search_spec_loads_and_validates():
     assert 0 <= spec.threshold <= 100
 
 
+def test_from_yaml_text_parses_and_validates():
+    # the source-agnostic loader the S3 path uses (ADR-0022): text in, validated spec out
+    text = SAMPLE.read_text(encoding="utf-8")
+    assert SearchSpec.from_yaml_text(text).source == "jsearch"
+
+
+def test_from_yaml_text_empty_is_loud():
+    # negative: an empty document is {} -> ValidationError (missing required fields), not a
+    # silent empty spec
+    with pytest.raises(ValidationError):
+        SearchSpec.from_yaml_text("")
+
+
 def test_valid_dict_constructs():
     spec = SearchSpec.model_validate(_valid_spec_dict())
     assert spec.targeting.countries == ["sa"]

@@ -60,16 +60,17 @@ variable "jsearch_secret_name" {
   default     = "jobfetcher/jsearch"
 }
 
-# In-package paths the handler reads the search spec + profile from (build-plan Step 7). The
-# real config files are bundled into the deploy package at Step 10; these are the paths inside it.
-variable "search_config_path" {
-  description = "Path (inside the Lambda package) to the SearchSpec YAML the handler loads."
+# S3 object KEYS for the two config YAMLs (ADR-0022). The handler reads them from S3 at runtime
+# (env vars below become s3://<data-bucket>/<key>), so a settings change = edit the YAML +
+# `scripts/push_config.py` — no Lambda rebuild/redeploy.
+variable "search_config_key" {
+  description = "S3 object key (in the data bucket) for the SearchSpec YAML the handler reads."
   type        = string
-  default     = "config/search_config.local.yml"
+  default     = "config/search_config.yml"
 }
 
-variable "profile_path" {
-  description = "Path (inside the Lambda package) to the Profile YAML the handler loads."
+variable "profile_key" {
+  description = "S3 object key (in the data bucket) for the Profile YAML the handler reads."
   type        = string
-  default     = "config/profile.local.yml"
+  default     = "config/profile.yml"
 }

@@ -280,6 +280,33 @@ def test_handler_end_to_end_then_idempotent(repo, patched, tmp_path):
     assert len(_sent_messages()) == 1  # STILL exactly one email — no duplicate
 
 
+def test_handler_reads_config_from_s3(repo, patched, tmp_path):
+    """ADR-0022: config is read from S3 at RUNTIME (not bundled). Put the two YAMLs in the
+    (moto) bucket, point the env at `s3://` URIs, and the pipeline runs from S3 — the seam that
+    lets a user change settings via `push_config.py` with no rebuild/redeploy."""
+    import boto3
+
+    from jobfetcher.handlers.pipeline import handler
+
+    _truncate(repo)
+    bucket = "jobfetcher-test-bucket"  # created by the `patched` fixture (moto)
+    search_path, profile_path = _write_config(tmp_path)
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.put_object(Bucket=bucket, Key="config/search_config.yml",
+                  Body=Path(search_path).read_text(encoding="utf-8").encode("utf-8"))
+    s3.put_object(Bucket=bucket, Key="config/profile.yml",
+                  Body=Path(profile_path).read_text(encoding="utf-8").encode("utf-8"))
+
+    os.environ["SEARCH_CONFIG_PATH"] = f"s3://{bucket}/config/search_config.yml"
+    os.environ["PROFILE_PATH"] = f"s3://{bucket}/config/profile.yml"
+    os.environ["RECIPIENT_EMAIL"] = "to@jobfetcher.test"
+    out = handler({"run_id": uuid4().hex[:8], "run_date": RUN_DATE.isoformat()}, None)
+
+    assert out["statusCode"] == 200  # config sourced from S3 drove a full run
+    assert out["ingest"]["silvered"] == 2
+    assert out["notify"]["sent"] == 1
+
+
 def test_handler_resyncs_settings_from_config_on_every_run(repo, patched, tmp_path):
     """The write-once fix: a user's config edit must actually take effect. Run 1 seeds the
     profile row (threshold 60 → both score-90 jobs surface). Then the user raises the bar to 95

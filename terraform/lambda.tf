@@ -5,9 +5,9 @@
 #       (names/ARNs/paths only — NO secret values).
 # WHY:  one Lambda is the minimal orchestration (build-plan Step 7). The `handler` entry point
 #       targets `jobfetcher.handlers.pipeline.handler`; Step 10 vendors src/ + the Linux runtime
-#       deps (pydantic, pyyaml, SQLAlchemy, sqlalchemy-aurora-data-api) + the config YAMLs into
-#       build/lambda/. boto3/botocore are runtime-provided (pruned from the package); the Data-API
-#       path (ADR-0018) means psycopg2 is unneeded; alembic is migrations-only (run from local).
+#       deps (pydantic, pyyaml, SQLAlchemy, sqlalchemy-aurora-data-api) into build/lambda/. The
+#       config YAMLs are NOT bundled (ADR-0022) — they live in S3, read at runtime. boto3/botocore
+#       are runtime-provided (pruned); the Data-API path (ADR-0018) means psycopg2 is unneeded.
 # SO-WHAT: the staged dir is ~37 MB unzipped → the zip is well under the 50 MB direct-upload limit,
 #       so the function takes the zip directly via `filename` (no S3 object indirection needed).
 #
@@ -40,8 +40,8 @@ resource "aws_lambda_function" "pipeline" {
   memory_size = 1024 # Lambda CPU scales with memory — 8 worker threads + TLS need the headroom
 
   # Config only — NO secret VALUES. The handler fetches secret values at runtime
-  # via the Data API / Secrets Manager using the names/ARNs below; config files are
-  # read from the SEARCH_CONFIG_PATH / PROFILE_PATH paths (bundled at Step 10).
+  # via the Data API / Secrets Manager using the names/ARNs below; the search spec + profile
+  # are read from S3 at runtime via the SEARCH_CONFIG_PATH / PROFILE_PATH s3:// URIs (ADR-0022).
   environment {
     variables = {
       ENV = var.env
@@ -54,8 +54,10 @@ resource "aws_lambda_function" "pipeline" {
       JSEARCH_SECRET_NAME    = var.jsearch_secret_name
       SES_SENDER             = var.sender_email
       RECIPIENT_EMAIL        = var.recipient_email
-      SEARCH_CONFIG_PATH     = var.search_config_path
-      PROFILE_PATH           = var.profile_path
+      # Config is read from S3 at runtime (ADR-0022) — s3://<data-bucket>/<key>. Change a
+      # setting with `scripts/push_config.py` (no rebuild/redeploy).
+      SEARCH_CONFIG_PATH = "s3://${aws_s3_bucket.data.id}/${var.search_config_key}"
+      PROFILE_PATH       = "s3://${aws_s3_bucket.data.id}/${var.profile_key}"
     }
   }
 }

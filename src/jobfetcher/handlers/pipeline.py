@@ -33,6 +33,7 @@ from ..adapters.filter_deterministic import DeterministicFilterStrategy
 from ..adapters.jsearch_source import JSearchSourceAdapter
 from ..adapters.llm_openai import OpenAICompatLlmClient
 from ..adapters.repository_postgres import PostgresRepository
+from ..adapters.s3_config import read_config_text
 from ..adapters.s3_raw import S3RawStore
 from ..adapters.ses_notifier import SesNotifier
 from ..config import LlmConfig
@@ -189,8 +190,11 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
 
     try:
         env = dict(os.environ)
-        spec = SearchSpec.from_yaml(resolve_search_config_path(env))
-        profile = Profile.from_yaml(resolve_profile_path(env))
+        # Config is read at RUNTIME from its location (an s3://bucket/key URI in deployment, a
+        # local path in tests/dev) — ADR-0022. Not bundled in the zip, so editing a setting +
+        # `scripts/push_config.py` takes effect on the next run with no rebuild/redeploy.
+        spec = SearchSpec.from_yaml_text(read_config_text(resolve_search_config_path(env)))
+        profile = Profile.from_yaml_text(read_config_text(resolve_profile_path(env)))
         recipient = (env.get(_RECIPIENT_ENV) or "").strip()
         max_workers = resolve_max_workers(env)
         deadline = resolve_deadline(context)
