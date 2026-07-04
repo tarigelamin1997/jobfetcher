@@ -14,6 +14,7 @@ from jobfetcher.handlers.pipeline import (
     resolve_db_url,
     resolve_deadline,
     resolve_max_workers,
+    resolve_mode,
     resolve_profile_path,
     resolve_run_date,
     resolve_run_id,
@@ -113,6 +114,19 @@ def test_resolve_run_date_defaults_to_utc_today():
 def test_resolve_run_date_raises_on_malformed_override():
     with pytest.raises(ValueError):
         resolve_run_date({"run_date": "not-a-date"})
+
+
+# --------------------------------------------------------------------------- mode (ADR-0023)
+def test_resolve_mode_default_and_reassess():
+    assert resolve_mode(None) == ""            # no event → normal pipeline
+    assert resolve_mode({}) == ""              # no mode key → normal pipeline
+    assert resolve_mode({"mode": "reassess"}) == "reassess"
+    assert resolve_mode({"mode": "  REASSESS "}) == "reassess"  # trimmed + lowercased
+
+
+def test_resolve_mode_ignores_non_string():
+    # a non-string mode is ignored (falls back to the normal pipeline), never crashes
+    assert resolve_mode({"mode": 123}) == ""
 
 
 # --------------------------------------------------------------------------- H-2 knobs

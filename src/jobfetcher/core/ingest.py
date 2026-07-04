@@ -373,6 +373,24 @@ def derive_fit_category(
     return "misaligned"
 
 
+def _load_profile_and_knobs(
+    repo: "Repository", user_id: str
+) -> tuple["Profile", int, int, int]:
+    """Load the profile + its runtime threshold/floor/band from the `profile` row (the single
+    authority, VG8); NULL knobs fall back to the documented defaults. Shared by `score_gold`
+    and `reassess`. Raises `RepositoryError` if there is no profile row."""
+    row = repo.get_profile(user_id)
+    if row is None:
+        raise RepositoryError(f"no profile row for user_id={user_id!r} — cannot score")
+    profile = Profile.from_jsonb(row["profile"])
+    threshold = row["threshold"] if row["threshold"] is not None else _DEFAULT_THRESHOLD
+    hard_floor = row["hard_floor"] if row["hard_floor"] is not None else _DEFAULT_HARD_FLOOR
+    near_miss_band = (
+        row["near_miss_band"] if row["near_miss_band"] is not None else _DEFAULT_NEAR_MISS_BAND
+    )
+    return profile, threshold, hard_floor, near_miss_band
+
+
 def score_gold(
     *,
     run_id: str,
@@ -403,17 +421,7 @@ def score_gold(
     **Concurrency model (H-2):** scoring calls (pure LLM I/O) run on up to `max_workers`
     threads; the `save_score`/`mark_scored` writes stay on the main thread.
     """
-    row = repo.get_profile(user_id)
-    if row is None:
-        raise RepositoryError(f"no profile row for user_id={user_id!r} — cannot score")
-    profile = Profile.from_jsonb(row["profile"])
-    threshold = row["threshold"] if row["threshold"] is not None else _DEFAULT_THRESHOLD
-    hard_floor = row["hard_floor"] if row["hard_floor"] is not None else _DEFAULT_HARD_FLOOR
-    near_miss_band = (
-        row["near_miss_band"]
-        if row["near_miss_band"] is not None
-        else _DEFAULT_NEAR_MISS_BAND
-    )
+    profile, threshold, hard_floor, near_miss_band = _load_profile_and_knobs(repo, user_id)
 
     candidates = repo.get_gold_candidates()
     scored = 0
@@ -476,6 +484,119 @@ def score_gold(
         "surfaced": surfaced,
         "failed": failed,
         "deferred": deferred,
+    }
+
+
+def reassess(
+    *,
+    run_id: str,
+    repo: "Repository",
+    scorer: "Scorer",
+    user_id: str = DEFAULT_USER_ID,
+    max_workers: int = DEFAULT_MAX_WORKERS,
+    deadline: Deadline | None = None,
+) -> dict[str, Any]:
+    """Replay scoring over the already-scored postings against the **current** profile — no
+    fetch, no gold (ADR-0023). The medallion's immutable-bronze → replay property: when the
+    user's profile improves (a new skill), a posting that was a `stretch`/`near_miss` can
+    **graduate** to `strong_fit` with **zero JSearch calls** (only LLM scoring tokens).
+
+    Same concurrency model as `score_gold` (H-2): LLM calls on `max_workers` threads, all DB
+    writes on the main thread; `save_score` carries the old score into `previous_score`.
+    Failure-isolated + deadline-guarded identically.
+
+    Returns `{reassessed, graduated, downgraded, unchanged, failed, deferred}` plus a
+    `graduations` list (`posting_id/title/company/old_score→new_score/old_cat→new_cat`) — a
+    **graduation** = a posting that newly reached at/above the threshold (`old < threshold <=
+    new`). The digest of these rides the email-UX unit; here they are reported + persisted."""
+    profile, threshold, hard_floor, near_miss_band = _load_profile_and_knobs(repo, user_id)
+    targets = repo.get_scored_for_reassess()
+
+    reassessed = 0
+    graduated = 0
+    downgraded = 0
+    unchanged = 0
+    failed = 0
+    deferred = 0
+    graduations: list[dict[str, Any]] = []
+
+    def _rescore_task(target: tuple) -> Any:
+        posting_id = target[0]
+        if deadline is not None and deadline.expired:
+            return _DEFERRED
+        try:
+            return scorer.score(target[2], profile)  # target[2] = dissected
+        except (ScorerError, LlmError) as exc:
+            log.warning("reassess scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)
+            return None
+
+    if targets:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_rescore_task, t): t for t in targets}
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result is _DEFERRED:
+                    deferred += 1
+                    continue
+                if result is None:
+                    failed += 1
+                    continue
+                posting_id, cluster_id, dissected, old_score, old_cat = futures[fut]
+                new_cat = derive_fit_category(
+                    result.score,
+                    threshold=threshold,
+                    hard_floor=hard_floor,
+                    near_miss_band=near_miss_band,
+                )
+                repo.save_score(  # main thread — the only writer; carries old → previous_score
+                    cluster_id=cluster_id,
+                    score=result.score,
+                    fit_category=new_cat,
+                    strengths=result.strengths,
+                    gaps=result.gaps,
+                    strategic_assessment=result.strategic_assessment,
+                    poster_type=result.poster_type,
+                    legitimacy_verified=result.legitimacy_verified,
+                    previous_score=old_score,
+                )
+                reassessed += 1
+                if old_score < threshold <= result.score:  # crossed UP → graduated
+                    graduated += 1
+                    graduations.append(
+                        {
+                            "posting_id": posting_id,
+                            "title": dissected.normalized_title or dissected.raw_title,
+                            "old_score": old_score,
+                            "new_score": result.score,
+                            "old_category": old_cat,
+                            "new_category": new_cat,
+                        }
+                    )
+                elif old_score >= threshold > result.score:  # crossed DOWN → downgraded
+                    downgraded += 1
+                else:  # both above or both below the threshold
+                    unchanged += 1
+    if deferred:
+        log.warning(
+            "reassess deadline reached (run_id=%s): %d posting(s) deferred to the next run",
+            run_id,
+            deferred,
+        )
+    log.info(
+        "reassess done (run_id=%s): %d reassessed, %d graduated, %d downgraded",
+        run_id,
+        reassessed,
+        graduated,
+        downgraded,
+    )
+    return {
+        "reassessed": reassessed,
+        "graduated": graduated,
+        "downgraded": downgraded,
+        "unchanged": unchanged,
+        "failed": failed,
+        "deferred": deferred,
+        "graduations": graduations,
     }
 
 
