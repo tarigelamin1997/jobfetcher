@@ -333,6 +333,78 @@ def test_handler_resyncs_settings_from_config_on_every_run(repo, patched, tmp_pa
     assert out2["notify"]["surfaced"] == 0  # the higher bar changed what the user receives
 
 
+class _LlmScoring:
+    """A scripted LLM whose SCORE reply is parametrized (dissect reply fixed), so a re-run can
+    return a different score — the reassess/graduation scenario."""
+
+    def __init__(self, model: str, score: int) -> None:
+        self.config = type("C", (), {"model": model})()
+        self._model = model
+        self._score = score
+
+    def complete(self, *, system: str, user: str) -> str:  # noqa: ARG002
+        if "score" in system.lower() or self._model.endswith("pro"):
+            return json.dumps({
+                "score": self._score, "strengths": ["python"], "gaps": [],
+                "strategic_assessment": "x", "poster_type": "direct employer",
+                "legitimacy_verified": True,
+            })
+        return json.dumps({
+            "skills": [{"name": "Python", "level": "must", "evidence": "Required: Python and SQL"}],
+            "sector": "fintech", "normalized_title": "Data Engineer",
+        })
+
+
+def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, monkeypatch):
+    """ADR-0023: `{"mode":"reassess"}` re-scores the already-scored postings against the current
+    profile with NO fetch, carries the old score into `previous_score`, and GRADUATES a job that
+    crosses the threshold upward — the immutable-bronze replay ("my progress changed my matches")."""
+    import jobfetcher.handlers.pipeline as pipe
+    from sqlalchemy import text as _text
+
+    _truncate(repo)
+
+    # --- initial full run @ threshold 80, jobs score 60 → scored but NOT surfaced ---
+    monkeypatch.setattr(pipe, "OpenAICompatLlmClient", lambda cfg=None, **kw: _LlmScoring(cfg.model, 60))
+    out1 = _invoke(tmp_path, threshold=80)
+    assert out1["statusCode"] == 200
+    assert out1["score"]["scored"] == 2 and out1["score"]["surfaced"] == 0  # 60 < 80
+
+    # --- reassess: the re-score now returns 90 (profile "improved"); the source EXPLODES if
+    # fetched, proving replay never re-fetches ---
+    monkeypatch.setattr(pipe, "OpenAICompatLlmClient", lambda cfg=None, **kw: _LlmScoring(cfg.model, 90))
+
+    class _ExplodingSource:
+        def fetch(self, spec, *, run_id):  # noqa: ARG002
+            raise AssertionError("reassess must not fetch!")
+            yield  # pragma: no cover — makes this a generator; body never runs in reassess
+
+    monkeypatch.setattr(pipe, "JSearchSourceAdapter", lambda: _ExplodingSource())
+
+    search_path, profile_path = _write_config(tmp_path, threshold=80)
+    os.environ["SEARCH_CONFIG_PATH"] = search_path
+    os.environ["PROFILE_PATH"] = profile_path
+    os.environ["RECIPIENT_EMAIL"] = "to@jobfetcher.test"
+    out2 = pipe.handler({"run_id": "reassess1", "run_date": RUN_DATE.isoformat(), "mode": "reassess"}, None)
+
+    assert out2["statusCode"] == 200 and out2["mode"] == "reassess"
+    r = out2["reassess"]
+    assert r["reassessed"] == 2
+    assert r["graduated"] == 2 and r["downgraded"] == 0  # both 60 → 90 crossed 80
+    assert len(r["graduations"]) == 2
+    assert {g["old_score"] for g in r["graduations"]} == {60}
+    assert {g["new_score"] for g in r["graduations"]} == {90}
+
+    # DB proof: the score row now holds 90 with previous_score 60 (the old value carried over)
+    with repo.engine.connect() as conn:
+        rows = conn.execute(_text("SELECT score, previous_score, fit_category FROM score")).all()
+    assert all(row.score == 90 and row.previous_score == 60 for row in rows)
+    assert all(row.fit_category == "strong_fit" for row in rows)
+
+    # no NEW bronze/posting rows were created (replay only re-scores; no fetch)
+    assert _count(repo, "bronze_posting") == 2 and _count(repo, "posting") == 2
+
+
 def _moto_notifier_factory():
     """Rebuild the moto-backed SesNotifier the `patched` fixture installs (same bucket/client),
     so a healthy re-invoke after an injected failure actually delivers through moto SES."""

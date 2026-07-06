@@ -45,6 +45,7 @@ from ..core.ingest import (
     apply_gold_filter,
     ingest,
     notify,
+    reassess,
     score_gold,
 )
 from ..core.profile import Profile
@@ -110,6 +111,15 @@ def resolve_run_id(event: dict[str, Any] | None) -> str:
     if event and isinstance(event.get("run_id"), str) and event["run_id"].strip():
         return event["run_id"].strip()
     return uuid.uuid4().hex[:8]
+
+
+def resolve_mode(event: dict[str, Any] | None) -> str:
+    """The run mode (ADR-0023): `event['mode']` lowercased, else `""` (the normal
+    fetch→gold→score→notify pipeline). `"reassess"` = replay scoring over existing scored
+    postings against the current profile, no fetch. Pure."""
+    if event and isinstance(event.get("mode"), str):
+        return event["mode"].strip().lower()
+    return ""
 
 
 def resolve_run_date(event: dict[str, Any] | None) -> date:
@@ -185,6 +195,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
     event = event or {}
     run_id = resolve_run_id(event)
     run_date = resolve_run_date(event)
+    mode = resolve_mode(event)
     user_id = DEFAULT_USER_ID
     rlog = logging.LoggerAdapter(log, {"run_id": run_id})
 
@@ -227,6 +238,29 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             OpenAICompatLlmClient(LlmConfig(model=_SCORE_MODEL)), model_id=_SCORE_MODEL
         )
         notifier = SesNotifier()
+
+        # --- reassess mode (ADR-0023): replay scoring over the already-scored postings against
+        # the profile just synced from config — NO fetch, NO gold, NO notify. The medallion's
+        # immutable-bronze replay: a profile improvement can graduate old jobs with zero JSearch
+        # spend. Returns its own report and exits before the normal pipeline. ---
+        if mode == "reassess":
+            rlog.info("mode=reassess start — replay scoring, no fetch")
+            reassess_report = reassess(
+                run_id=run_id,
+                repo=repo,
+                scorer=scorer,
+                user_id=user_id,
+                max_workers=max_workers,
+                deadline=deadline,
+            )
+            rlog.info("mode=reassess done %s", reassess_report)
+            return {
+                "statusCode": 200,
+                "run_id": run_id,
+                "run_date": run_date.isoformat(),
+                "mode": "reassess",
+                "reassess": reassess_report,
+            }
 
         # --- the pipeline, in sequence (each stage is idempotent via its own upserts) ---
         rlog.info("stage=ingest start run_date=%s", run_date.isoformat())

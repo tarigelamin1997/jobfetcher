@@ -306,6 +306,40 @@ class PostgresRepository:
             (row["posting_id"], row["cluster_id"], _dissected_from_row(row)) for row in rows
         ]
 
+    def get_scored_for_reassess(
+        self,
+    ) -> list[tuple[str, str, DissectedPosting, int, str]]:
+        """The reassess set (ADR-0023): every already-scored posting + its CURRENT score and
+        fit_category, so a replay can re-score against the updated profile and report the
+        old→new delta. Returns `(posting_id, cluster_id, dissected, current_score,
+        current_fit_category)`. Ordered by posting_id for a deterministic run.
+
+        Only `status='scored'` postings are returned — these are the ones with a prior score to
+        graduate. (A skill change doesn't alter gold membership, so re-scoring the scored set is
+        the right scope; re-running gold for a targeting/avoid change is a separate concern.)"""
+        s, p = tables.score, tables.posting
+        stmt = (
+            select(p, s.c.score, s.c.fit_category)
+            .select_from(p.join(s, p.c.cluster_id == s.c.cluster_id))
+            .where(p.c.status == "scored")
+            .order_by(p.c.posting_id)
+        )
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(stmt).mappings().all()
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"get_scored_for_reassess failed: {e}") from e
+        return [
+            (
+                row["posting_id"],
+                row["cluster_id"],
+                _dissected_from_row(row),
+                row["score"],
+                row["fit_category"],
+            )
+            for row in rows
+        ]
+
     def save_score(
         self,
         *,
