@@ -6,7 +6,17 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
-*Next migration candidate (P2): the **digest email UX** (poor format · apply-links must be visible).*
+*Next candidate (P2): fold the reassess "what graduated" digest into the email; then re-evaluate the roadmap from usage.*
+
+## [v0.6.0] — 2026-07-06 — email UX: a scannable digest with prominent apply-links
+
+### Changed
+- **Redesigned the daily digest** (`core/notifier.py` `render_digest`) — Tarig's feedback was "poor format, apply-links buried." The old dense 5-column table (with a tiny `Apply` text in the last column) is now **one clean card per job**: a colored **score badge** · bold **title** · **Company · Location** · a **why** line + an honest **gap** · and a **prominent, button-styled `Apply →`** (one obvious call-to-action per card). Email-client-safe (table layout + inline styles only, no external CSS/images/JS); escaping + the `javascript:`/`data:` scheme allowlist preserved; the plaintext fallback puts the full apply URL on its own line per job; the zero-matches email stays first-class.
+
+### Added
+- **Location on the digest** — `ShortlistItem` + `get_scored_shortlist` now carry `city`/`country`, so each card shows *where* the job is.
+- **`scripts/preview_digest.py`** — render the digest with sample data to `export/digest_preview.html` (open in a browser) so the email design is reviewable without sending one.
+- Tests: every surfaced job renders a prominent Apply **button** (a styled `<a href>`, not buried text — the "links are visible" gate) + badge/location/gap assertions, a missing-link "no link" state, and the existing security/zero-match negatives. 257 unit green.
 
 ## [v0.5.0] — 2026-07-06 — query / filter access (export → open in a generic tool)
 

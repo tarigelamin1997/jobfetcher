@@ -161,7 +161,7 @@ def test_notify_sends_digest_with_surfaced_jobs_and_below_count(repo, ses):
     assert "Senior Data Engineer" in body and "Data Engineer" in body
     assert "Acme" in body and "Beta" in body
     assert "https://jobs.test/apply/hi" in body
-    assert "+1 below threshold 60" in body
+    assert "+1 more scored below your threshold of 60" in body  # v0.6.0 footer phrasing
 
 
 def test_notify_zero_matches_still_sends_no_matches_email(repo, ses):

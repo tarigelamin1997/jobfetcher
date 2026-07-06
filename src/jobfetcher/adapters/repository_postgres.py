@@ -430,6 +430,8 @@ class PostgresRepository:
                 p.c.company,
                 p.c.apply_url,
                 p.c.normalized_title,
+                p.c.city,
+                p.c.country,
                 s.c.score,
                 s.c.fit_category,
                 s.c.strengths,
@@ -464,6 +466,8 @@ class PostgresRepository:
                         strengths=list(row["strengths"] or []),
                         gaps=list(row["gaps"] or []),
                         strategic_assessment=row["strategic_assessment"],
+                        city=row["city"],
+                        country=row["country"],
                     )
                 )
             else:
