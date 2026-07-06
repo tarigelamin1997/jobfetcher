@@ -19,7 +19,7 @@ flowchart TB
   end
 
   subgraph OP["Operational plane — AWS serverless"]
-    EB["EventBridge<br/>daily cron"] --> ORC["Lambda v0<br/>→ Step Functions (M3)"]
+    EB["EventBridge<br/>daily cron"] --> ORC["Lambda v0<br/>concurrent dissect/score + deadline guard (v0.2)<br/>→ Step Functions (M3)"]
     subgraph MED["Medallion"]
       BR["Bronze<br/>raw · immutable"]
       SI["Silver<br/>clean · LLM dissect · dedup"]
@@ -27,12 +27,14 @@ flowchart TB
     end
     ORC --> BR --> SI --> GO --> SC["Score<br/>LLM · DeepSeek (provider-agnostic)"]
     SC -->|">= threshold"| CV["cv_tailor (M1)<br/>DOCX + PDF"]
-    SC --> NT["notify<br/>SES digest (+ Notion M4)<br/>run_log send-once / day"]
+    SC --> NT["notify<br/>SES card digest (v0.6) (+ Notion M4)<br/>run_log send-once / day"]
     CV --> NT
+    SC -.->|"reassess (v0.4)<br/>{mode:reassess} · re-score existing · no fetch"| SC
     PG[("Postgres — Aurora SLv2<br/>via RDS Data API · + pgvector")]
-    S3[("S3<br/>raw + CVs")]
+    S3[("S3<br/>raw + config (v0.3) + CVs")]
     SM["Secrets Manager"]
-    CF["Profile / Config<br/>threshold 60"]
+    CF["Profile / Config<br/>in S3, read at runtime (v0.3)<br/>edit + push_config.py · no redeploy"]
+    EXP["export (v0.5)<br/>SQLite/CSV → Datasette/Excel"]
   end
 
   subgraph AN["Analytical plane — DE depth"]
@@ -45,12 +47,15 @@ flowchart TB
   JS -->|paginated pull| BR
   SI <--> PG
   SC <--> PG
+  S3 -->|config read at runtime| CF
   CF -->|runtime| SC
   SM -.->|creds| ORC
   BR --> S3
   CV --> S3
   NT --> NO
   NT --> US
+  PG --> EXP
+  EXP --> US
   PG --> EL
   S3 --> EL
   IN --> NO
@@ -186,6 +191,63 @@ flowchart TB
 ```
 
 > **Priority order** (Tarig's): `dim_skill` + `fct_job_skill` first (powers skill-demand/gaps *and* sector intel) → point-in-time profile + score facts (progress trends) → `dim_sector`. `dim_title` / `dim_company` are supporting.
+
+---
+
+## 5 · Reassess / replay — the graduation loop (`v0.4.0`)
+
+The medallion's **immutable-bronze → replay** property, made concrete. When your profile improves (a new skill), you re-score the jobs already in the system against the *current* profile — with **zero JSearch calls** — and a posting that was a `stretch` **graduates** to `strong_fit`. Discussed in [ADR-0023](adr/0023-reassess-replay.md) · [02-architecture · Ingestion](02-architecture.md).
+
+```mermaid
+flowchart LR
+  P["you learn a skill →<br/>edit profile.local.yml"] --> PC["scripts/push_config.py<br/>validate + upload"]
+  PC --> S3[("S3 · profile.yml")]
+  S3 -->|read at runtime| RE["Lambda · {mode:reassess}<br/>re-score the already-scored postings<br/>against the CURRENT profile"]
+  BR[("bronze · immutable<br/>already fetched")] -.->|"no new fetch — replay only"| RE
+  RE --> SS["score rows updated<br/>previous_score ← old · score ← new"]
+  SS --> G{"crossed the threshold upward?"}
+  G -->|yes| GR["GRADUATED<br/>stretch / near-miss → strong_fit"]
+  G -->|no| UN["unchanged / downgraded"]
+```
+
+> Live-proven: bumped Spark `learning → expert` → `push_config` → `{mode:reassess}` → **180 re-scored, 15 graduated** (e.g. Data Platform Engineer @ Saudi Aramco 35→85), **bronze unchanged** (no re-fetch).
+
+---
+
+## 6 · Runtime config in S3 — change settings, no redeploy (`v0.3.0`)
+
+Config is read from **S3 at runtime**, not baked into the Lambda zip — so changing any setting is one command, not a rebuild + `terraform apply`. Discussed in [ADR-0022](adr/0022-runtime-config-in-s3.md).
+
+```mermaid
+flowchart TB
+  subgraph OLD["Before — config bundled in the Lambda zip"]
+    direction LR
+    E1["edit YAML"] --> B1["rebuild pkg"] --> T1["terraform apply"] --> R1["redeploy (slow)"]
+  end
+  subgraph NEW["v0.3.0 — config in S3, read at runtime"]
+    direction LR
+    E2["edit *.local.yml"] --> P2["push_config.py<br/>validate → upload"] --> S2[("S3 · config/*.yml")]
+    S2 -->|"next run reads it"| L2["handler<br/>from_yaml_text"] --> EFF["takes effect<br/>NO rebuild · NO terraform"]
+  end
+```
+
+> The same seam powers the reassess loop (§5) and is the clean foundation for a future settings UI, which would write the same S3 object.
+
+---
+
+## 7 · Query / filter — the read surface (`v0.5.0`)
+
+Filter/search/organize your records without a custom UI: **export a snapshot** and open it in a purpose-built tool. Discussed in [ADR-0024](adr/0024-query-via-export.md) · [querying.md](querying.md).
+
+```mermaid
+flowchart LR
+  PG[("Aurora · posting · score<br/>bronze · run_log · profile")] --> EX["scripts/export.py<br/>flatten JSONB→text · join"]
+  EX --> SQ[("export/jobs.sqlite")]
+  EX --> CSV[("export/jobs.csv")]
+  SQ --> DS["Datasette<br/>faceted filter · full-text search"]
+  SQ --> DB2["DB Browser / sqlite3"]
+  CSV --> XL["Excel / Sheets"]
+```
 
 ---
 
