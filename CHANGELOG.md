@@ -6,10 +6,12 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
-### Added — reassess / replay (re-score existing jobs on an updated profile, no re-fetch)
-- **[ADR-0023] A `{"mode":"reassess"}` handler mode** — re-scores your already-scored postings against the **current** profile with **zero JSearch calls** (the medallion's immutable-bronze → replay). When your profile improves (a new skill), a job that was a `stretch` can **graduate** to `strong_fit`. `save_score` already carried the old score into `previous_score`; this wires the replay that uses it. Flow: edit `profile.local.yml` → `push_config.py` → invoke `{"mode":"reassess"}`. New `Repository.get_scored_for_reassess()` + `core.ingest.reassess()` (same concurrency/deadline/retry as scoring) + a pure `resolve_mode`. Reports `{reassessed, graduated, downgraded, unchanged, …}` + a `graduations` list. *(The "what graduated" email rides the email-UX unit; a query/filter surface is the next capability.)*
+*Next migration candidate (P2): the **query/filter access** surface (export to SQLite/CSV → Datasette/Excel), then the **digest email UX** (poor format · apply-links must be visible).*
 
-*Next migration candidate (P2): the **digest email UX** — the format is poor and the job apply-links must be visible.*
+## [v0.4.0] — 2026-07-06 — reassess / replay (re-score on an updated profile, no re-fetch)
+
+### Added
+- **[ADR-0023] A `{"mode":"reassess"}` handler mode** — re-scores your already-scored postings against the **current** profile with **zero JSearch calls** (the medallion's immutable-bronze → replay). When your profile improves (a new skill), a job that was a `stretch` can **graduate** to `strong_fit`. `save_score` already carried the old score into `previous_score`; this wires the replay that uses it. Flow: edit `profile.local.yml` → `push_config.py` → invoke `{"mode":"reassess"}`. New `Repository.get_scored_for_reassess()` + `core.ingest.reassess()` (same concurrency/deadline/retry as scoring) + a pure `resolve_mode`. Reports `{reassessed, graduated, downgraded, unchanged, …}` + a `graduations` list. Realizes the graduation half of the old M4, re-derived from real use (P2). *(The "what graduated" email rides the email-UX unit; a query/filter surface is the next capability.)*
 
 ## [v0.3.1] — 2026-07-03 — employment_types fix (first patch release)
 
