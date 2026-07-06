@@ -8,7 +8,7 @@
 
 ## 1 · Full-stack architecture (target)
 
-The complete two-plane design (high-level). **The shipped v0.1.0 is a small subset** (one Lambda → fetch → score → SES email, on Aurora SLv2 via the RDS Data API + S3 — **deployed + live-validated 2026-06-29**); everything else arrives by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
+The complete two-plane design (high-level). **What's live today is a subset — `v0.6.0`** (one Lambda → fetch → dissect → gold → score → SES card-digest, on Aurora SLv2 via the RDS Data API + S3; **concurrent** dissect/score with a deadline guard; **config read from S3 at runtime**; a **`{"mode":"reassess"}` replay** path; deployed + live-validated); the analytical plane + the other operational boxes arrive by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
 
 ```mermaid
 flowchart TB
@@ -117,7 +117,7 @@ flowchart TB
 - **⑤ Score.** The **strong DeepSeek model** runs on gold only; score + CV attach to the **cluster** — done once per real job, every platform's apply-link kept.
 
 **Two properties worth discussing**
-- **Immutable bronze ⇒ replay.** Change a filter, the threshold, or your profile → re-derive silver→gold→score over existing bronze with **zero new API calls**.
+- **Immutable bronze ⇒ replay.** Change a filter, the threshold, or your profile → re-derive silver→gold→score over existing bronze with **zero new API calls**. **This is live as of `v0.4.0`:** a **`{"mode":"reassess"}`** invocation re-scores the already-scored postings against the *current* profile (no fetch) so a job **graduates** `stretch`→`strong_fit` as your skills grow — `previous_score` tracks the before→after ([ADR-0023](adr/0023-reassess-replay.md)).
 - **v0 vs migration.** v0 = single source + exact-id dedup. **M2** grows dedup into full clustering and adds source #2 (the dotted box).
 
 ---
@@ -126,18 +126,17 @@ flowchart TB
 
 The directional roadmap — a **living hypothesis**, not a contract. Live status is the source of truth in [ledgers/phase-index](ledgers/phase-index.md); this is the *shape*. Discussed in [03-roadmap](03-roadmap.md).
 
-**v0 is SHIPPED** — all 10 steps (probe → dissect → schema → infra → fetch/silver → gold → score → notify → handler → CI → deploy) built and verified through the agentic gate pipeline ([ADR-0019](adr/0019-agentic-build-orchestration.md)), then **deployed to AWS, validated live end-to-end, and torn down to ~$0** (tag **`v0.1.0`**, 2026-06-29). The migration markers (M1–M8) below are still all ⬜ — **next = the bottleneck protocol → M1**.
+**v0 shipped, then a P2-driven capability burst.** v0 (`v0.1.0`, 2026-06-29) deployed + live-validated + torn down to ~$0. Since then the **bottleneck protocol re-ranked the roadmap from real usage** — the pre-drawn M1–M8 was hypothesis, not contract. Shipped so far (all live-validated on the deployed stack): `v0.2.0` **M1 pipeline hardening** (the P2 protocol overruled the pre-drawn *M1 = CV tailoring*), `v0.3.0` **user-customizable settings + runtime config in S3** (change settings via `push_config.py`, no redeploy), `v0.3.1` employment_types enum, `v0.4.0` **reassess/replay** (re-score on an updated profile, no re-fetch — the graduation half of the old M4, early), `v0.5.0` **query/filter access** (export → SQLite/CSV), `v0.6.0` **email UX** (card digest + prominent Apply button). **Next = the bottleneck protocol picks from real use** (the ⬜ below are re-derived hypotheses, not committed).
 
 ```mermaid
 flowchart LR
-  v0["v0.1 ✅ shipped (v0.1.0)<br/>fetch → score → email<br/>deployed · live-validated · torn down to $0"] --> M1["M1 ⬜<br/>CV tailoring"]
-  M1 --> M2["M2 ⬜<br/>multi-source + dedup"]
-  M2 --> M3["M3 ⬜<br/>Step Functions"]
-  M3 --> M4["M4 ⬜<br/>Notion + near-miss"]
-  M4 --> M5["M5 ⬜<br/>dbt marts"]
-  M5 --> M6["M6 ⬜<br/>skill + sector intel"]
-  M6 --> M7["M7 ⬜<br/>observability + calibration"]
-  M7 --> M8["M8 ⬜ → v1.0.0<br/>CI/CD + README + demo"]
+  v0["v0.1 ✅ (v0.1.0)<br/>fetch → score → email<br/>deployed · live · $0"] --> H["M1 ✅ (v0.2.0)<br/>pipeline hardening<br/>concurrency · retry · precision"]
+  H --> S3C["✅ (v0.3.0)<br/>settings + config-in-S3<br/>no-redeploy"]
+  S3C --> RA["✅ (v0.4.0)<br/>reassess / replay<br/>graduation, no re-fetch"]
+  RA --> QF["✅ (v0.5.0)<br/>query / filter export"]
+  QF --> EU["✅ (v0.6.0)<br/>email UX · card digest"]
+  EU --> NX{{"next = P2 protocol<br/>picks from real use"}}
+  NX -.-> HYP["⬜ hypotheses:<br/>CV tailoring · multi-source+dedup (M2)<br/>Step Functions (M3) · Notion+near-miss (M4)<br/>dbt marts + analytics (M5–M6)<br/>observability+calibration (M7) · v1.0 polish (M8)"]
 ```
 
 Each migration is chosen by the **bottleneck-decision protocol**, not the list above:
