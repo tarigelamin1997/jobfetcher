@@ -434,7 +434,11 @@ def test_export_snapshot_from_db(repo, patched, tmp_path):
     )
     con = sqlite3.connect(sp)
     assert con.execute("SELECT count(*) FROM jobs WHERE score >= 60").fetchone()[0] == 2
-    assert cp.read_text(encoding="utf-8").strip().count("\n") == 2  # header + 2 rows
+    # count CSV rows via the parser (fields like strengths carry embedded newlines)
+    import csv as _csv
+    with cp.open(encoding="utf-8", newline="") as f:
+        csv_rows = list(_csv.reader(f))
+    assert len(csv_rows) == 3  # header + 2 jobs
 
 
 def _moto_notifier_factory():
