@@ -30,6 +30,8 @@ def _item(score: int, pid: str = "p", **over: Any) -> ShortlistItem:
         "strengths": ["strong Python", "fintech background"],
         "gaps": ["no Spark"],
         "strategic_assessment": "Lead with the pipeline project.",
+        "city": "Riyadh",
+        "country": "sa",
     }
     base.update(over)
     return ShortlistItem(**base)
@@ -47,17 +49,45 @@ def test_render_digest_matches_carry_core_fields():
         assert "Data Engineer" in body
         assert "Acme Corp" in body and "Beta Ltd" in body
         assert "https://jobs.example.com/apply/123" in body
-    # the below-count footer
-    assert "+3 below threshold 60" in text
-    assert "+3 below threshold 60" in html
+    # the below-count footer (new phrasing)
+    assert "+3 more scored below your threshold of 60" in text
+    assert "+3 more scored below your threshold of 60" in html
     # html has a clickable apply link
     assert 'href="https://jobs.example.com/apply/123"' in html
+
+
+def test_render_digest_prominent_apply_button_and_card_fields():
+    # the email-UX headline: every surfaced job renders a PROMINENT Apply BUTTON (a styled <a>,
+    # not a buried text link) + the score badge, fit label, location, and a gap line.
+    item = _item(90, city="Riyadh", country="sa")
+    _, html, text = render_digest([item], below_count=0, threshold=60, date=date(2026, 6, 27))
+    # a button-styled anchor to the apply url (inline-block + background = a button, not plain text)
+    assert 'href="https://jobs.example.com/apply/123"' in html
+    assert "display:inline-block" in html and "Apply" in html
+    # score badge + fit label + location + gap all present in the card
+    assert "90</span>" in html                 # the score badge pill
+    assert "strong fit" in html                 # fit_category label (underscore → space)
+    assert "Riyadh, SA" in html                 # Company · Location (country upper-cased)
+    assert "no Spark" in html                    # the gap line
+    # plaintext keeps the full apply URL on its own line + the location
+    assert "apply: https://jobs.example.com/apply/123" in text
+    assert "Riyadh, SA" in text
+
+
+def test_render_digest_missing_apply_url_shows_no_link_state():
+    # negative: a job without an apply link renders a clear "no link" state, not a broken/empty
+    # button, and emits NO anchor for it.
+    item = _item(80, apply_url=None)
+    _, html, text = render_digest([item], below_count=0, threshold=60, date=date(2026, 6, 27))
+    assert "No apply link available" in html
+    assert "<a " not in html  # no anchor emitted for the missing link
+    assert "(no link)" in text
 
 
 def test_render_digest_singular_match_wording():
     subject, html, _ = render_digest([_item(80)], below_count=0, threshold=60, date=date(2026, 6, 27))
     assert "1 match (" in subject  # singular, no 'es'
-    assert "+0 below" not in html  # no footer when nothing is below
+    assert "more scored below" not in html  # no below-count footer when nothing is below
 
 
 def test_render_digest_orders_as_given_and_uses_raw_title_fallback():
@@ -73,8 +103,8 @@ def test_render_digest_zero_matches_is_valid_no_matches_email():
     subject, html, text = render_digest([], below_count=7, threshold=60, date=date(2026, 6, 27))
     assert "no matches" in subject.lower()
     assert html.strip() and text.strip()  # never blank
-    assert "7 scored" in text and "threshold 60" in text
-    assert "7 scored" in html and "threshold 60" in html
+    assert "7 scored" in text and "threshold of 60" in text
+    assert "7 scored" in html and "threshold of 60" in html
     assert html.lower().startswith("<html>")
 
 
@@ -82,7 +112,7 @@ def test_render_digest_zero_scored_at_all_still_valid():
     # negative edge: nothing scored at all (below_count 0) → still a valid email.
     subject, html, text = render_digest([], below_count=0, threshold=60, date=date(2026, 6, 27))
     assert "no matches" in subject.lower()
-    assert "0 scored above threshold 60" in text
+    assert "nothing scored above your threshold of 60" in text
     assert html.strip()
 
 
@@ -120,7 +150,7 @@ def test_render_digest_http_and_https_render_clickable_link():
     for url in ("http://jobs.test/apply", "https://jobs.test/apply"):
         item = _item(80, apply_url=url)
         _, html, text = render_digest([item], below_count=0, threshold=60, date=date(2026, 6, 27))
-        assert f'<a href="{url}">' in html
+        assert f'href="{url}"' in html  # the button anchor points at the url (style attr follows)
         assert url in text
 
 
@@ -255,7 +285,7 @@ def test_notify_sends_and_counts():
     sent = notifier.sent[0]
     assert sent["recipients"] == ["to@x.com"]
     assert "2 matches" in sent["subject"]
-    assert "+4 below threshold 60" in sent["text"]
+    assert "+4 more scored below your threshold of 60" in sent["text"]
 
 
 def test_notify_zero_matches_still_sends():
@@ -291,7 +321,7 @@ def test_notify_null_threshold_falls_back_to_default():
     repo = _FakeRepo(threshold=None, surfaced=[_item(90)], below=0)
     notifier = _FakeNotifier()
     notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com")
-    assert "threshold 60" in notifier.sent[0]["html"]
+    assert "threshold of 60" in notifier.sent[0]["html"]
 
 
 def test_notify_passes_resolved_threshold_to_shortlist():

@@ -31,6 +31,8 @@ class ShortlistItem:
     strengths: list[Any] = field(default_factory=list)
     gaps: list[Any] = field(default_factory=list)
     strategic_assessment: str | None = None
+    city: str | None = None  # for the digest card's "Company · Location"
+    country: str | None = None
 
 
 class LlmError(Exception):
