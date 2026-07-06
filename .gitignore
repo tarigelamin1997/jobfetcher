@@ -60,3 +60,6 @@ Thumbs.db
 /tmp/
 scratch/
 probe_output/
+
+# Query/filter snapshots (ADR-0024) — generated, may hold real profile data; never commit.
+export/

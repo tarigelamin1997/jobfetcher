@@ -6,7 +6,12 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
-*Next migration candidate (P2): the **query/filter access** surface (export to SQLite/CSV → Datasette/Excel), then the **digest email UX** (poor format · apply-links must be visible).*
+*Next migration candidate (P2): the **digest email UX** (poor format · apply-links must be visible).*
+
+## [v0.5.0] — 2026-07-06 — query / filter access (export → open in a generic tool)
+
+### Added
+- **[ADR-0024] `scripts/export.py`** — snapshot the operational DB to a portable **SQLite + CSV** (gitignored `export/`) you filter/search/sort/organize in a purpose-built tool (**Datasette** recommended — faceted filters + full-text search; or DB Browser / Excel / raw `sqlite3`) — no custom UI. The star is a flat **`jobs`** table (one filterable row per posting: role · geo · skills-as-text · status · `score`/`previous_score`/`fit_category` · apply_url · dates), plus `bronze` (full fetch history), `runs`, and `profile_current`. It also **prints a summary** (totals · fit-category counts · graduations · top-5). Datasette is an optional `[query]` extra (no runtime dep); SQLite is stdlib. Docs: [querying.md](docs/querying.md).
 
 ## [v0.4.0] — 2026-07-06 — reassess / replay (re-score on an updated profile, no re-fetch)
 

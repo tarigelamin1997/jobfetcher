@@ -405,6 +405,38 @@ def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, mo
     assert _count(repo, "bronze_posting") == 2 and _count(repo, "posting") == 2
 
 
+def test_export_snapshot_from_db(repo, patched, tmp_path):
+    """ADR-0024: `scripts/export.py`'s DB read + snapshot over a REAL DB. Run a pipeline to
+    create scored rows, then export → the flat `jobs` table (in sqlite + csv) carries them with
+    score/fit_category, and `bronze`/`runs` are populated. Proves the SQL joins match the schema."""
+    import importlib.util
+    import sqlite3
+
+    _spec = importlib.util.spec_from_file_location(
+        "export", Path(__file__).resolve().parents[1] / "scripts" / "export.py"
+    )
+    export = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(export)
+
+    _truncate(repo)
+    out = _invoke(tmp_path)  # full pipeline → 2 scored postings (score 90)
+    assert out["statusCode"] == 200 and out["score"]["scored"] == 2
+
+    data = export.read_data(repo.engine)  # the real SELECTs against the seeded schema
+    assert len(data["jobs"]) == 2
+    assert all(j["score"] == 90 and j["fit_category"] == "strong_fit" for j in data["jobs"])
+    assert data["jobs"][0]["skills"]  # JSONB skills flattened to searchable text
+    assert len(data["bronze"]) == 2 and len(data["runs"]) == 1
+
+    sp, cp = export.write_snapshot(
+        jobs=data["jobs"], bronze=data["bronze"], runs=data["runs"], profile=data["profile"],
+        out_dir=tmp_path / "export",
+    )
+    con = sqlite3.connect(sp)
+    assert con.execute("SELECT count(*) FROM jobs WHERE score >= 60").fetchone()[0] == 2
+    assert cp.read_text(encoding="utf-8").strip().count("\n") == 2  # header + 2 rows
+
+
 def _moto_notifier_factory():
     """Rebuild the moto-backed SesNotifier the `patched` fixture installs (same bucket/client),
     so a healthy re-invoke after an injected failure actually delivers through moto SES."""
