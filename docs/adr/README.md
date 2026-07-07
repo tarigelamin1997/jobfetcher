@@ -30,5 +30,6 @@ These are the **foundational** decisions made during the design session — the 
 | [0022](0022-runtime-config-in-s3.md) | Runtime config in S3 (not bundled): the Lambda reads the search spec + profile from S3 each run → change settings via `push_config.py`, no redeploy | Accepted |
 | [0023](0023-reassess-replay.md) | Reassess/replay: a `{"mode":"reassess"}` re-scores existing jobs against the updated profile with **no re-fetch** (immutable-bronze replay) → jobs graduate as skills grow | Accepted |
 | [0024](0024-query-via-export.md) | Query/filter via `scripts/export.py` → SQLite/CSV opened in Datasette/DB-Browser/Excel (not a custom UI) — filter/search/organize for free | Accepted |
+| [0025](0025-score-event-lineage.md) | Append-only `score_event` lineage: `save_score` dual-writes an immutable history row (scoring_model + profile_hash + run_id) in one transaction — re-scores never erase judgments — + a `reassess_max_age_days` age bound on replay | Accepted |
 
 > Full reasoning narrative: [01-session-decision-journal](../01-session-decision-journal.md). Crisp decision list: [ledgers/decisions-locked](../ledgers/decisions-locked.md).

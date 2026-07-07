@@ -31,6 +31,7 @@ def _valid_spec_dict() -> dict:
         "threshold": 60,
         "hard_floor": 50,
         "near_miss_band": 10,
+        "reassess_max_age_days": 45,
         "budget": {"max_pages_per_query": 5, "request_budget_per_run": 70},
     }
 
@@ -111,6 +112,38 @@ def test_strictness_knob_out_of_range_is_loud(field, bad):
     data[field] = bad
     with pytest.raises(ValidationError):
         SearchSpec.model_validate(data)
+
+
+# ── the reassess age-bound knob ──────────────────────────────────────────────
+
+
+def test_missing_reassess_max_age_days_is_loud():
+    # required like every other knob — omitting it fails loudly (the "nothing assumed" contract)
+    data = _valid_spec_dict()
+    del data["reassess_max_age_days"]
+    with pytest.raises(ValidationError):
+        SearchSpec.model_validate(data)
+
+
+@pytest.mark.parametrize("bad", [-1, 366, 400])
+def test_reassess_max_age_days_out_of_range_is_loud(bad):
+    data = _valid_spec_dict()
+    data["reassess_max_age_days"] = bad
+    with pytest.raises(ValidationError):
+        SearchSpec.model_validate(data)
+
+
+@pytest.mark.parametrize("ok", [0, 45, 365])
+def test_reassess_max_age_days_in_range_loads(ok):
+    # 0 = no age cutoff (unbounded replay) is a VALID value, not an error
+    data = _valid_spec_dict()
+    data["reassess_max_age_days"] = ok
+    assert SearchSpec.model_validate(data).reassess_max_age_days == ok
+
+
+def test_sample_carries_reassess_max_age_days():
+    spec = SearchSpec.from_yaml(SAMPLE)
+    assert 0 <= spec.reassess_max_age_days <= 365
 
 
 # ── negatives (contract fails loudly) ───────────────────────────────────────

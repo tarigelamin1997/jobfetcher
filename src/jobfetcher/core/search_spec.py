@@ -114,6 +114,19 @@ class SearchSpec(BaseModel):
     hard_floor: int = Field(..., ge=0, le=100)      # below this = misaligned (ignored entirely)
     near_miss_band: int = Field(..., ge=0, le=100)  # width of the "almost" band just below threshold
 
+    # Reassess age bound (ADR-0023 replay): a `{"mode":"reassess"}` run only re-scores postings
+    # fetched within the last N days — a months-old posting is likely filled, so re-scoring it
+    # forever wastes LLM tokens. Required like every other knob (nothing assumed, fails loudly).
+    reassess_max_age_days: int = Field(
+        ...,
+        ge=0,
+        le=365,
+        description=(
+            "reassess only re-scores postings fetched within the last N days; "
+            "0 = no age cutoff (every scored posting is replayed, the pre-0004 behavior)"
+        ),
+    )
+
     budget: Budget
 
     @field_validator("source", "secret_name", "aws_region", "language")

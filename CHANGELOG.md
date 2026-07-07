@@ -6,6 +6,20 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
+### Added — score history + lineage (rides v0.7.0)
+
+- **[ADR-0025] Append-only `score_event` log — re-scores never erase judgments again.** Before: `save_score` upserted the `score` row in place, so every re-score destroyed the prior strengths/gaps/assessment/`scored_at` keeping only one `previous_score` generation — and DeepSeek scores are non-reproducible even at temp 0, so overwritten history was *irrecoverable* (measured: after the single 2026-07-06 reassess, **100% of the 180 scored postings** had the original narrative already gone and the original score one invoke from permanent loss). Now migration **`0004_score_event_lineage`** adds an immutable `score_event` table (score/fit + `strengths`/`gaps`/assessment + **lineage: `scoring_model` · `profile_hash` · `run_id`**, `scored_at` default `now()`, indexed on cluster/run) and `save_score` **dual-writes** the (unchanged) `score` upsert + the event INSERT in **one transaction** — either failure rolls back both. A **baseline backfill** rescues the 180 pre-0004 scores into the log (`scoring_model`/`profile_hash` = `'pre-0004'`). The event INSERT is a plain no-RETURNING/no-prefetch statement (Data-API hardening per ERR-004/005); the handler stamps every event with a **`profile_hash`** (sha256 of profile + the 3 knobs, also stored on the new nullable `profile.profile_hash`), so any score joins to the exact profile that produced it. M7 calibration + the "45→62→78" history charts (ADR-0023/0024 follow-ons) now have their data source.
+- **Reassess age bound** — `get_scored_for_reassess(max_age_days=...)` ages postings by `COALESCE(posting.fetched_at, bronze_posting.fetched_at)` (bronze is the effective live source), **includes** unknown-age rows (safe default), `0`/`None` = unbounded (query string-identical to before); new **REQUIRED** `SearchSpec` field **`reassess_max_age_days`** (0–365; 0 = no cutoff; sample recommends **45**) — reassess stops paying LLM tokens to re-score months-old, likely-filled postings forever. The method is now declared on the `Repository` Protocol (closing a v0.4.0 omission).
+- **`scripts/export.py`** — the SQLite snapshot gains a **`score_events`** table (the score-delta/provenance index next to the flat `jobs` current view).
+- Honest asymmetry (recorded in the ADR): an event's `previous_score` is what *that* `save_score` call received — a fresh scoring writes event `previous_score=NULL` even when the score-row upsert carries an old value; deltas are recoverable from **event order** regardless.
+- Verified: **272 unit + 31 integration green** (+5 live-key skips), **94.76% full-suite coverage** (85% floor), `ruff` clean; independent fresh-context adversarial + integration review — zero blocking defects. Residual live item: watch the **first `save_score` over the Aurora Data API** in the release's live smoke (the inline INSERT is compile-verified; the Data-API path is only provable live).
+
+### ⚠️ Deploy sequencing — read before deploying the above
+
+**`reassess_max_age_days` is REQUIRED and the runtime config lives in S3 ([ADR-0022]) — deploying this code without pushing config first makes every subsequent run fail loudly (`SearchSpec` ValidationError) until the config is pushed.** The deploy order is: **update the local config YML → `python scripts/push_config.py` → deploy/invoke.** (Registered in the [procedure registry](docs/ledgers/procedure-registry.md).)
+
+### Milestones
+
 - **Milestone `milestone/pre-agentic-workflow-2026-07-07`** — the complete-documentation baseline (v0.1.0→v0.6.0 shipped + docs/diagrams swept current, 257 tests green). The clean checkpoint before the build phase switches to an **agentic workflow**.
 
 *Next candidate (P2): fold the reassess "what graduated" digest into the email; then re-evaluate the roadmap from usage.*

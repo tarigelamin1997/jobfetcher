@@ -22,6 +22,8 @@ package is a Step-10 deploy concern; the handler just reads a path.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import urllib.parse
@@ -162,6 +164,26 @@ def resolve_deadline(context: Any) -> Deadline | None:
     return Deadline(get_remaining() / 1000.0 - _DEADLINE_MARGIN_S)
 
 
+def compute_profile_hash(profile: Profile, spec: SearchSpec) -> str:
+    """The lineage hash of what scoring judges against: the full profile payload + the three
+    strictness knobs, canonically serialized (sorted keys, ASCII) → sha256 hex. Stored on the
+    `profile` row at sync and stamped on every `score_event` (migration 0004), so any score can
+    be traced to the exact profile content that produced it — same content, same hash, across
+    runs and machines. Pure."""
+    return hashlib.sha256(
+        json.dumps(
+            {
+                **profile.model_dump(),
+                "threshold": spec.threshold,
+                "hard_floor": spec.hard_floor,
+                "near_miss_band": spec.near_miss_band,
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+
+
 def resolve_filter_strategy(env: dict[str, str]) -> Any:
     """The gold `FilterStrategy` from `$GOLD_FILTER_STRATEGY` (H-3): `deterministic`
     (default) or `llm` (the `LlmFilterStrategy` on the cheap dissect model — semantic
@@ -219,12 +241,16 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         # could not change any setting without a raw DB edit. The three strictness knobs are all
         # user-set on the SearchSpec now; ingest.py keeps _DEFAULT_* only as the NULL-row safety net.
         rlog.info("syncing profile row from config for user_id=%s", user_id)
+        # The lineage hash (migration 0004): stored on the profile row here, then stamped on
+        # every score_event this run writes — the score↔profile provenance link.
+        profile_hash = compute_profile_hash(profile, spec)
         repo.upsert_profile(
             user_id=user_id,
             profile=profile.model_dump(),
             threshold=spec.threshold,
             hard_floor=spec.hard_floor,
             near_miss_band=spec.near_miss_band,
+            profile_hash=profile_hash,
         )
 
         # Build the adapters (one place; each reads its own env var / secret path).
@@ -249,9 +275,11 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 run_id=run_id,
                 repo=repo,
                 scorer=scorer,
+                profile_hash=profile_hash,
                 user_id=user_id,
                 max_workers=max_workers,
                 deadline=deadline,
+                max_age_days=spec.reassess_max_age_days,
             )
             rlog.info("mode=reassess done %s", reassess_report)
             return {
@@ -289,6 +317,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             run_id=run_id,
             repo=repo,
             scorer=scorer,
+            profile_hash=profile_hash,
             user_id=user_id,
             max_workers=max_workers,
             deadline=deadline,

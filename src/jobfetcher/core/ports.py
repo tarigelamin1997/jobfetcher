@@ -211,6 +211,24 @@ class Repository(Protocol):
         a run is deterministic. Raises `RepositoryError` on a backend failure."""
         ...
 
+    def get_scored_for_reassess(
+        self,
+        *,
+        max_age_days: int | None = None,
+    ) -> "list[tuple[str, str, DissectedPosting, int, str]]":
+        """Read the reassess set (ADR-0023): every `status='scored'` posting + its CURRENT
+        score and fit_category as `(posting_id, cluster_id, dissected, current_score,
+        current_fit_category)` — the replay's input, so `reassess()` can re-score against the
+        updated profile and report the old→new delta. **Ordered by `posting_id`** so a run is
+        deterministic.
+
+        `max_age_days` bounds the replay by posting age (LLM-token thrift): when set and > 0,
+        only postings fetched within the last N days are returned — a posting whose age is
+        unknown (no fetched timestamp resolvable) is INCLUDED, never silently dropped from
+        replay forever. `None` or `0` = unbounded (every scored posting). Raises
+        `RepositoryError` on a backend failure."""
+        ...
+
     def save_score(
         self,
         *,
@@ -222,12 +240,19 @@ class Repository(Protocol):
         strategic_assessment: str,
         poster_type: str,
         legitimacy_verified: bool,
+        scoring_model: str,
+        profile_hash: str,
+        run_id: str | None = None,
         previous_score: int | None = None,
     ) -> str:
         """Upsert a `score` row keyed on `cluster_id` (1:1 with cluster). Idempotent —
         re-scoring overwrites; the prior `score` is carried into `previous_score` when one
-        exists (near-miss re-scoring trail). Returns the `cluster_id`. Raises `RepositoryError`
-        on a backend failure."""
+        exists (near-miss re-scoring trail). In the SAME transaction, APPEND an immutable
+        `score_event` row (migration 0004) carrying the score + its lineage — `scoring_model`
+        and `profile_hash` are required (an event is never written without its provenance),
+        `run_id` is the correlation id when the caller has one. A failure of either write
+        rolls back both. Returns the `cluster_id`. Raises `RepositoryError` on a backend
+        failure."""
         ...
 
     def mark_scored(self, posting_id: str) -> None:
@@ -258,11 +283,13 @@ class Repository(Protocol):
         threshold: int,
         hard_floor: int,
         near_miss_band: int,
+        profile_hash: str | None = None,
     ) -> None:
         """Seed (or update) the single-user `profile` row: the JSONB payload + the three
         threshold knobs. Idempotent on `user_id` — the Step-7 handler calls this once to seed
-        from the loaded `Profile`/config when no row exists yet. Raises `RepositoryError` on a
-        backend failure."""
+        from the loaded `Profile`/config when no row exists yet. `profile_hash` (nullable,
+        migration 0004) records which profile+knobs content the row was synced from — the same
+        hash stamped on every `score_event`. Raises `RepositoryError` on a backend failure."""
         ...
 
     def was_digest_sent(self, *, user_id: str, run_date: "date") -> bool:

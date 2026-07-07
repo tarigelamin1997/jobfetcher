@@ -204,7 +204,7 @@ flowchart LR
   PC --> S3[("S3 · profile.yml")]
   S3 -->|read at runtime| RE["Lambda · {mode:reassess}<br/>re-score the already-scored postings<br/>against the CURRENT profile"]
   BR[("bronze · immutable<br/>already fetched")] -.->|"no new fetch — replay only"| RE
-  RE --> SS["score rows updated<br/>previous_score ← old · score ← new"]
+  RE --> SS["score rows updated<br/>previous_score ← old · score ← new<br/>+ score_event appended — history + lineage (0004)"]
   SS --> G{"crossed the threshold upward?"}
   G -->|yes| GR["GRADUATED<br/>stretch / near-miss → strong_fit"]
   G -->|no| UN["unchanged / downgraded"]
@@ -241,7 +241,7 @@ Filter/search/organize your records without a custom UI: **export a snapshot** a
 
 ```mermaid
 flowchart LR
-  PG[("Aurora · posting · score<br/>bronze · run_log · profile")] --> EX["scripts/export.py<br/>flatten JSONB→text · join"]
+  PG[("Aurora · posting · score<br/>bronze · run_log · profile · score_event")] --> EX["scripts/export.py<br/>flatten JSONB→text · join"]
   EX --> SQ[("export/jobs.sqlite")]
   EX --> CSV[("export/jobs.csv")]
   SQ --> DS["Datasette<br/>faceted filter · full-text search"]

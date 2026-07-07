@@ -114,7 +114,8 @@ erDiagram
   PROFILE ||--o{ SCORE : "scored against"
   BRONZE_POSTING ||--o| POSTING : "normalized into (silver)"
   CLUSTER ||--o{ POSTING : "groups"
-  CLUSTER ||--o| SCORE : "has one"
+  CLUSTER ||--o| SCORE : "has one (current view)"
+  CLUSTER ||--o{ SCORE_EVENT : "append-only history"
   CLUSTER ||--o| CV : "has one"
   CLUSTER ||--o{ APPLICATION : "tracked by"
 
@@ -177,6 +178,22 @@ erDiagram
     timestamptz scored_at
     int score_override "human correction → calibration data"
   }
+  SCORE_EVENT {
+    int event_id PK "serial — server-assigned"
+    text cluster_id FK
+    int score "0-100"
+    text fit_category
+    jsonb strengths
+    jsonb gaps
+    text strategic_assessment
+    text poster_type
+    bool legitimacy_verified
+    int previous_score "what THIS save_score call received"
+    text scoring_model "lineage: which model scored"
+    text profile_hash "lineage: which profile+knobs it judged against"
+    text run_id "correlation id"
+    timestamptz scored_at "default now(); append-only, never updated"
+  }
   CV {
     text cluster_id FK
     text docx_s3_key
@@ -195,10 +212,12 @@ erDiagram
     int threshold "default 60 — gates shortlist + CV"
     int hard_floor "default 50"
     int near_miss_band "default 10"
+    text profile_hash "sha256 of profile+knobs last synced (0004)"
   }
 ```
 
 - **`user_id` on PROFILE is the multi-user seam** — present from day one, single-valued now; multi-user is a future migration that adds the dimension across tables, not a rewrite.
+- **`score` is the current view; `score_event` is the history** (migration 0004, [ADR-0025](adr/0025-score-event-lineage.md)). `save_score` **dual-writes** both in **one transaction** (either failure rolls back both): the `score` upsert stays the 1:1-per-cluster current judgment every read path uses, while `score_event` appends one immutable row per scoring event carrying its **lineage** — `scoring_model` + `profile_hash` (both NOT NULL: no event without provenance) + `run_id`. **`profile.profile_hash`** (sha256 of the profile payload + the 3 knobs, computed at profile-sync) ties each event to the exact profile *content* that judged it — necessary because the `profile` row is overwritten from config every run. LLM scores are non-reproducible even at temp 0, so history must be recorded, not re-derived; the migration **backfilled** the pre-existing scores as `'pre-0004'` events. One honest asymmetry: an event's `previous_score` is what *that* `save_score` call received (NULL on a fresh scoring), while the row's `previous_score` may carry an upsert-conflict value — the delta source of truth is **event order**. Feeds M7 calibration + the M5/M6 score-history facts.
 - **Schema migrations** are first-class: **Alembic** versioned migrations; every release that changes the schema ships its migration. No ad-hoc `ALTER`.
 - **Dissected fields live on `posting`** (silver) — `skills` (jsonb: `[{name, level, evidence}]`), `normalized_title`, `sector`, `seniority`, `language` — produced by the silver `Dissector` ([ADR-0016](adr/0016-llm-dissection-at-silver.md)), **not re-extracted at score** (that's why `score` no longer carries `skills_extracted`/`sector`/`seniority`). v0 stores `skills` losslessly as **JSONB**; the `dim_skill`/`fct_job_skill` bridge is modeled retroactively over it at **M5** ([ADR-0011](adr/0011-dimensional-analytical-model.md)) — no early bridge (P1).
 - **DB access** ([ADR-0018](adr/0018-persistence-sqlalchemy-data-api-repository.md)): the pipeline reaches Aurora through **SQLAlchemy Core + the `sqlalchemy-aurora-data-api` dialect**, behind a **`Repository` port** — the *same* code runs against a local Postgres (fast tests) and the Aurora **Data API** (deployed) by swapping the connection URL; Alembic uses the same. LocalStack doesn't mock the Data API, so DB tests use a **real local Postgres** (LocalStack/moto stay for S3 + Secrets).

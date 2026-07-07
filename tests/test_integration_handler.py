@@ -173,6 +173,7 @@ def _write_config(tmp_path: Path, *, threshold: int = 60) -> tuple[str, str]:
         f"threshold: {threshold}\n"
         "hard_floor: 50\n"
         "near_miss_band: 10\n"
+        "reassess_max_age_days: 45\n"
         "budget:\n"
         "  max_pages_per_query: 1\n"
         "  request_budget_per_run: 5\n",
@@ -401,6 +402,24 @@ def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, mo
     assert all(row.score == 90 and row.previous_score == 60 for row in rows)
     assert all(row.fit_category == "strong_fit" for row in rows)
 
+    # lineage proof (migration 0004): 2 first-scoring events + 2 reassess events survive the
+    # upsert — the reassess did NOT erase the original judgments from the log
+    with repo.engine.connect() as conn:
+        events = conn.execute(_text(
+            "SELECT score, previous_score, run_id, profile_hash, scoring_model "
+            "FROM score_event ORDER BY event_id"
+        )).all()
+    assert len(events) == 4
+    assert [e.score for e in events] == [60, 60, 90, 90]
+    assert all(e.previous_score is None for e in events[:2])  # first scorings
+    assert all(e.previous_score == 60 for e in events[2:])    # reassess carries the old
+    assert all(e.run_id == "reassess1" for e in events[2:])
+    assert all(e.profile_hash and e.scoring_model for e in events)
+    # the synced profile row carries the same hash the events were stamped with
+    with repo.engine.connect() as conn:
+        row_hash = conn.execute(_text("SELECT profile_hash FROM profile")).scalar_one()
+    assert row_hash == events[-1].profile_hash
+
     # no NEW bronze/posting rows were created (replay only re-scores; no fetch)
     assert _count(repo, "bronze_posting") == 2 and _count(repo, "posting") == 2
 
@@ -427,13 +446,16 @@ def test_export_snapshot_from_db(repo, patched, tmp_path):
     assert all(j["score"] == 90 and j["fit_category"] == "strong_fit" for j in data["jobs"])
     assert data["jobs"][0]["skills"]  # JSONB skills flattened to searchable text
     assert len(data["bronze"]) == 2 and len(data["runs"]) == 1
+    assert len(data["events"]) == 2  # one lineage event per scoring (migration 0004)
+    assert all(e["scoring_model"] and e["profile_hash"] for e in data["events"])
 
     sp, cp = export.write_snapshot(
         jobs=data["jobs"], bronze=data["bronze"], runs=data["runs"], profile=data["profile"],
-        out_dir=tmp_path / "export",
+        events=data["events"], out_dir=tmp_path / "export",
     )
     con = sqlite3.connect(sp)
     assert con.execute("SELECT count(*) FROM jobs WHERE score >= 60").fetchone()[0] == 2
+    assert con.execute("SELECT count(*) FROM score_events").fetchone()[0] == 2
     # count CSV rows via the parser (fields like strengths carry embedded newlines)
     import csv as _csv
     with cp.open(encoding="utf-8", newline="") as f:

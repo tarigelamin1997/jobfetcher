@@ -192,8 +192,12 @@ class _FakeScoreRepo:
         return list(self._candidates)
 
     def save_score(self, *, cluster_id, score, fit_category, strengths, gaps,
-                   strategic_assessment, poster_type, legitimacy_verified, previous_score=None):
-        self.saved[cluster_id] = {"score": score, "fit_category": fit_category}
+                   strategic_assessment, poster_type, legitimacy_verified,
+                   scoring_model, profile_hash, run_id=None, previous_score=None):
+        self.saved[cluster_id] = {
+            "score": score, "fit_category": fit_category,
+            "scoring_model": scoring_model, "profile_hash": profile_hash, "run_id": run_id,
+        }
         return cluster_id
 
     def mark_scored(self, posting_id):
@@ -224,14 +228,16 @@ def _scorer_for(scores):
 
 def test_vg8_threshold_0_surfaces_all():
     repo = _FakeScoreRepo(_profile_row(0), _candidates(), None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]), max_workers=1)
+    summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
+                         scorer=_scorer_for([30, 65, 90]), max_workers=1)
     assert summary == {"gold": 3, "scored": 3, "surfaced": 3, "failed": 0, "deferred": 0}
     assert all(v["fit_category"] == "strong_fit" for v in repo.saved.values())
 
 
 def test_vg8_threshold_above_all_surfaces_none():
     repo = _FakeScoreRepo(_profile_row(101), _candidates(), None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]), max_workers=1)
+    summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
+                         scorer=_scorer_for([30, 65, 90]), max_workers=1)
     assert summary["surfaced"] == 0
     assert not any(v["fit_category"] == "strong_fit" for v in repo.saved.values())
 
@@ -241,7 +247,8 @@ def test_vg8_threshold_60_splits_in_between():
     # with NO code change. This is the VG8 proof.
     repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
     # max_workers=1: the FakeLlm replies map to candidates by call order (order-sensitive)
-    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]), max_workers=1)
+    summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
+                         scorer=_scorer_for([30, 65, 90]), max_workers=1)
     assert summary["surfaced"] == 2  # 65 and 90 clear 60; 30 does not
     assert repo.saved["c-high"]["fit_category"] == "strong_fit"
     assert repo.saved["c-mid"]["fit_category"] == "strong_fit"
@@ -252,6 +259,8 @@ def test_score_gold_skips_failed_scoring_and_continues():
     # a scoring failure (bad JSON twice for the middle candidate) → logged + skipped, the run
     # continues and scores the rest (mirrors land_silver).
     class _OneBoomScorer:
+        model_id = "test-model"
+
         def __init__(self):
             self._n = 0
 
@@ -263,7 +272,8 @@ def test_score_gold_skips_failed_scoring_and_continues():
 
     repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
     # max_workers=1: "the 2nd call" must map to p-mid deterministically (order-sensitive)
-    summary = score_gold(run_id="r", repo=repo, scorer=_OneBoomScorer(), max_workers=1)
+    summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
+                         scorer=_OneBoomScorer(), max_workers=1)
     assert summary == {"gold": 3, "scored": 2, "surfaced": 2, "failed": 1, "deferred": 0}
     assert repo.status["p-mid"] == "gold_candidate"  # the failed one is NOT marked scored
 
@@ -274,7 +284,7 @@ def test_score_gold_skips_llm_transport_error():
             raise LlmError("transport down")
 
     repo = _FakeScoreRepo(_profile_row(60), [("p", "c", _dissected())], None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_BoomScorer())
+    summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit", scorer=_BoomScorer())
     assert summary == {"gold": 1, "scored": 0, "surfaced": 0, "failed": 1, "deferred": 0}
 
 
@@ -292,7 +302,7 @@ def test_score_gold_defers_on_expired_deadline():
 
     repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
     summary = score_gold(
-        run_id="r", repo=repo, scorer=_CountingScorer(), deadline=Deadline(0)
+        run_id="r", repo=repo, profile_hash="ph-unit", scorer=_CountingScorer(), deadline=Deadline(0)
     )
     assert summary == {"gold": 3, "scored": 0, "surfaced": 0, "failed": 0, "deferred": 3}
     assert _CountingScorer.calls == 0
@@ -305,5 +315,37 @@ def test_score_gold_uses_default_knobs_when_null():
     row = {"profile": _profile().model_dump(), "threshold": None,
            "hard_floor": None, "near_miss_band": None}
     repo = _FakeScoreRepo(row, _candidates(), None)
-    summary = score_gold(run_id="r", repo=repo, scorer=_scorer_for([30, 65, 90]), max_workers=1)
+    summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
+                         scorer=_scorer_for([30, 65, 90]), max_workers=1)
     assert summary["surfaced"] == 2  # default threshold 60 → 65 & 90 surface
+
+
+# --------------------------------------------------------------------------- score_event lineage
+def test_score_gold_threads_lineage_into_save_score():
+    """Migration 0004: every save carries the scorer's model id, the caller's profile_hash, and
+    the run's correlation id — the lineage `save_score` stamps on the `score_event` row."""
+    repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
+    scorer = Scorer(FakeLlm(*[_score_json(s) for s in [30, 65, 90]]), model_id="pro-model")
+    score_gold(run_id="run-lineage", repo=repo, profile_hash="ph-a", scorer=scorer, max_workers=1)
+    assert all(
+        v["scoring_model"] == "pro-model" and v["profile_hash"] == "ph-a"
+        and v["run_id"] == "run-lineage"
+        for v in repo.saved.values()
+    )
+
+
+def test_score_gold_lineage_differs_when_inputs_differ():
+    """Two scorings with a DIFFERENT model + profile_hash → the saves carry DISTINCT lineage
+    (the negative twin of the threading test: lineage is per-call, never a baked-in constant)."""
+    repo = _FakeScoreRepo(_profile_row(60), _candidates()[:1], None)
+    score_gold(run_id="r1", repo=repo, profile_hash="ph-before",
+               scorer=Scorer(FakeLlm(_score_json(50)), model_id="model-v1"), max_workers=1)
+    first = dict(repo.saved["c-low"])
+    repo._candidates = _candidates()[:1]  # re-promote the same candidate for a second pass
+    score_gold(run_id="r2", repo=repo, profile_hash="ph-after",
+               scorer=Scorer(FakeLlm(_score_json(70)), model_id="model-v2"), max_workers=1)
+    second = dict(repo.saved["c-low"])
+    assert (first["scoring_model"], first["profile_hash"], first["run_id"]) == (
+        "model-v1", "ph-before", "r1")
+    assert (second["scoring_model"], second["profile_hash"], second["run_id"]) == (
+        "model-v2", "ph-after", "r2")
