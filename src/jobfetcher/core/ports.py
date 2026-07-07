@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from datetime import date
+    from datetime import date, datetime
 
     from .models import DissectedPosting
     from .profile import Profile
@@ -33,6 +33,13 @@ class ShortlistItem:
     strategic_assessment: str | None = None
     city: str | None = None  # for the digest card's "Company · Location"
     country: str | None = None
+    # Digest truthfulness: `previous_score` powers the new/still-open split + the graduation
+    # badge (None = this cluster's FIRST-ever scoring — genuinely new); `fingerprint` powers
+    # the render-time dup collapse; `fetched_at` is the effective age the digest age-cutoff
+    # filtered on — `COALESCE(posting.fetched_at, bronze.fetched_at)`, None = age unknown.
+    previous_score: int | None = None
+    fingerprint: str | None = None
+    fetched_at: "datetime | None" = None
 
 
 class LlmError(Exception):
@@ -290,7 +297,11 @@ class Repository(Protocol):
         ...
 
     def get_scored_shortlist(
-        self, *, threshold: int
+        self,
+        *,
+        threshold: int,
+        since: "datetime | None" = None,
+        max_age_days: int | None = None,
     ) -> "tuple[list[ShortlistItem], int]":
         """Read the daily digest input (Step 6): JOIN `score` ↔ `posting` on `cluster_id` (1:1
         in v0) and return `(surfaced, count_below_threshold)` where `surfaced` is every match
@@ -300,6 +311,19 @@ class Repository(Protocol):
         The `threshold` is resolved by the caller (`notify()` is the single threshold authority —
         the DB `profile.threshold` with the documented-default fallback) and passed in, so the
         surfaced/below split uses the one config knob — this method does not re-derive it.
+
+        Digest truthfulness: each item also carries `previous_score`, `fingerprint`, and the
+        effective age `fetched_at` (`COALESCE(posting.fetched_at, bronze.fetched_at)` — the
+        reassess age source; `posting.fetched_at` is NULL on live rows). The new/still-open
+        split and the dup grouping are computed RENDER-SIDE (pure functions in
+        `core/notifier.py`), never here — `since` (the last digest send time) is accepted on
+        the port for that caller but does not filter this query in v0.
+
+        `max_age_days` bounds the digest by posting age: when set and > 0, a row whose
+        effective fetched-at is older than N days is DROPPED (from both the surfaced list and
+        the below count — an aged-out job vanishes from the digest entirely), while an
+        unknown-age row (COALESCE'd NULL) is INCLUDED, never silently dropped. `None`/`0` =
+        no age cutoff.
 
         "Surfaced" matches Step 5's `surfaced`/`strong_fit` cut. Raises `RepositoryError` on a
         backend failure."""
@@ -332,6 +356,13 @@ class Repository(Protocol):
         """Record that the digest was sent for `(user_id, run_date)` (idempotent upsert on the
         composite PK). Called only after a successful send. Raises `RepositoryError` on a
         backend failure."""
+        ...
+
+    def get_last_digest_sent_at(self, *, user_id: str) -> "datetime | None":
+        """`MAX(run_log.digest_sent_at)` for the user — when the last digest actually went out,
+        or `None` when no digest was ever sent (no `run_log` rows — NULL-safe, not an error).
+        `notify()` passes it as `since` to the renderer: `None` = the first-ever digest, so
+        EVERYTHING is new. Raises `RepositoryError` on a backend failure."""
         ...
 
 

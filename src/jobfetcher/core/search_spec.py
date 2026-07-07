@@ -127,6 +127,19 @@ class SearchSpec(BaseModel):
         ),
     )
 
+    # Digest age bound (digest truthfulness): a still-open match older than N days drops out
+    # of the daily digest — an old posting is likely filled, so resurfacing it forever makes
+    # the email lie. Required like every other knob (nothing assumed, fails loudly).
+    digest_max_age_days: int = Field(
+        ...,
+        ge=0,
+        le=365,
+        description=(
+            "still-open matches older than this drop out of the digest; "
+            "0 = keep forever (no age cutoff)"
+        ),
+    )
+
     budget: Budget
 
     @field_validator("source", "secret_name", "aws_region", "language")

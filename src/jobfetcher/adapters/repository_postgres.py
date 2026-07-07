@@ -560,7 +560,11 @@ class PostgresRepository:
             raise RepositoryError(f"mark_scored failed for {posting_id!r}: {e}") from e
 
     def get_scored_shortlist(
-        self, *, threshold: int
+        self,
+        *,
+        threshold: int,
+        since: datetime | None = None,  # noqa: ARG002 — see the comment below
+        max_age_days: int | None = None,
     ) -> tuple[list[ShortlistItem], int]:
         # `threshold` is the one config knob, resolved by the caller (`notify()` — the single
         # authority); the surfaced/below split is computed against it, never a re-derived
@@ -571,8 +575,19 @@ class PostgresRepository:
         #
         # JOIN score ↔ posting on cluster_id (1:1 in v0). Carry the raw title + apply_url from
         # posting and the LLM judgment from score; order by score DESC so the digest leads with
-        # the best match.
-        s, p = tables.score, tables.posting
+        # the best match. LEFT JOIN bronze for the effective age (the `get_scored_for_reassess`
+        # pattern): `posting.fetched_at` wins when set but is NULL on live rows (`save_posting`
+        # never writes it), so the bronze landing time is the real age source.
+        #
+        # `since` is accepted on the port (notify() resolves it once and threads it through) but
+        # does NOT filter this query: the new/still-open split rides `previous_score` semantics
+        # and is computed render-side (pure functions in core/notifier.py), never in SQL.
+        #
+        # `max_age_days` > 0 drops rows older than the bound-parameter cutoff — from the
+        # surfaced list AND the below count (an aged-out job vanishes from the digest
+        # entirely); an unknown-age row (COALESCE'd NULL) is INCLUDED, same rule as reassess.
+        s, p, b = tables.score, tables.posting, tables.bronze_posting
+        age_source = func.coalesce(p.c.fetched_at, b.c.fetched_at)
         joined = (
             select(
                 p.c.posting_id,
@@ -582,15 +597,28 @@ class PostgresRepository:
                 p.c.normalized_title,
                 p.c.city,
                 p.c.country,
+                p.c.fingerprint,
                 s.c.score,
                 s.c.fit_category,
                 s.c.strengths,
                 s.c.gaps,
                 s.c.strategic_assessment,
+                s.c.previous_score,
+                age_source.label("effective_fetched_at"),
             )
-            .select_from(s.join(p, s.c.cluster_id == p.c.cluster_id))
+            .select_from(
+                s.join(p, s.c.cluster_id == p.c.cluster_id).outerjoin(
+                    b, p.c.bronze_id == b.c.bronze_id
+                )
+            )
             .order_by(s.c.score.desc())
         )
+        if max_age_days is not None and max_age_days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            # A COALESCE'd NULL (unknown age) is INCLUDED — the OR IS NULL is load-bearing,
+            # exactly like get_scored_for_reassess. The cutoff is a bound parameter, never
+            # interpolated SQL.
+            joined = joined.where(age_source.is_(None) | (age_source >= cutoff))
         try:
             with self.engine.connect() as conn:
                 rows = conn.execute(joined).mappings().all()
@@ -618,6 +646,9 @@ class PostgresRepository:
                         strategic_assessment=row["strategic_assessment"],
                         city=row["city"],
                         country=row["country"],
+                        previous_score=row["previous_score"],
+                        fingerprint=row["fingerprint"],
+                        fetched_at=row["effective_fetched_at"],
                     )
                 )
             else:
@@ -655,4 +686,18 @@ class PostgresRepository:
         except SQLAlchemyError as e:
             raise RepositoryError(
                 f"mark_digest_sent failed for {user_id!r}/{run_date}: {e}"
+            ) from e
+
+    def get_last_digest_sent_at(self, *, user_id: str) -> datetime | None:
+        # MAX over zero rows is SQL NULL → None (NULL-safe by construction): no digest was
+        # ever sent, so notify() treats the next one as the first-ever (everything is new).
+        stmt = select(func.max(tables.run_log.c.digest_sent_at)).where(
+            tables.run_log.c.user_id == user_id
+        )
+        try:
+            with self.engine.connect() as conn:
+                return conn.execute(stmt).scalar_one()
+        except SQLAlchemyError as e:
+            raise RepositoryError(
+                f"get_last_digest_sent_at failed for {user_id!r}: {e}"
             ) from e
