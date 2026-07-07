@@ -4,8 +4,10 @@ Proves the dual-write's DB-level properties that no fake can: (1) three scorings
 cluster → THREE distinct `score_event` rows while `score` holds only current+previous;
 (2) atomicity BOTH ways — a failure of the event insert rolls back the score upsert, and a
 failure of the score upsert writes no event (one transaction, never divergent); (3) the
-`get_scored_for_reassess` age filter — old postings excluded, recent included, NULL
-`fetched_at` ALWAYS included (the safe default: `save_posting` never populates it), and
+`get_scored_for_reassess` age filter on LIVE-SHAPED data — the age is
+`COALESCE(posting.fetched_at, bronze.fetched_at)` because `save_posting` leaves
+`posting.fetched_at` NULL, so old bronze → excluded (the bound actually bites), recent →
+included, posting-level timestamp wins, a COALESCE'd-NULL row is ALWAYS included, and
 `max_age_days=0`/`None` = unbounded (the pre-0004 regression guard). SKIPS CLEANLY when no
 Postgres is reachable (same harness as the sibling integration modules)."""
 from __future__ import annotations
@@ -104,6 +106,36 @@ def _set_fetched_at(repo, posting_id: str, when: datetime | None) -> None:
         )
 
 
+def _set_bronze_fetched_at(repo, posting_id: str, when: datetime) -> None:
+    """Backdate the bronze landing time (`bronze_posting.fetched_at`, NOT NULL default now())
+    — the live age source, since `posting.fetched_at` stays NULL on every real row."""
+    from sqlalchemy import update
+
+    from jobfetcher.db import tables
+
+    with repo.engine.begin() as conn:
+        conn.execute(
+            update(tables.bronze_posting)
+            .where(tables.bronze_posting.c.bronze_id == f"jsearch:{posting_id}")
+            .values(fetched_at=when)
+        )
+
+
+def _orphan_bronze_link(repo, posting_id: str) -> None:
+    """NULL out `posting.bronze_id` — the pathological LEFT-JOIN miss where even the bronze
+    fallback yields no age (COALESCE → NULL)."""
+    from sqlalchemy import update
+
+    from jobfetcher.db import tables
+
+    with repo.engine.begin() as conn:
+        conn.execute(
+            update(tables.posting)
+            .where(tables.posting.c.posting_id == posting_id)
+            .values(bronze_id=None)
+        )
+
+
 def _events(repo, cluster_id: str) -> list[dict]:
     from sqlalchemy import select
 
@@ -187,20 +219,30 @@ def test_failed_score_upsert_writes_no_event(repo):
 
 
 # --------------------------------------------------------------------------- reassess age bound
-def test_age_filter_excludes_old_includes_recent_and_null(repo):
-    """The reassess age bound over real SQL: with `max_age_days=45`, a 100-day-old posting is
-    EXCLUDED, a 10-day-old posting is INCLUDED, and a NULL-`fetched_at` posting is INCLUDED
-    (the landmine: `save_posting` never writes `fetched_at`, so NULL rows must never be
-    silently dropped from reassess)."""
+def test_age_filter_bites_on_live_shaped_data_and_keeps_null_safety(repo):
+    """The reassess age bound over real SQL, on LIVE-SHAPED rows: `posting.fetched_at` stays
+    NULL (as `save_posting` leaves it), so the age comes from the bronze landing time via
+    `COALESCE(posting.fetched_at, bronze.fetched_at)`. With `max_age_days=45`: a posting whose
+    BRONZE is 100 days old is EXCLUDED (the bound actually bites on live data), a 10-day-old
+    one is INCLUDED, an explicit `posting.fetched_at` takes PRECEDENCE over a fresh bronze,
+    and the pathological no-age row (NULL `bronze_id` → COALESCE still NULL) is INCLUDED —
+    never silently dropped from reassess forever."""
     tag = uuid4().hex[:8]
     now = datetime.now(timezone.utc)
     old = _seed_scored(repo, f"old-{tag}")
     recent = _seed_scored(repo, f"recent-{tag}")
-    unknown = _seed_scored(repo, f"unknown-{tag}")
-    _set_fetched_at(repo, old, now - timedelta(days=100))
-    _set_fetched_at(repo, recent, now - timedelta(days=10))
+    posting_wins = _seed_scored(repo, f"pwins-{tag}")
+    orphan = _seed_scored(repo, f"orphan-{tag}")
+    # live shape: posting.fetched_at stays NULL; the bronze landing time carries the age
+    _set_bronze_fetched_at(repo, old, now - timedelta(days=100))
+    _set_bronze_fetched_at(repo, recent, now - timedelta(days=10))
+    # precedence: an OLD posting-level timestamp beats this row's fresh (default now()) bronze
+    _set_fetched_at(repo, posting_wins, now - timedelta(days=100))
+    # pathological: no bronze link at all → COALESCE yields NULL
+    _orphan_bronze_link(repo, orphan)
 
-    # First, PIN the landmine finding: a freshly save_posting'd row has NULL fetched_at.
+    # First, PIN the landmine finding: a freshly save_posting'd row has NULL fetched_at —
+    # without the bronze COALESCE fallback the bound would never bite on live data.
     from sqlalchemy import select
 
     from jobfetcher.db import tables
@@ -208,22 +250,24 @@ def test_age_filter_excludes_old_includes_recent_and_null(repo):
     with repo.engine.connect() as conn:
         fetched_at = conn.execute(
             select(tables.posting.c.fetched_at)
-            .where(tables.posting.c.posting_id == unknown)
+            .where(tables.posting.c.posting_id == old)
         ).scalar_one()
-    assert fetched_at is None  # save_posting does not populate it — the OR IS NULL is required
+    assert fetched_at is None  # save_posting does not populate it — bronze is the real source
 
     ids = {t[0] for t in repo.get_scored_for_reassess(max_age_days=45)}
-    assert old not in ids       # negative: beyond the bound → excluded
-    assert recent in ids        # within the bound → included
-    assert unknown in ids       # NULL fetched_at → included (never silently dropped)
+    assert old not in ids           # negative: 100-day-old bronze → excluded (the bound BITES)
+    assert recent in ids            # 10-day-old bronze → included
+    assert posting_wins not in ids  # posting.fetched_at (old) beat the fresh bronze — precedence
+    assert orphan in ids            # COALESCE'd NULL age → included (never silently dropped)
 
 
 def test_age_filter_zero_and_none_are_unbounded(repo):
     """Regression: `max_age_days=0` and `None` return EVERY scored posting — identical sets,
-    old ones included (the pre-0004 behavior is the documented default)."""
+    old ones included (the pre-0004 behavior is the documented default). Live-shaped: the
+    posting row's fetched_at is NULL, the 300-day age lives on its bronze row."""
     tag = uuid4().hex[:8]
     old = _seed_scored(repo, f"unbounded-{tag}")
-    _set_fetched_at(repo, old, datetime.now(timezone.utc) - timedelta(days=300))
+    _set_bronze_fetched_at(repo, old, datetime.now(timezone.utc) - timedelta(days=300))
 
     ids_none = {t[0] for t in repo.get_scored_for_reassess()}
     ids_zero = {t[0] for t in repo.get_scored_for_reassess(max_age_days=0)}

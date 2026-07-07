@@ -517,8 +517,9 @@ def reassess(
     lineage row it appends (migration 0004).
 
     `max_age_days` bounds the replay by posting age (`None` or `0` = unbounded — every scored
-    posting): passed straight to `get_scored_for_reassess`, which INCLUDES NULL-`fetched_at`
-    postings even when the bound is set (see its docstring).
+    posting): passed straight to `get_scored_for_reassess`, which ages each posting by
+    `COALESCE(posting.fetched_at, bronze.fetched_at)` and still INCLUDES a posting whose age
+    is unknown even when the bound is set (see its docstring).
 
     Returns `{reassessed, graduated, downgraded, unchanged, failed, deferred}` plus a
     `graduations` list (`posting_id/title/company/old_score→new_score/old_cat→new_cat`) — a

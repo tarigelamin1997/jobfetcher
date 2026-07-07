@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Engine, select, text, update
+from sqlalchemy import Engine, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -327,25 +327,30 @@ class PostgresRepository:
 
         **`max_age_days` bounds the replay by posting age** (LLM-token thrift: a months-old
         posting is likely filled — don't pay to re-score it forever). When set and > 0, only
-        postings with `fetched_at` within the last `max_age_days` are returned — **plus every
-        posting whose `fetched_at` IS NULL** (the safe default: `posting.fetched_at` is nullable
-        and `save_posting` does not populate it, so a naive `>= cutoff` would silently exclude
-        those rows from reassess FOREVER; NULL-age is treated as unknown, not old). The cutoff
-        is computed in Python and passed as a bound parameter — never interpolated SQL.
+        postings fetched within the last `max_age_days` are returned. The age source is
+        `COALESCE(posting.fetched_at, bronze_posting.fetched_at)` (LEFT JOIN on the existing
+        `posting.bronze_id` lineage FK): `posting.fetched_at` takes precedence but is nullable
+        AND never populated by `save_posting`, while the bronze row's `fetched_at` is NOT NULL
+        with a `now()` default — so every real posting gets a real age and the bound actually
+        bites on live data. A posting whose COALESCE'd age is STILL NULL (a NULL `bronze_id` /
+        LEFT-JOIN miss — pathological) is **INCLUDED**: NULL-age is treated as unknown, not
+        old, so a naive `>= cutoff` can never silently drop a row from reassess FOREVER. The
+        cutoff is computed in Python and passed as a bound parameter — never interpolated SQL.
 
         **`max_age_days=None` or `0` = UNBOUNDED** (the pre-0004 behavior: every scored
         posting is reassessed, no age cut)."""
         s, p = tables.score, tables.posting
-        stmt = (
-            select(p, s.c.score, s.c.fit_category)
-            .select_from(p.join(s, p.c.cluster_id == s.c.cluster_id))
-            .where(p.c.status == "scored")
-            .order_by(p.c.posting_id)
-        )
+        joined = p.join(s, p.c.cluster_id == s.c.cluster_id)
+        stmt = select(p, s.c.score, s.c.fit_category)
         if max_age_days is not None and max_age_days > 0:
+            b = tables.bronze_posting
             cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-            # NULL fetched_at is INCLUDED (see docstring) — the OR IS NULL is load-bearing.
-            stmt = stmt.where(p.c.fetched_at.is_(None) | (p.c.fetched_at >= cutoff))
+            # posting.fetched_at wins when set; the bronze landing time is the live fallback.
+            age_source = func.coalesce(p.c.fetched_at, b.c.fetched_at)
+            joined = joined.outerjoin(b, p.c.bronze_id == b.c.bronze_id)
+            # A COALESCE'd NULL is INCLUDED (see docstring) — the OR IS NULL is load-bearing.
+            stmt = stmt.where(age_source.is_(None) | (age_source >= cutoff))
+        stmt = stmt.select_from(joined).where(p.c.status == "scored").order_by(p.c.posting_id)
         try:
             with self.engine.connect() as conn:
                 rows = conn.execute(stmt).mappings().all()
