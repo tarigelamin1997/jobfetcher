@@ -21,49 +21,52 @@ sys.path.insert(0, str(ROOT / "src"))
 from jobfetcher.core.notifier import render_digest  # noqa: E402
 from jobfetcher.core.ports import ShortlistItem  # noqa: E402
 
-# When the "last digest" went out — makes the new/still-open split (and its section headers)
-# render; the split itself rides each item's previous_score.
+# When the "last digest" went out — the new/still-open split compares each item's scored_at
+# to this: a judgment written AFTER it (fresh) can be news; anything older is still-open.
 _SINCE = datetime(2026, 7, 1, 6, 0, tzinfo=timezone.utc)
+_FRESH = datetime(2026, 7, 6, 9, 0, tzinfo=timezone.utc)  # scored after the last digest
+_STALE = datetime(2026, 6, 25, 9, 0, tzinfo=timezone.utc)  # scored before the last digest
 
 # A varied sample: a genuinely-new match, a graduation (previous 55 → 72 across threshold 60),
 # a same-fingerprint dup trio (collapses to ONE card, seen 3× — scores 75–88), a missing apply
-# link, and three still-open matches (previous_score already >= threshold).
+# link, and three still-open matches (scored before the last digest, no fresh news).
 _SAMPLE = [
-    # --- new since last digest ---
+    # --- new since last digest (scored_at after _SINCE) ---
     ShortlistItem(
         posting_id="1", title="Senior Data Engineer", company="Canonical",
         apply_url="https://jobs.example.com/apply/1", normalized_title="Data Platform Engineer",
         score=93, fit_category="strong_fit",
         strengths=["Deep Spark + streaming match", "AWS + Terraform depth"],
         gaps=["No Databricks certification"], city="Riyadh", country="sa",
+        scored_at=_FRESH,
     ),
     ShortlistItem(  # a dup trio: one fingerprint, three boards — one card, seen 3×, 75–88
         posting_id="2a", title="Data Engineer", company="Qode",
         apply_url="https://jobs.example.com/apply/2a", normalized_title="Data Engineer",
         score=88, fit_category="strong_fit",
         strengths=["Strong Python/SQL + dbt"], gaps=[], city="Dubai", country="ae",
-        fingerprint="fp-qode-de-dxb",
+        fingerprint="fp-qode-de-dxb", scored_at=_FRESH,
     ),
     ShortlistItem(
         posting_id="2b", title="Data Engineer", company="Qode",
         apply_url="https://jobs.example.com/apply/2b", normalized_title="Data Engineer",
         score=82, fit_category="strong_fit",
         strengths=["Strong Python/SQL + dbt"], gaps=[], city="Dubai", country="ae",
-        fingerprint="fp-qode-de-dxb",
+        fingerprint="fp-qode-de-dxb", scored_at=_FRESH,
     ),
     ShortlistItem(
         posting_id="2c", title="Data Engineer (Platform)", company="Qode",
         apply_url="https://jobs.example.com/apply/2c", normalized_title="Data Engineer",
         score=75, fit_category="strong_fit",
         strengths=["Strong Python/SQL + dbt"], gaps=[], city="Dubai", country="ae",
-        fingerprint="fp-qode-de-dxb",
+        fingerprint="fp-qode-de-dxb", scored_at=_FRESH,
     ),
     ShortlistItem(  # a graduation: 55 → 72 crossed the threshold (60) → green ↑ badge
         posting_id="3", title="Analytics Engineer", company="Tamara",
         apply_url="https://jobs.example.com/apply/3", normalized_title="Analytics Engineer",
         score=72, fit_category="strong_fit",
         strengths=["dbt + warehouse modeling"], gaps=["Looker experience"],
-        city="Riyadh", country="sa", previous_score=55,
+        city="Riyadh", country="sa", previous_score=55, scored_at=_FRESH,
     ),
     ShortlistItem(
         posting_id="4", title="Data Architect", company="Alfanar",
@@ -71,32 +74,36 @@ _SAMPLE = [
         score=82, fit_category="strong_fit",
         strengths=["Warehouse modeling + CDC experience"],
         gaps=["Enterprise-scale governance"], city="", country="sa",
+        scored_at=_FRESH,
     ),
-    # --- still open (previous_score already >= threshold → surfaced before) ---
+    # --- still open (scored BEFORE the last digest — the daily-repeat shape) ---
     ShortlistItem(
         posting_id="5", title="Lead Data Engineer", company="stc",
         apply_url="https://jobs.example.com/apply/5", normalized_title="Lead Data Engineer",
         score=85, fit_category="strong_fit", strengths=["AWS platform build"], gaps=[],
-        city="Riyadh", country="sa", previous_score=85,
+        city="Riyadh", country="sa", scored_at=_STALE,
     ),
     ShortlistItem(
         posting_id="6", title="Data Platform Engineer", company="Careem",
         apply_url="https://jobs.example.com/apply/6", normalized_title="Data Platform Engineer",
         score=78, fit_category="strong_fit", strengths=["Kafka + Airflow"], gaps=[],
-        city="Dubai", country="ae", previous_score=80,
+        city="Dubai", country="ae", previous_score=80, scored_at=_STALE,
     ),
     ShortlistItem(
         posting_id="7", title="BI / Data Engineer", company="Noon",
         apply_url="https://jobs.example.com/apply/7", normalized_title="Data Engineer",
         score=66, fit_category="strong_fit", strengths=["SQL + ETL"], gaps=["Retail domain"],
-        city="Riyadh", country="sa", previous_score=64,
+        city="Riyadh", country="sa", previous_score=64, scored_at=_STALE,
     ),
 ]
 
 
 def main() -> None:
+    # Score-DESC like the Repository guarantees (ORDER BY score DESC) — the renderer's
+    # grouping/ordering assumes that input invariant, so the preview honors it too.
+    items = sorted(_SAMPLE, key=lambda i: i.score, reverse=True)
     subject, html, text = render_digest(
-        _SAMPLE, below_count=17, threshold=60, date=date.today(), since=_SINCE
+        items, below_count=17, threshold=60, date=date.today(), since=_SINCE
     )
     out = ROOT / "export"
     out.mkdir(parents=True, exist_ok=True)

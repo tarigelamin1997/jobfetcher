@@ -287,7 +287,7 @@ def test_shortlist_age_cutoff_drops_old_on_live_shaped_rows(repo):
 
 
 def test_shortlist_carries_previous_score_fingerprint_and_age(repo):
-    """The three new ShortlistItem fields round-trip from real rows: `previous_score` from the
+    """The new ShortlistItem fields round-trip from real rows: `previous_score` from the
     score row, `fingerprint` from `save_posting`, and `fetched_at` = the bronze landing time
     (the COALESCE — `posting.fetched_at` is NULL on live rows, pinned here)."""
     from sqlalchemy import select
@@ -312,6 +312,7 @@ def test_shortlist_carries_previous_score_fingerprint_and_age(repo):
     assert item.previous_score == 55
     assert item.fingerprint == "fp-abc"
     assert item.fetched_at is not None  # the bronze landing time via the LEFT JOIN
+    assert item.scored_at is not None   # save_score stamps it — the new/still-open signal
 
 
 def test_get_last_digest_sent_at_none_then_max_and_user_scoped(repo):

@@ -3,12 +3,15 @@ turn the surfaced shortlist + the below-threshold count into a **scannable, card
 email — an HTML body **and** a plaintext fallback — for morning triage in 60 seconds.
 
 The digest is TRUTHFUL about what changed: a **"New since last digest"** section leads with
-full cards (a graduation — `previous_score < threshold <= score` — gets a green **↑ old→new**
-badge), then a compact **"still open"** section lists the earlier matches that already
-surfaced (count + the top 5 one-liners), so a repeat job never masquerades as news. Same-role
-repeats are **collapsed render-time by `fingerprint`** — one card per group, footnoted
-`seen n× — scores lo–hi`. The split + grouping are PURE functions (`split_new_and_still_open`
-/ `collapse_duplicates` — no I/O, unit-testable); `render_digest` consumes their output.
+full cards — an item is new only when its judgment is FRESH (`scored_at > since`, the last
+digest send time) and that fresh judgment is news (a first scoring, or a graduation —
+`previous_score < threshold <= score` — badged green **↑ old→new**). Everything else above
+threshold lands in a compact **"still open"** section (count + the top 5 one-liners), so a
+repeat job never masquerades as news. Same-role repeats are **collapsed render-time by
+`fingerprint`** — one card per group, footnoted `seen n× — scores lo–hi`; a group straddling
+the split renders ONCE (the whole group goes NEW iff any member is new). The split + grouping
+are PURE functions (`split_new_and_still_open` / `collapse_duplicates` — no I/O,
+unit-testable); `render_digest` consumes their output.
 
 Dependency-free on purpose (P1): plain string templates, no jinja. Email clients strip
 `<head>`/`<style>` and mangle flex/grid, so this uses **table-based layout + inline styles
@@ -71,20 +74,31 @@ def split_new_and_still_open(
 ) -> "tuple[list[ShortlistItem], list[ShortlistItem]]":
     """Split the surfaced shortlist into `(new, still_open)` — the digest-truthfulness rule.
 
-    An item is NEW iff: `since is None` (the first-ever digest — everything is new), OR
-    `previous_score is None` (this cluster's first-ever scoring — genuinely new), OR
-    `previous_score < threshold <= score` (a graduation — it just crossed the bar, so it is
-    news even though it was scored before). Everything else (`previous_score >= threshold`:
-    it already surfaced in an earlier digest) is STILL OPEN.
+    An item is NEW iff `since is None` (the first-ever digest — everything is new) OR its
+    judgment is FRESH (`scored_at > since` — written after the last digest went out) AND that
+    fresh judgment is actually news: `previous_score is None` (a first scoring) or a
+    graduation (`previous_score < threshold <= score` — it just crossed the bar). Everything
+    else above threshold is STILL OPEN. Daily runs score a posting exactly ONCE, so a repeat's
+    `scored_at` predates the last digest and it lands still-open — `previous_score` alone
+    cannot carry the split (it stays NULL forever in daily operation). A fresh NON-graduated
+    re-score (reassess, `previous_score >= threshold`) is still-open too — being re-judged is
+    not news; and a graduation that happened BEFORE the last digest is never re-announced.
 
-    Rides `previous_score` semantics — no score-event join needed. Pure (no I/O); input order
-    (score DESC from the Repository) is preserved within both halves."""
+    A NULL `scored_at` (pathological — `save_score` always stamps it) is treated as NEW: an
+    unknown judgment time must never silently demote a match (the unknown-age-included
+    philosophy). Pure (no I/O); input order (score DESC from the Repository) is preserved
+    within both halves."""
     if since is None:
         return list(items), []
     new: "list[ShortlistItem]" = []
     still_open: "list[ShortlistItem]" = []
     for item in items:
-        if item.previous_score is None or item.previous_score < threshold <= item.score:
+        if item.scored_at is None:
+            new.append(item)  # unknown judgment time — defensively NEW, never hidden
+        elif item.scored_at > since and (
+            item.previous_score is None
+            or item.previous_score < threshold <= item.score
+        ):
             new.append(item)
         else:
             still_open.append(item)
@@ -97,8 +111,9 @@ def collapse_duplicates(items: "list[ShortlistItem]") -> list[DigestCard]:
     highest-scoring member as the representative + the group's seen-count and score range.
 
     Input order (score DESC) is preserved: a group sits where its first (= highest-scoring)
-    member sat, so cards stay score-DESC. Pure (no I/O); applied within each digest section
-    separately — a new item and a still-open twin are never merged across sections."""
+    member sat, so cards stay score-DESC. Pure (no I/O); `render_digest` groups the WHOLE
+    surfaced set once and assigns each group to ONE section (NEW iff any member classifies
+    new), so a group straddling the split never renders twice."""
     groups: dict[object, list["ShortlistItem"]] = {}
     for idx, item in enumerate(items):
         fp = (item.fingerprint or "").strip()
@@ -195,16 +210,27 @@ def render_digest(
 
     Digest truthfulness: the items are split into **"New since last digest"** (full cards,
     first; a graduation gets the green `↑ old→new` badge) and **"still open"** (a count + the
-    top-5 compact one-liners) via the pure `split_new_and_still_open`, and same-fingerprint
-    repeats are collapsed to one card via `collapse_duplicates` (`seen n× — scores lo–hi`).
-    A zero-NEW day says so honestly ("no new matches since {date}") but STILL SENDS — the
-    still-open section renders regardless (VG5 spirit: the email is never skipped or blank).
-    Age-dropped jobs (the `digest_max_age_days` cutoff, applied by the Repository) simply
-    never reach this renderer. Emits BOTH an HTML body and a plaintext fallback."""
+    top-5 compact one-liners) via the pure `split_new_and_still_open` (`scored_at` vs `since`
+    + `previous_score` for the graduation call), and same-fingerprint repeats are collapsed to
+    one card via `collapse_duplicates` (`seen n× — scores lo–hi`) — grouped over the WHOLE
+    surfaced set, then each group assigned to ONE section (NEW iff any member is new), so a
+    straddling group never renders twice. A zero-NEW day says so honestly ("no new matches
+    since {date}") but STILL SENDS — the still-open section renders regardless (VG5 spirit:
+    the email is never skipped or blank). Age-dropped jobs (the `digest_max_age_days` cutoff,
+    applied by the Repository) simply never reach this renderer. Emits BOTH an HTML body and
+    a plaintext fallback."""
     day = date.isoformat()
-    new_items, open_items = split_new_and_still_open(items, since=since, threshold=threshold)
-    new_cards = collapse_duplicates(new_items)
-    open_cards = collapse_duplicates(open_items)
+    new_items, _ = split_new_and_still_open(items, since=since, threshold=threshold)
+    new_ids = {i.posting_id for i in new_items}
+    new_cards: list[DigestCard] = []
+    open_cards: list[DigestCard] = []
+    for card in collapse_duplicates(items):
+        # F4: the WHOLE fingerprint group lands in ONE section — NEW iff ANY member is new —
+        # so a group straddling the split renders once (never a card AND a one-liner).
+        if any(pid in new_ids for pid in card.member_posting_ids):
+            new_cards.append(card)
+        else:
+            open_cards.append(card)
     n = len(new_cards)
     since_day = since.date().isoformat() if since is not None else None
 

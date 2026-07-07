@@ -8,7 +8,7 @@ repo + fake notifier (counts; zero-matches still sends; send failure RAISES; sin
 threading). Each carries a negative."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -22,8 +22,11 @@ from jobfetcher.core.notifier import (
 )
 from jobfetcher.core.ports import NotifierError, ShortlistItem
 
-# A canned "last digest went out" time for the truthfulness tests (since != None).
+# A canned "last digest went out" time for the truthfulness tests (since != None), plus a
+# judgment written AFTER it (fresh — can be news) and one BEFORE it (stale — a daily repeat).
 _SINCE = datetime(2026, 6, 20, 8, 0, tzinfo=timezone.utc)
+_FRESH = _SINCE + timedelta(hours=6)
+_STALE = _SINCE - timedelta(days=3)
 
 
 # --------------------------------------------------------------------------- builders
@@ -194,23 +197,40 @@ def test_split_first_ever_digest_everything_is_new():
     assert still_open == []
 
 
-def test_split_second_digest_routes_already_surfaced_to_still_open():
-    # A2: a first-ever-scored item (previous_score None) and a graduation are NEW; an item
-    # that already surfaced (previous_score >= threshold) is STILL OPEN.
-    items = [
-        _item(90, "fresh", previous_score=None),  # first time this cluster was ever scored
-        _item(72, "grad", previous_score=55),     # graduation: 55 < 60 <= 72
-        _item(88, "seen", previous_score=88),     # surfaced before → still open
-    ]
+def test_split_scored_at_vs_since_semantics():
+    # F1 — the daily-operation truth table. NEW iff the judgment is FRESH (scored_at > since)
+    # AND it is news (first scoring, or a graduation); everything else is STILL OPEN.
+    a = _item(80, "a", previous_score=None, scored_at=_STALE)  # (a) daily repeat: scored once,
+    #     before the last digest → STILL OPEN (previous_score alone would mislabel this NEW)
+    b = _item(75, "b", previous_score=None, scored_at=_FRESH)  # (b) fresh first scoring → NEW
+    c = _item(88, "c", previous_score=88, scored_at=_FRESH)    # (c) fresh reassess, NOT a
+    #     graduation → STILL OPEN even though the judgment is fresh (being re-judged isn't news)
+    d = _item(72, "d", previous_score=55, scored_at=_FRESH)    # (d) fresh graduation → NEW
+    e = _item(70, "e", previous_score=50, scored_at=_STALE)    # (e) graduation that happened
+    #     BEFORE the last digest → STILL OPEN (already announced, never re-announced)
+    items = [a, b, c, d, e]
     new, still_open = split_new_and_still_open(items, since=_SINCE, threshold=60)
-    assert [i.posting_id for i in new] == ["fresh", "grad"]
-    assert [i.posting_id for i in still_open] == ["seen"]
+    assert [i.posting_id for i in new] == ["b", "d"]
+    assert [i.posting_id for i in still_open] == ["a", "c", "e"]
+    # (f) first-ever digest (since=None): the same items are ALL new
+    new_f, open_f = split_new_and_still_open(items, since=None, threshold=60)
+    assert [i.posting_id for i in new_f] == ["a", "b", "c", "d", "e"]
+    assert open_f == []
+
+
+def test_split_null_scored_at_is_new_defensively():
+    # negative/defensive: a NULL scored_at (save_score always stamps it — pathological) must
+    # never silently demote a match → NEW, the unknown-age-included philosophy.
+    items = [_item(90, "x", previous_score=88, scored_at=None)]
+    new, still_open = split_new_and_still_open(items, since=_SINCE, threshold=60)
+    assert [i.posting_id for i in new] == ["x"]
+    assert still_open == []
 
 
 def test_split_previous_exactly_at_threshold_is_still_open():
-    # negative boundary: previous_score == threshold means it ALREADY surfaced — not a
-    # graduation, not new.
-    items = [_item(70, "edge", previous_score=60)]
+    # negative boundary: a FRESH re-score with previous_score == threshold means it ALREADY
+    # surfaced — not a graduation, not new.
+    items = [_item(70, "edge", previous_score=60, scored_at=_FRESH)]
     new, still_open = split_new_and_still_open(items, since=_SINCE, threshold=60)
     assert new == []
     assert [i.posting_id for i in still_open] == ["edge"]
@@ -255,8 +275,9 @@ def test_collapse_missing_fingerprint_never_merges():
 
 # --------------------------------------------------------------------------- graduation badge
 def test_graduation_badge_renders_in_html_and_text():
-    # B1: previous < threshold <= score → the green ↑ old→new badge in BOTH bodies.
-    item = _item(72, previous_score=55)
+    # B1: a FRESH graduation (scored after the last digest, previous < threshold <= score) →
+    # the green ↑ old→new badge in BOTH bodies.
+    item = _item(72, previous_score=55, scored_at=_FRESH)
     _, html, text = render_digest([item], below_count=0, threshold=60,
                                   date=date(2026, 6, 27), since=_SINCE)
     assert "55&rarr;72" in html and "#137333" in html  # green text badge, old→new
@@ -264,8 +285,9 @@ def test_graduation_badge_renders_in_html_and_text():
 
 
 def test_no_badge_when_previous_already_above_threshold():
-    # B2: previous >= threshold — it already surfaced; nothing crossed, no badge anywhere.
-    item = _item(90, previous_score=88)
+    # B2: a fresh re-score with previous >= threshold — it already surfaced; nothing crossed,
+    # no badge anywhere (it lands still-open, where badges never render).
+    item = _item(90, previous_score=88, scored_at=_FRESH)
     _, html, text = render_digest([item], below_count=0, threshold=60,
                                   date=date(2026, 6, 27), since=_SINCE)
     assert "&#8593;" not in html and "88&rarr;90" not in html
@@ -273,9 +295,9 @@ def test_no_badge_when_previous_already_above_threshold():
 
 
 def test_no_badge_when_previous_score_is_none_but_item_is_new():
-    # B2/N6 pinned: previous_score None ⇒ the item IS new (first-ever scoring) but gets NO
-    # badge — there is no old score to graduate from.
-    item = _item(90, previous_score=None)
+    # B2/N6 pinned: previous_score None + a fresh judgment ⇒ the item IS new (first-ever
+    # scoring) but gets NO badge — there is no old score to graduate from.
+    item = _item(90, previous_score=None, scored_at=_FRESH)
     subject, html, text = render_digest([item], below_count=0, threshold=60,
                                         date=date(2026, 6, 27), since=_SINCE)
     assert "1 new match" in subject  # it IS new...
@@ -284,9 +306,11 @@ def test_no_badge_when_previous_score_is_none_but_item_is_new():
 
 
 def test_no_graduations_means_no_badges():
-    # N3: a mixed digest with zero graduations renders zero badges.
-    items = [_item(90, "a", previous_score=None), _item(85, "b", previous_score=85),
-             _item(70, "c")]
+    # N3: a mixed digest with zero graduations renders zero badges — a fresh first scoring,
+    # a fresh non-graduated re-score, and a stale daily repeat.
+    items = [_item(90, "a", previous_score=None, scored_at=_FRESH),
+             _item(85, "b", previous_score=85, scored_at=_FRESH),
+             _item(70, "c", scored_at=_STALE)]
     _, html, text = render_digest(items, below_count=0, threshold=60,
                                   date=date(2026, 6, 27), since=_SINCE)
     assert "&#8593;" not in html
@@ -295,10 +319,10 @@ def test_no_graduations_means_no_badges():
 
 # --------------------------------------------------------------------------- new/still-open sections
 def test_new_section_first_then_still_open_compact():
-    # A2 (render level): the new item leads as a FULL card; the still-open item renders as a
-    # compact one-liner (count + score · title — company · Apply), not a card.
-    new_item = _item(72, "new1", previous_score=None, company="NewCo")
-    open_item = _item(88, "old1", previous_score=88, company="OldCo",
+    # A2 (render level): the fresh new item leads as a FULL card; the stale (daily-repeat)
+    # item renders as a compact one-liner (count + score · title — company · Apply), not a card.
+    new_item = _item(72, "new1", previous_score=None, scored_at=_FRESH, company="NewCo")
+    open_item = _item(88, "old1", scored_at=_STALE, company="OldCo",
                       apply_url="https://jobs.test/apply/old1")
     _, html, text = render_digest([open_item, new_item], below_count=0, threshold=60,
                                   date=date(2026, 6, 27), since=_SINCE)
@@ -314,9 +338,10 @@ def test_new_section_first_then_still_open_compact():
 
 
 def test_still_open_beyond_top5_shows_more_line():
-    # 6 still-open matches → the top 5 render as one-liners; the 6th folds into the
-    # "…and 1 more — see your export" overflow (count truthful, email stays scannable).
-    opens = [_item(90 - i, f"o{i}", previous_score=90 - i, company=f"Comp{i}ny")
+    # 6 still-open matches (daily-repeat shape: scored once, BEFORE the last digest) → the
+    # top 5 render as one-liners; the 6th folds into the "…and 1 more — see your export"
+    # overflow (count truthful, email stays scannable).
+    opens = [_item(90 - i, f"o{i}", scored_at=_STALE, company=f"Comp{i}ny")
              for i in range(6)]
     _, html, text = render_digest(opens, below_count=0, threshold=60,
                                   date=date(2026, 6, 27), since=_SINCE)
@@ -328,9 +353,11 @@ def test_still_open_beyond_top5_shows_more_line():
 
 
 def test_zero_new_email_says_so_and_still_open_renders():
-    # N1: nothing new, but earlier matches remain → subject + body say "no new matches since
-    # {date}", the still-open section still renders, and the email is still a valid send.
-    opens = [_item(88, "o1", previous_score=88), _item(70, "o2", previous_score=75)]
+    # N1: nothing new, but earlier matches remain (one daily repeat, one fresh-but-not-news
+    # re-score) → subject + body say "no new matches since {date}", the still-open section
+    # still renders, and the email is still a valid send.
+    opens = [_item(88, "o1", scored_at=_STALE),
+             _item(70, "o2", previous_score=75, scored_at=_FRESH)]
     subject, html, text = render_digest(opens, below_count=3, threshold=60,
                                         date=date(2026, 6, 27), since=_SINCE)
     assert "no new matches since 2026-06-20" in subject
@@ -361,6 +388,23 @@ def test_dup_footnote_renders_on_collapsed_card():
     assert "seen 2&times;" in html and "75&ndash;88" in html
     assert "seen 2× — scores 75–88" in text
     assert "(ids: dup-a, dup-b)" in text  # collapsed identity, plaintext only
+
+
+def test_dup_group_straddling_sections_renders_once_in_new():
+    # F4: a fingerprint group with one NEW member (fresh) and one STILL-OPEN member (stale)
+    # must render ONCE — the WHOLE group goes NEW (any member new) with its full seen-count
+    # and range — never twice (a full card AND a still-open one-liner).
+    stale = _item(88, "tw-old", fingerprint="fp-tw", scored_at=_STALE)
+    fresh = _item(72, "tw-new", fingerprint="fp-tw", previous_score=None, scored_at=_FRESH)
+    subject, html, text = render_digest([stale, fresh], below_count=0, threshold=60,
+                                        date=date(2026, 6, 27), since=_SINCE)
+    assert "1 new match" in subject
+    assert html.count("&#10003;") == 1                     # exactly ONE full card in the email
+    assert "seen 2&times;" in html and "72&ndash;88" in html  # the group's full count + range
+    assert "earlier match" not in html                     # no still-open section — the stale
+    assert "still open" not in text                        # twin moved WITH its group
+    assert "(ids: tw-old, tw-new)" in text                 # both identities preserved once
+    assert text.count("tw-old") == 1                       # ...and only once (no second line)
 
 
 # --------------------------------------------------------------------------- SesNotifier
@@ -554,8 +598,9 @@ def test_notify_first_ever_digest_resolves_since_none():
 
 def test_notify_threads_since_and_max_age_to_shortlist():
     # notify() resolves since = the last digest send time and threads max_age_days (the
-    # handler passes spec.digest_max_age_days) into the shortlist query.
-    repo = _FakeRepo(threshold=60, surfaced=[_item(90, previous_score=88)], below=0,
+    # handler passes spec.digest_max_age_days) into the shortlist query. The surfaced item is
+    # a daily repeat (scored BEFORE the last digest) → still open, honestly not news.
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90, scored_at=_STALE)], below=0,
                      last_sent=_SINCE)
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",

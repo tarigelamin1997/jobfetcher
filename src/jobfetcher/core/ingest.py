@@ -639,9 +639,10 @@ def notify(
     **Digest truthfulness:** `since` = `repo.get_last_digest_sent_at(user_id)` — when the last
     digest actually went out (`MAX(run_log.digest_sent_at)`; no rows ⇒ `None` ⇒ the first-ever
     digest, everything is new). The renderer splits the shortlist into "new since last digest"
-    vs "still open" from it + each item's `previous_score` (pure functions in
-    `core/notifier.py`). `max_age_days` (the handler threads `spec.digest_max_age_days`) drops
-    still-open matches older than N days from the digest entirely — `None`/`0` = keep forever.
+    vs "still open" from each item's `scored_at` vs `since` (fresh judgment) + its
+    `previous_score` (first scoring / graduation — pure functions in `core/notifier.py`).
+    `max_age_days` (the handler threads `spec.digest_max_age_days`) drops still-open matches
+    older than N days from the digest entirely — `None`/`0` = keep forever.
 
     **A send failure is LOUD** (re-raised): email is the v0 surface, so a failed send is a
     failed run, never a silent skip. **Zero surfaced matches still sends** a valid "no matches

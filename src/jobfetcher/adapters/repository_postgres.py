@@ -580,8 +580,9 @@ class PostgresRepository:
         # never writes it), so the bronze landing time is the real age source.
         #
         # `since` is accepted on the port (notify() resolves it once and threads it through) but
-        # does NOT filter this query: the new/still-open split rides `previous_score` semantics
-        # and is computed render-side (pure functions in core/notifier.py), never in SQL.
+        # does NOT filter this query: the new/still-open split rides `scored_at`-vs-`since`
+        # (+ `previous_score` for the graduation call) and is computed render-side (pure
+        # functions in core/notifier.py), never in SQL.
         #
         # `max_age_days` > 0 drops rows older than the bound-parameter cutoff — from the
         # surfaced list AND the below count (an aged-out job vanishes from the digest
@@ -604,6 +605,7 @@ class PostgresRepository:
                 s.c.gaps,
                 s.c.strategic_assessment,
                 s.c.previous_score,
+                s.c.scored_at,
                 age_source.label("effective_fetched_at"),
             )
             .select_from(
@@ -649,6 +651,7 @@ class PostgresRepository:
                         previous_score=row["previous_score"],
                         fingerprint=row["fingerprint"],
                         fetched_at=row["effective_fetched_at"],
+                        scored_at=row["scored_at"],
                     )
                 )
             else:
