@@ -2,7 +2,7 @@
 
 > The test suite is the **negative-case engine for the [v0 validation gate](../docs/04-v0-build-plan.md#v0-validation-gate-behavioral--negative--a-presence-check-is-no-gate)**: every gate is *behavioral* and carries a *negative* case (a presence/liveness check is no gate). This file maps the gates (VG1–VG8) to the tests that enforce them, lists the pyramid layers, and shows how to run each.
 
-**Current state:** **180 unit + ~26 integration + ~3 live** tests · `ruff` clean · **89% coverage** (full suite; unit-only is ~81% — the integration tests cover the `Repository`/handler DB paths).
+**Current state:** **272 unit + 31 integration (+5 live-key skips)** tests · `ruff` clean · **~95% coverage** (full suite, 94.76% measured 2026-07-07; the CI floor is 85% — the integration tests cover the `Repository`/handler DB paths).
 
 ## The pyramid + how to run
 
@@ -28,6 +28,15 @@
 | **VG6 — Teardown** | `terraform destroy` → ~$0 | (N/A — destroy is the negative of apply) | 🏗️ infra gate (validated at C-3; re-checked at Step 10) — *not a pytest* |
 | **VG7 — Secrets hygiene** | gitleaks scan passes clean on the tree | a planted realistic fake key (an OpenAI- or AWS-style token) is **detected + blocked** (verified at Step 9) | ✅ enforced — pre-commit `gitleaks` hook ([`.pre-commit-config.yaml`](../.pre-commit-config.yaml)) + the CI `secret-scan` job ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) |
 | **VG8 — Threshold is config** | `test_scorer.py::test_vg8_threshold_60_splits_in_between` | `::test_vg8_threshold_0_surfaces_all` · `::test_vg8_threshold_above_all_surfaces_none`; the `SearchSpec`/`Profile` contract tests guard the config layer | ✅ |
+
+## Post-v0 unit gates → tests (same standard: behavioral + negative)
+
+Capability units after the v0 gate map add their own positive + negative pairs here as they land.
+
+| Unit | Positive | Negative | Enforced |
+|---|---|---|---|
+| **score_event lineage (migration 0004 — dual-write + backfill; [ADR-0025](../docs/adr/0025-score-event-lineage.md), unreleased)** | `test_integration_score_event.py::test_three_scorings_three_events_score_holds_current_plus_previous` (three scorings → three appended events; `score` stays the 1:1 current view) · `test_integration_migration_0004.py::test_upgrade_0004_backfills_existing_scores_into_the_event_log` (the `'pre-0004'` baseline backfill rescues existing scores; hollow rows skipped) | `test_integration_score_event.py::test_failed_event_insert_rolls_back_the_score_upsert` · `::test_failed_score_upsert_writes_no_event` (the dual-write is ONE transaction — either failure rolls back both, current view and history never diverge) | ✅ |
+| **reassess age bound (`get_scored_for_reassess(max_age_days)`; [ADR-0025](../docs/adr/0025-score-event-lineage.md), unreleased)** | `test_integration_score_event.py::test_age_filter_bites_on_live_shaped_data_and_keeps_null_safety` (ages by `COALESCE(posting, bronze).fetched_at` on live-shaped data — the bound actually bites; unknown-age rows INCLUDED, never dropped forever) | `test_integration_score_event.py::test_age_filter_zero_and_none_are_unbounded` (`0`/`None` emit the pre-0004 unbounded query — no behavior drift) | ✅ |
 
 ## Unit-pyramid items (build-plan Step 8)
 
