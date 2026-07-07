@@ -241,7 +241,7 @@ Filter/search/organize your records without a custom UI: **export a snapshot** a
 
 ```mermaid
 flowchart LR
-  PG[("Aurora · posting · score<br/>bronze · run_log · profile · score_event")] --> EX["scripts/export.py<br/>flatten JSONB→text · join"]
+  PG[("Aurora · posting · score<br/>bronze · run_log · profile<br/>score_event · application_event")] --> EX["scripts/export.py<br/>flatten JSONB→text · join"]
   EX --> SQ[("export/jobs.sqlite")]
   EX --> CSV[("export/jobs.csv")]
   SQ --> DS["Datasette<br/>faceted filter · full-text search"]

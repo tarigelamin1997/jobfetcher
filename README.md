@@ -97,7 +97,7 @@ The CV tailor, multi-source clustering dedup, Step Functions, Notion, and the db
 | **Secrets** | Secrets Manager (`jobfetcher/deepseek`, `jobfetcher/jsearch`) |
 | **IaC** | Terraform 1.14 — **14 resources**, us-east-1, least-privilege IAM (no Bedrock) |
 | **AWS SDK** | boto3 |
-| **Tests** | pytest — **257 unit + integration green**, live smoke, 85%+ coverage floor |
+| **Tests** | pytest — **283 unit + 36 integration green**, live smoke, 85%+ coverage floor |
 | **CI** | GitHub Actions — ruff + tests + 85% coverage floor + `terraform validate` + **gitleaks** secret-scan; pre-commit (gitleaks + ruff) |
 
 dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in sibling projects — not in this repo today. See the [decision journal](docs/01-session-decision-journal.md).
@@ -135,12 +135,14 @@ Once deployed, the routine loop runs entirely on config + invokes — the Lambda
 python scripts/push_config.py         # validate + upload the config YAMLs to S3 → new settings live next run
 # ...invoke {"mode":"reassess"} → re-score every bronzed posting against the updated profile, 0 JSearch calls
 python scripts/export.py              # snapshot the DB → portable SQLite + CSV (flat jobs table + bronze/runs/profile)
+python scripts/track.py applied <id>  # record an outcome: applied|interview|offer|rejected|withdrawn (find/events/override too)
 python scripts/preview_digest.py      # render the card-style email in a browser before it goes out
 ```
 
 - **Change any setting** — edit `config/*.local.yml`, run `push_config.py`; the three strictness knobs and the JSearch query take effect on the next run, no rebuild.
 - **Re-score on a better profile** — add a skill, push config, invoke `{"mode":"reassess"}`; watch `stretch` roles graduate to `strong_fit` ([ADR-0023](docs/adr/0023-reassess-replay.md)).
 - **Query your data** — `export.py` gives you a file you filter/search/sort in Datasette, DB Browser, or Excel — no custom UI ([ADR-0024](docs/adr/0024-query-via-export.md) · [`docs/querying.md`](docs/querying.md)).
+- **Record what happens after the digest** — `track.py applied|interview|offer|rejected|withdrawn <posting_id>` appends to an immutable outcome log (`find "<title>"` looks up the id; `events` shows a job's trail); the next `export.py` shows each job's **latest application status**. **Override a score you disagree with** — `track.py override <posting_id> <score>`: it sets `score_override` *and* lands in the same lineage log as the LLM's scorings — nothing is erased, and the override survives later re-scores ([ADR-0026](docs/adr/0026-outcome-tracking-override-lineage.md)).
 - **Preview the email** — `preview_digest.py` renders the digest locally so format changes are seen before send.
 
 ### Local dev & tests

@@ -8,9 +8,11 @@ filter UI we export and open in a purpose-built viewer:
     # or open export/jobs.csv in Excel/Sheets, or `sqlite3 export/jobs.sqlite`
 
 The star is a flat `jobs` table (one filterable row per posting: role · geo · skills · status ·
-score/previous_score/fit_category · apply_url · dates), plus `bronze` (the full fetch history),
-`runs`, `score_events` (the append-only score history + lineage, migration 0004), and the
-current `profile`. Read-only; a point-in-time snapshot — re-run to refresh.
+score/previous_score/fit_category · score_override · the latest application status · apply_url ·
+dates), plus `bronze` (the full fetch history), `runs`, `score_events` (the append-only score
+history + lineage, migration 0004), `application_events` (the append-only outcome trail,
+migration 0005), and the current `profile`. Read-only; a point-in-time snapshot — re-run to
+refresh.
 """
 from __future__ import annotations
 
@@ -38,13 +40,21 @@ SELECT
   p.normalized_title, p.title AS raw_title, p.company, p.seniority, p.sector, p.employment_type,
   p.country, p.city, p.state, p.location,
   p.skills,
-  s.score, s.previous_score, s.fit_category, s.poster_type, s.legitimacy_verified, s.scored_at,
+  s.score, s.score_override, s.previous_score, s.fit_category, s.poster_type,
+  s.legitimacy_verified, s.scored_at,
   s.strengths, s.gaps, s.strategic_assessment,
+  ae.status AS latest_application_status, ae.noted_at AS application_noted_at,
   p.apply_url, p.fetched_at, c.posting_count
 FROM posting p
 LEFT JOIN score s ON p.cluster_id = s.cluster_id
 LEFT JOIN cluster c ON p.cluster_id = c.cluster_id
 LEFT JOIN bronze_posting b ON p.bronze_id = b.bronze_id
+LEFT JOIN LATERAL (
+  SELECT status, noted_at FROM application_event
+  WHERE posting_id = p.posting_id
+  ORDER BY noted_at DESC, event_id DESC
+  LIMIT 1
+) ae ON TRUE
 ORDER BY s.score DESC NULLS LAST, p.posting_id
 """
 
@@ -58,6 +68,11 @@ _EVENTS_SQL = (
     "SELECT event_id, cluster_id, score, fit_category, previous_score, poster_type, "
     "legitimacy_verified, scoring_model, profile_hash, run_id, scored_at "
     "FROM score_event ORDER BY event_id"
+)
+# the append-only application-outcome trail (migration 0005), written by scripts/track.py
+_APP_EVENTS_SQL = (
+    "SELECT event_id, posting_id, status, noted_at, note "
+    "FROM application_event ORDER BY event_id"
 )
 
 
@@ -106,10 +121,11 @@ def _bool01(v: Any) -> Any:
 # --------------------------------------------------------------------------- sqlite/csv writer
 def write_snapshot(
     *, jobs: list[dict], bronze: list[dict], runs: list[dict], profile: list[dict],
-    events: list[dict], out_dir: Path
+    events: list[dict], application_events: list[dict], out_dir: Path
 ) -> tuple[Path, Path]:
-    """Write `jobs.sqlite` (jobs + bronze + runs + profile_current + score_events) and
-    `jobs.csv` (the flat jobs table). Pure over in-memory lists (unit-testable, no DB)."""
+    """Write `jobs.sqlite` (jobs + bronze + runs + profile_current + score_events +
+    application_events) and `jobs.csv` (the flat jobs table only — the existing CSV shape).
+    Pure over in-memory lists (unit-testable, no DB)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     sqlite_path = out_dir / "jobs.sqlite"
     csv_path = out_dir / "jobs.csv"
@@ -123,6 +139,7 @@ def write_snapshot(
         _write_table(conn, "runs", runs)
         _write_table(conn, "profile_current", profile)
         _write_table(conn, "score_events", events)
+        _write_table(conn, "application_events", application_events)
         conn.commit()
     finally:
         conn.close()
@@ -175,7 +192,9 @@ def read_data(engine) -> dict[str, list[dict]]:
     runs = [_iso_row(r) for r in _fetch(engine, _RUNS_SQL)]
     profile = [_profile_row(r) for r in _fetch(engine, _PROFILE_SQL)]
     events = [_event_row(r) for r in _fetch(engine, _EVENTS_SQL)]
-    return {"jobs": jobs, "bronze": bronze, "runs": runs, "profile": profile, "events": events}
+    application_events = [_iso_row(r) for r in _fetch(engine, _APP_EVENTS_SQL)]
+    return {"jobs": jobs, "bronze": bronze, "runs": runs, "profile": profile,
+            "events": events, "application_events": application_events}
 
 
 def _iso_row(row: dict) -> dict:
@@ -252,7 +271,8 @@ def main() -> None:
     data = read_data(engine)
     sqlite_path, csv_path = write_snapshot(
         jobs=data["jobs"], bronze=data["bronze"], runs=data["runs"], profile=data["profile"],
-        events=data["events"], out_dir=Path(args.out),
+        events=data["events"], application_events=data["application_events"],
+        out_dir=Path(args.out),
     )
     print_summary(data)
     print(f"\n  wrote {sqlite_path}  +  {csv_path}")

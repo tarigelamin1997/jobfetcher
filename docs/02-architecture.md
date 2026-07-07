@@ -117,7 +117,7 @@ erDiagram
   CLUSTER ||--o| SCORE : "has one (current view)"
   CLUSTER ||--o{ SCORE_EVENT : "append-only history"
   CLUSTER ||--o| CV : "has one"
-  CLUSTER ||--o{ APPLICATION : "tracked by"
+  POSTING ||--o{ APPLICATION_EVENT : "outcome trail (append-only)"
 
   BRONZE_POSTING {
     text bronze_id PK
@@ -201,10 +201,12 @@ erDiagram
     text status "draft | approved"
     timestamptz tailored_at
   }
-  APPLICATION {
-    text cluster_id FK
-    text status "new | applied | interview | rejected | offer"
-    timestamptz updated_at
+  APPLICATION_EVENT {
+    int event_id PK "serial — server-assigned"
+    text posting_id FK
+    text status "applied | interview | offer | rejected | withdrawn"
+    timestamptz noted_at "default now(); append-only, never updated"
+    text note "optional free-text"
   }
   PROFILE {
     text user_id PK "single-user now; the multi-user seam"
@@ -217,7 +219,8 @@ erDiagram
 ```
 
 - **`user_id` on PROFILE is the multi-user seam** — present from day one, single-valued now; multi-user is a future migration that adds the dimension across tables, not a rewrite.
-- **`score` is the current view; `score_event` is the history** (migration 0004, [ADR-0025](adr/0025-score-event-lineage.md)). `save_score` **dual-writes** both in **one transaction** (either failure rolls back both): the `score` upsert stays the 1:1-per-cluster current judgment every read path uses, while `score_event` appends one immutable row per scoring event carrying its **lineage** — `scoring_model` + `profile_hash` (both NOT NULL: no event without provenance) + `run_id`. **`profile.profile_hash`** (sha256 of the profile payload + the 3 knobs, computed at profile-sync) ties each event to the exact profile *content* that judged it — necessary because the `profile` row is overwritten from config every run. LLM scores are non-reproducible even at temp 0, so history must be recorded, not re-derived; the migration **backfilled** the pre-existing scores as `'pre-0004'` events. One honest asymmetry: an event's `previous_score` is what *that* `save_score` call received (NULL on a fresh scoring), while the row's `previous_score` may carry an upsert-conflict value — the delta source of truth is **event order**. Feeds M7 calibration + the M5/M6 score-history facts.
+- **`score` is the current view; `score_event` is the history** (migration 0004, [ADR-0025](adr/0025-score-event-lineage.md)). `save_score` **dual-writes** both in **one transaction** (either failure rolls back both): the `score` upsert stays the 1:1-per-cluster current judgment every read path uses, while `score_event` appends one immutable row per scoring event carrying its **lineage** — `scoring_model` + `profile_hash` (both NOT NULL: no event without provenance) + `run_id`. **`profile.profile_hash`** (sha256 of the profile payload + the 3 knobs, computed at profile-sync) ties each event to the exact profile *content* that judged it — necessary because the `profile` row is overwritten from config every run. LLM scores are non-reproducible even at temp 0, so history must be recorded, not re-derived; the migration **backfilled** the pre-existing scores as `'pre-0004'` events. One honest asymmetry: an event's `previous_score` is what *that* `save_score` call received (NULL on a fresh scoring), while the row's `previous_score` may carry an upsert-conflict value — the delta source of truth is **event order**. **Human overrides join the same log** (migration 0005 wave, [ADR-0026](adr/0026-outcome-tracking-override-lineage.md)): `set_score_override` UPDATEs `score.score_override` **and** APPENDs a `score_event` with `scoring_model='human-override'` in **one transaction** — a second override moves the column, both events survive. Two deliberate semantics: an override does **NOT** change `score.fit_category` (the override's derived category lives only on its event — the current view keeps the *LLM's* category next to your override number), and `save_score`'s upsert **never clears `score_override`** — an override deliberately survives later re-scores/reassess. Feeds M7 calibration + the M5/M6 score-history facts.
+- **`application_event` is the outcome trail** (migration 0005, [ADR-0026](adr/0026-outcome-tracking-override-lineage.md)) — one immutable row per human status note (`applied`/`interview`/`offer`/`rejected`/`withdrawn`; the vocabulary is defined **once** as `APPLICATION_STATUSES` in `core/models.py` and the CHECK is built from it) against a **posting**, written by `scripts/track.py`. Same append-only discipline as `score_event`: re-recording is a new event, "latest status" is a read-side query (latest wins), never an overwrite — so the full applied→interview→… funnel survives as calibration data. This replaces the design-phase mutable `APPLICATION` table (a cluster-keyed `status` updated in place — exactly the history-destroying pattern migrations 0004/0005 remove).
 - **Schema migrations** are first-class: **Alembic** versioned migrations; every release that changes the schema ships its migration. No ad-hoc `ALTER`.
 - **Dissected fields live on `posting`** (silver) — `skills` (jsonb: `[{name, level, evidence}]`), `normalized_title`, `sector`, `seniority`, `language` — produced by the silver `Dissector` ([ADR-0016](adr/0016-llm-dissection-at-silver.md)), **not re-extracted at score** (that's why `score` no longer carries `skills_extracted`/`sector`/`seniority`). v0 stores `skills` losslessly as **JSONB**; the `dim_skill`/`fct_job_skill` bridge is modeled retroactively over it at **M5** ([ADR-0011](adr/0011-dimensional-analytical-model.md)) — no early bridge (P1).
 - **DB access** ([ADR-0018](adr/0018-persistence-sqlalchemy-data-api-repository.md)): the pipeline reaches Aurora through **SQLAlchemy Core + the `sqlalchemy-aurora-data-api` dialect**, behind a **`Repository` port** — the *same* code runs against a local Postgres (fast tests) and the Aurora **Data API** (deployed) by swapping the connection URL; Alembic uses the same. LocalStack doesn't mock the Data API, so DB tests use a **real local Postgres** (LocalStack/moto stay for S3 + Secrets).

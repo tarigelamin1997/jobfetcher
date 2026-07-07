@@ -31,5 +31,6 @@ These are the **foundational** decisions made during the design session — the 
 | [0023](0023-reassess-replay.md) | Reassess/replay: a `{"mode":"reassess"}` re-scores existing jobs against the updated profile with **no re-fetch** (immutable-bronze replay) → jobs graduate as skills grow | Accepted |
 | [0024](0024-query-via-export.md) | Query/filter via `scripts/export.py` → SQLite/CSV opened in Datasette/DB-Browser/Excel (not a custom UI) — filter/search/organize for free | Accepted |
 | [0025](0025-score-event-lineage.md) | Append-only `score_event` lineage: `save_score` dual-writes an immutable history row (scoring_model + profile_hash + run_id) in one transaction — re-scores never erase judgments — + a `reassess_max_age_days` age bound on replay | Accepted |
+| [0026](0026-outcome-tracking-override-lineage.md) | Outcome tracking: append-only `application_event` log (applied/interview/offer/rejected/withdrawn via `scripts/track.py`) + human score overrides dual-written into the `score_event` lineage (`scoring_model='human-override'`) — the pipeline finally records what happens *after* the digest | Accepted |
 
 > Full reasoning narrative: [01-session-decision-journal](../01-session-decision-journal.md). Crisp decision list: [ledgers/decisions-locked](../ledgers/decisions-locked.md).

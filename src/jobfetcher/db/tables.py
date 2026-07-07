@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     Float,
@@ -24,6 +25,8 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
+
+from ..core.models import APPLICATION_STATUSES
 
 metadata = MetaData()
 
@@ -143,6 +146,34 @@ score_event = Table(
 )
 
 
+application_event = Table(
+    "application_event",
+    metadata,
+    # Append-only application-outcome log (migration 0005): one immutable row per human
+    # status note (applied / interview / offer / rejected / withdrawn) against a posting.
+    # Mirrors `score_event`'s discipline — nothing ever updates or deletes a row here, so
+    # the full applied→interview→… trail survives; "latest status" is a read-side query
+    # (newest row per posting), never an overwrite.
+    Column("event_id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "posting_id", Text, ForeignKey("posting.posting_id"), nullable=False, index=True
+    ),
+    Column("status", Text, nullable=False),
+    Column("noted_at", _TS, nullable=False, server_default=text("now()")),
+    Column("note", Text),
+    # The CHECK's SQL is BUILT from `APPLICATION_STATUSES` (core/models.py — the one shared
+    # definition), so the DB constraint can never drift from the repository/CLI vocabulary.
+    # This new table owns its own CHECK; existing tables get none retrofitted (additive-only).
+    CheckConstraint(
+        "status IN ({})".format(", ".join(f"'{s}'" for s in APPLICATION_STATUSES)),
+        name="ck_application_event_status",
+    ),
+    # Same Data-API hardening as `score_event`: no implicit `RETURNING event_id` — nothing
+    # reads the id back, and RETURNING is untested over the Aurora Data API dialect.
+    implicit_returning=False,
+)
+
+
 profile = Table(
     "profile",
     metadata,
@@ -176,6 +207,7 @@ __all__ = [
     "cluster",
     "score",
     "score_event",
+    "application_event",
     "profile",
     "run_log",
 ]
