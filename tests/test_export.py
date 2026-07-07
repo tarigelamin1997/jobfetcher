@@ -70,13 +70,22 @@ def test_write_snapshot_creates_all_tables_and_csv(tmp_path):
         bronze=[{"bronze_id": "b1", "run_id": "r1"}],
         runs=[{"run_date": "2026-07-06", "run_id": "r1"}],
         profile=[{"user_id": "default", "threshold": 60, "profile": "{}"}],
+        events=[{"event_id": 1, "cluster_id": "p1", "score": 45, "previous_score": None,
+                 "scoring_model": "pre-0004", "profile_hash": "pre-0004", "run_id": None},
+                {"event_id": 2, "cluster_id": "p1", "score": 85, "previous_score": 45,
+                 "scoring_model": "deepseek-v4-pro", "profile_hash": "abc123", "run_id": "r1"}],
         out_dir=tmp_path,
     )
     con = sqlite3.connect(sp)
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"jobs", "bronze", "runs", "profile_current"} <= tables
+    assert {"jobs", "bronze", "runs", "profile_current", "score_events"} <= tables
     rows = con.execute("SELECT posting_id, score, fit_category FROM jobs ORDER BY posting_id").fetchall()
     assert rows == [("p1", 85, "strong_fit"), ("p2", None, None)]  # scored + un-scored silver both present
+    # the score history rides along: both events for p1, in order, with their lineage
+    ev = con.execute(
+        "SELECT score, previous_score, profile_hash FROM score_events ORDER BY event_id"
+    ).fetchall()
+    assert ev == [(45, None, "pre-0004"), (85, 45, "abc123")]
     # the flat CSV exists + has a header + both rows
     text = cp.read_text(encoding="utf-8")
     assert "posting_id" in text.splitlines()[0]
@@ -85,7 +94,20 @@ def test_write_snapshot_creates_all_tables_and_csv(tmp_path):
 
 def test_write_snapshot_empty_is_safe(tmp_path):
     # negative: an empty DB must not crash — the tables exist, the CSV is empty
-    sp, cp = export.write_snapshot(jobs=[], bronze=[], runs=[], profile=[], out_dir=tmp_path)
+    sp, cp = export.write_snapshot(
+        jobs=[], bronze=[], runs=[], profile=[], events=[], out_dir=tmp_path
+    )
     assert sp.exists() and cp.exists()
     con = sqlite3.connect(sp)
     assert con.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_event_row_normalizes_bool_and_timestamps():
+    from datetime import datetime, timezone
+
+    row = {"event_id": 7, "legitimacy_verified": True,
+           "scored_at": datetime(2026, 7, 7, 9, 0, tzinfo=timezone.utc)}
+    out = export._event_row(row)
+    assert out["legitimacy_verified"] == 1
+    assert out["scored_at"] == "2026-07-07T09:00:00+00:00"
+    assert export._event_row({"legitimacy_verified": None})["legitimacy_verified"] is None

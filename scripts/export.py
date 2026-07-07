@@ -9,7 +9,8 @@ filter UI we export and open in a purpose-built viewer:
 
 The star is a flat `jobs` table (one filterable row per posting: role · geo · skills · status ·
 score/previous_score/fit_category · apply_url · dates), plus `bronze` (the full fetch history),
-`runs`, and the current `profile`. Read-only; a point-in-time snapshot — re-run to refresh.
+`runs`, `score_events` (the append-only score history + lineage, migration 0004), and the
+current `profile`. Read-only; a point-in-time snapshot — re-run to refresh.
 """
 from __future__ import annotations
 
@@ -51,6 +52,13 @@ ORDER BY s.score DESC NULLS LAST, p.posting_id
 _BRONZE_SQL = "SELECT bronze_id, source, source_job_id, run_id, s3_raw_key, fetched_at FROM bronze_posting ORDER BY fetched_at"
 _RUNS_SQL = "SELECT run_date, user_id, run_id FROM run_log ORDER BY run_date"
 _PROFILE_SQL = "SELECT user_id, threshold, hard_floor, near_miss_band, profile FROM profile"
+# the append-only score history + lineage (migration 0004); no strengths/gaps JSONB — the
+# current judgment lives on `jobs`, this is the score-delta/provenance index
+_EVENTS_SQL = (
+    "SELECT event_id, cluster_id, score, fit_category, previous_score, poster_type, "
+    "legitimacy_verified, scoring_model, profile_hash, run_id, scored_at "
+    "FROM score_event ORDER BY event_id"
+)
 
 
 # --------------------------------------------------------------------------- transforms (pure)
@@ -97,10 +105,11 @@ def _bool01(v: Any) -> Any:
 
 # --------------------------------------------------------------------------- sqlite/csv writer
 def write_snapshot(
-    *, jobs: list[dict], bronze: list[dict], runs: list[dict], profile: list[dict], out_dir: Path
+    *, jobs: list[dict], bronze: list[dict], runs: list[dict], profile: list[dict],
+    events: list[dict], out_dir: Path
 ) -> tuple[Path, Path]:
-    """Write `jobs.sqlite` (jobs + bronze + runs + profile_current) and `jobs.csv` (the flat jobs
-    table). Pure over in-memory lists (unit-testable, no DB)."""
+    """Write `jobs.sqlite` (jobs + bronze + runs + profile_current + score_events) and
+    `jobs.csv` (the flat jobs table). Pure over in-memory lists (unit-testable, no DB)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     sqlite_path = out_dir / "jobs.sqlite"
     csv_path = out_dir / "jobs.csv"
@@ -113,6 +122,7 @@ def write_snapshot(
         _write_table(conn, "bronze", bronze)
         _write_table(conn, "runs", runs)
         _write_table(conn, "profile_current", profile)
+        _write_table(conn, "score_events", events)
         conn.commit()
     finally:
         conn.close()
@@ -164,11 +174,18 @@ def read_data(engine) -> dict[str, list[dict]]:
     bronze = [_iso_row(r) for r in _fetch(engine, _BRONZE_SQL)]
     runs = [_iso_row(r) for r in _fetch(engine, _RUNS_SQL)]
     profile = [_profile_row(r) for r in _fetch(engine, _PROFILE_SQL)]
-    return {"jobs": jobs, "bronze": bronze, "runs": runs, "profile": profile}
+    events = [_event_row(r) for r in _fetch(engine, _EVENTS_SQL)]
+    return {"jobs": jobs, "bronze": bronze, "runs": runs, "profile": profile, "events": events}
 
 
 def _iso_row(row: dict) -> dict:
     return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in row.items()}
+
+
+def _event_row(row: dict) -> dict:
+    out = _iso_row(row)
+    out["legitimacy_verified"] = _bool01(out.get("legitimacy_verified"))
+    return out
 
 
 def _profile_row(row: dict) -> dict:
@@ -235,7 +252,7 @@ def main() -> None:
     data = read_data(engine)
     sqlite_path, csv_path = write_snapshot(
         jobs=data["jobs"], bronze=data["bronze"], runs=data["runs"], profile=data["profile"],
-        out_dir=Path(args.out),
+        events=data["events"], out_dir=Path(args.out),
     )
     print_summary(data)
     print(f"\n  wrote {sqlite_path}  +  {csv_path}")

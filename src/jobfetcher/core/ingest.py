@@ -396,6 +396,7 @@ def score_gold(
     run_id: str,
     repo: "Repository",
     scorer: "Scorer",
+    profile_hash: str,
     user_id: str = DEFAULT_USER_ID,
     max_workers: int = DEFAULT_MAX_WORKERS,
     deadline: Deadline | None = None,
@@ -403,6 +404,10 @@ def score_gold(
     """Step-5 scoring: load the candidate profile + its **runtime** threshold knobs, then for
     each gold candidate -> score it (LLM) -> derive its `fit_category` from the config bands
     (VG8) -> upsert the `score` row (keyed on `cluster_id`) -> mark the posting `scored`.
+
+    `profile_hash` (required — the caller computes it from the profile+knobs it synced) is
+    stamped, with `scorer.model_id` and `run_id`, on the `score_event` lineage row that
+    `save_score` appends alongside every score (migration 0004).
 
     The profile and the threshold/floor/band are read from the `profile` row **at runtime**
     (never hardcoded) — changing `threshold` in that one DB value changes which jobs surface
@@ -466,6 +471,9 @@ def score_gold(
                     strategic_assessment=result.strategic_assessment,
                     poster_type=result.poster_type,
                     legitimacy_verified=result.legitimacy_verified,
+                    scoring_model=scorer.model_id,
+                    profile_hash=profile_hash,
+                    run_id=run_id,
                 )
                 repo.mark_scored(posting_id)
                 scored += 1
@@ -492,9 +500,11 @@ def reassess(
     run_id: str,
     repo: "Repository",
     scorer: "Scorer",
+    profile_hash: str,
     user_id: str = DEFAULT_USER_ID,
     max_workers: int = DEFAULT_MAX_WORKERS,
     deadline: Deadline | None = None,
+    max_age_days: int | None = None,
 ) -> dict[str, Any]:
     """Replay scoring over the already-scored postings against the **current** profile — no
     fetch, no gold (ADR-0023). The medallion's immutable-bronze → replay property: when the
@@ -502,15 +512,20 @@ def reassess(
     **graduate** to `strong_fit` with **zero JSearch calls** (only LLM scoring tokens).
 
     Same concurrency model as `score_gold` (H-2): LLM calls on `max_workers` threads, all DB
-    writes on the main thread; `save_score` carries the old score into `previous_score`.
-    Failure-isolated + deadline-guarded identically.
+    writes on the main thread; `save_score` carries the old score into `previous_score`, and
+    stamps `profile_hash` (required) + `scorer.model_id` + `run_id` on the `score_event`
+    lineage row it appends (migration 0004).
+
+    `max_age_days` bounds the replay by posting age (`None` or `0` = unbounded — every scored
+    posting): passed straight to `get_scored_for_reassess`, which INCLUDES NULL-`fetched_at`
+    postings even when the bound is set (see its docstring).
 
     Returns `{reassessed, graduated, downgraded, unchanged, failed, deferred}` plus a
     `graduations` list (`posting_id/title/company/old_score→new_score/old_cat→new_cat`) — a
     **graduation** = a posting that newly reached at/above the threshold (`old < threshold <=
     new`). The digest of these rides the email-UX unit; here they are reported + persisted."""
     profile, threshold, hard_floor, near_miss_band = _load_profile_and_knobs(repo, user_id)
-    targets = repo.get_scored_for_reassess()
+    targets = repo.get_scored_for_reassess(max_age_days=max_age_days)
 
     reassessed = 0
     graduated = 0
@@ -557,6 +572,9 @@ def reassess(
                     strategic_assessment=result.strategic_assessment,
                     poster_type=result.poster_type,
                     legitimacy_verified=result.legitimacy_verified,
+                    scoring_model=scorer.model_id,
+                    profile_hash=profile_hash,
+                    run_id=run_id,
                     previous_score=old_score,
                 )
                 reassessed += 1

@@ -115,6 +115,30 @@ score = Table(
 )
 
 
+score_event = Table(
+    "score_event",
+    metadata,
+    # Append-only scoring-lineage log (migration 0004): one immutable row per scoring event,
+    # while `score` stays the 1:1 "current judgment" upsert. `save_score` dual-writes both in
+    # ONE transaction; nothing ever updates or deletes a row here, so the full score history
+    # (and the model + profile that produced each score) survives every reassess/replay.
+    Column("event_id", Integer, primary_key=True, autoincrement=True),
+    Column("cluster_id", Text, ForeignKey("cluster.cluster_id"), nullable=False, index=True),
+    Column("score", Integer, nullable=False),  # 0-100
+    Column("fit_category", Text, nullable=False),
+    Column("strengths", JSONB),
+    Column("gaps", JSONB),
+    Column("strategic_assessment", Text),
+    Column("poster_type", Text),
+    Column("legitimacy_verified", Boolean),
+    Column("previous_score", Integer),  # what save_score received — keeps events self-contained
+    Column("scoring_model", Text, nullable=False),  # provenance: which model scored
+    Column("profile_hash", Text, nullable=False),  # provenance: which profile+knobs it scored against
+    Column("run_id", Text, index=True),  # correlation id
+    Column("scored_at", _TS, nullable=False, server_default=text("now()")),
+)
+
+
 profile = Table(
     "profile",
     metadata,
@@ -123,6 +147,7 @@ profile = Table(
     Column("threshold", Integer),  # default 60 — gates shortlist + CV
     Column("hard_floor", Integer),  # default 50
     Column("near_miss_band", Integer),  # default 10
+    Column("profile_hash", Text),  # hash of the profile+knobs last synced (lineage; nullable)
 )
 
 
@@ -146,6 +171,7 @@ __all__ = [
     "posting",
     "cluster",
     "score",
+    "score_event",
     "profile",
     "run_log",
 ]

@@ -11,6 +11,7 @@ import pytest
 from jobfetcher.handlers.pipeline import (
     _DEFAULT_PROFILE_PATH,
     _DEFAULT_SEARCH_CONFIG_PATH,
+    compute_profile_hash,
     resolve_db_url,
     resolve_deadline,
     resolve_max_workers,
@@ -193,3 +194,45 @@ def test_resolve_filter_strategy_rejects_junk():
 
     with pytest.raises(ValueError, match="GOLD_FILTER_STRATEGY"):
         resolve_filter_strategy({"GOLD_FILTER_STRATEGY": "fuzzy"})
+
+
+# --------------------------------------------------------------------------- profile hash (0004)
+def _hash_inputs(threshold=60, skill="Python"):
+    from jobfetcher.core.profile import Profile
+    from jobfetcher.core.search_spec import SearchSpec
+
+    profile = Profile.model_validate({
+        "name": "Tester",
+        "skills": [{"name": skill}],
+        "preferences": {"target_titles": ["Data Engineer"], "target_locations": ["Riyadh"],
+                        "avoid_keywords": []},
+    })
+    spec = SearchSpec.model_validate({
+        "source": "jsearch", "secret_name": "s", "aws_region": "us-east-1",
+        "targeting": {"job_titles": ["de"], "countries": ["sa"], "cities": [], "states": []},
+        "date_posted": "week", "language": "en", "employment_types": [],
+        "remote": "off", "threshold": threshold, "hard_floor": 50, "near_miss_band": 10,
+        "reassess_max_age_days": 45,
+        "budget": {"max_pages_per_query": 1, "request_budget_per_run": 10},
+    })
+    return profile, spec
+
+
+def test_compute_profile_hash_is_deterministic():
+    # same profile + knobs → the same hash, every time (a 64-char sha256 hex digest)
+    p, s = _hash_inputs()
+    h1, h2 = compute_profile_hash(p, s), compute_profile_hash(p, s)
+    assert h1 == h2
+    assert len(h1) == 64
+    int(h1, 16)  # raises if it isn't hex
+
+
+def test_compute_profile_hash_changes_when_content_changes():
+    # negative twin: a knob change OR a profile change → a DIFFERENT hash (the lineage link
+    # would otherwise silently claim two different judgment bases were the same)
+    p, s = _hash_inputs()
+    base = compute_profile_hash(p, s)
+    _, stricter = _hash_inputs(threshold=80)
+    p_spark, _ = _hash_inputs(skill="Spark")
+    assert compute_profile_hash(p, stricter) != base
+    assert compute_profile_hash(p_spark, s) != base

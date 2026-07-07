@@ -88,7 +88,8 @@ def _seed_scored(repo, posting_id: str, title: str, score: int, *, company: str,
                     fit_category="strong_fit" if score >= 60 else "misaligned",
                     strengths=[f"strong fit for {title}"], gaps=["no Spark"],
                     strategic_assessment="play it well", poster_type="direct employer",
-                    legitimacy_verified=True)
+                    legitimacy_verified=True, scoring_model="test-model",
+                    profile_hash="ph-seed", run_id="seed")
     repo.mark_scored(posting_id)
 
 

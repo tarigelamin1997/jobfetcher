@@ -48,6 +48,11 @@ near_miss_band: 10               # how far below threshold still counts as "almo
 # also tag every job (strong_fit | near_miss | stretch | misaligned) to power the upcoming
 # near-miss-watch feature (resurface a job that was *almost* a fit once you gain a skill).
 
+# ── Reassess age bound (the {"mode":"reassess"} replay) ────────────────────
+# Only re-score postings fetched within the last N days — an old posting is likely filled,
+# so replaying it forever just burns LLM tokens. 0 = no cutoff (replay everything). 0..365.
+reassess_max_age_days: 45              # recommended: 45
+
 # ── Request-budget guardrails (free Basic = 200 req/mo) ──────────────────
 budget:
   max_pages_per_query: 5         # ~10 results/page, ~1 request/page

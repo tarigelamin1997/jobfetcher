@@ -10,7 +10,7 @@ hardcoded credential.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import Engine, select, text, update
@@ -196,11 +196,14 @@ class PostgresRepository:
         threshold: int,
         hard_floor: int,
         near_miss_band: int,
+        profile_hash: str | None = None,
     ) -> None:
         # Idempotent on `user_id`: the handler seeds the single-user row once (when none exists);
         # a re-run overwrites with the same values — never duplicates. Mirrors the inline upsert
         # the integration tests use, lifted onto the port so the handler doesn't reach into
-        # SQLAlchemy directly.
+        # SQLAlchemy directly. `profile_hash` (nullable, migration 0004) records which
+        # profile+knobs content the row was synced from — the same hash `save_score` stamps on
+        # every `score_event`, tying each score to the profile it judged against.
         stmt = (
             pg_insert(tables.profile)
             .values(
@@ -209,6 +212,7 @@ class PostgresRepository:
                 threshold=threshold,
                 hard_floor=hard_floor,
                 near_miss_band=near_miss_band,
+                profile_hash=profile_hash,
             )
             .on_conflict_do_update(
                 index_elements=["user_id"],
@@ -217,6 +221,7 @@ class PostgresRepository:
                     "threshold": threshold,
                     "hard_floor": hard_floor,
                     "near_miss_band": near_miss_band,
+                    "profile_hash": profile_hash,
                 },
             )
         )
@@ -308,6 +313,8 @@ class PostgresRepository:
 
     def get_scored_for_reassess(
         self,
+        *,
+        max_age_days: int | None = None,
     ) -> list[tuple[str, str, DissectedPosting, int, str]]:
         """The reassess set (ADR-0023): every already-scored posting + its CURRENT score and
         fit_category, so a replay can re-score against the updated profile and report the
@@ -316,7 +323,18 @@ class PostgresRepository:
 
         Only `status='scored'` postings are returned — these are the ones with a prior score to
         graduate. (A skill change doesn't alter gold membership, so re-scoring the scored set is
-        the right scope; re-running gold for a targeting/avoid change is a separate concern.)"""
+        the right scope; re-running gold for a targeting/avoid change is a separate concern.)
+
+        **`max_age_days` bounds the replay by posting age** (LLM-token thrift: a months-old
+        posting is likely filled — don't pay to re-score it forever). When set and > 0, only
+        postings with `fetched_at` within the last `max_age_days` are returned — **plus every
+        posting whose `fetched_at` IS NULL** (the safe default: `posting.fetched_at` is nullable
+        and `save_posting` does not populate it, so a naive `>= cutoff` would silently exclude
+        those rows from reassess FOREVER; NULL-age is treated as unknown, not old). The cutoff
+        is computed in Python and passed as a bound parameter — never interpolated SQL.
+
+        **`max_age_days=None` or `0` = UNBOUNDED** (the pre-0004 behavior: every scored
+        posting is reassessed, no age cut)."""
         s, p = tables.score, tables.posting
         stmt = (
             select(p, s.c.score, s.c.fit_category)
@@ -324,6 +342,10 @@ class PostgresRepository:
             .where(p.c.status == "scored")
             .order_by(p.c.posting_id)
         )
+        if max_age_days is not None and max_age_days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            # NULL fetched_at is INCLUDED (see docstring) — the OR IS NULL is load-bearing.
+            stmt = stmt.where(p.c.fetched_at.is_(None) | (p.c.fetched_at >= cutoff))
         try:
             with self.engine.connect() as conn:
                 rows = conn.execute(stmt).mappings().all()
@@ -351,6 +373,9 @@ class PostgresRepository:
         strategic_assessment: str,
         poster_type: str,
         legitimacy_verified: bool,
+        scoring_model: str,
+        profile_hash: str,
+        run_id: str | None = None,
         previous_score: int | None = None,
     ) -> str:
         if not cluster_id:
@@ -361,6 +386,12 @@ class PostgresRepository:
         # `previous_score` (the pre-update value via `tables.score.c.score`, NOT excluded) so
         # the old score moves into previous_score in one statement — unless the caller passed
         # an explicit `previous_score`.
+        #
+        # DUAL-WRITE (migration 0004): the same transaction also APPENDS an immutable
+        # `score_event` row carrying the lineage (`scoring_model`/`profile_hash`/`run_id` —
+        # both hashes are REQUIRED, so an event can never be written without its provenance).
+        # One `engine.begin()` block = one transaction: if either statement fails, BOTH roll
+        # back — the current-judgment upsert and the history log can never diverge.
         stmt = pg_insert(tables.score).values(
             cluster_id=cluster_id,
             score=score,
@@ -390,9 +421,27 @@ class PostgresRepository:
                 "scored_at": stmt.excluded.scored_at,
             },
         )
+        # The event's `previous_score` is exactly what THIS call received (an explicit old
+        # score on reassess, None on first scoring) — self-contained, never re-derived.
+        event_stmt = tables.score_event.insert().values(
+            cluster_id=cluster_id,
+            score=score,
+            fit_category=fit_category,
+            strengths=strengths,
+            gaps=gaps,
+            strategic_assessment=strategic_assessment,
+            poster_type=poster_type,
+            legitimacy_verified=legitimacy_verified,
+            previous_score=previous_score,
+            scoring_model=scoring_model,
+            profile_hash=profile_hash,
+            run_id=run_id,
+            scored_at=text("now()"),
+        )
         try:
             with self.engine.begin() as conn:
                 conn.execute(stmt)
+                conn.execute(event_stmt)
         except SQLAlchemyError as e:
             raise RepositoryError(f"save_score failed for {cluster_id!r}: {e}") from e
         return cluster_id

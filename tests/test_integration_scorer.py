@@ -150,7 +150,8 @@ def test_score_gold_saves_scores_and_marks_scored(repo):
     _seed_profile(repo, user, threshold=60)
 
     scorer = Scorer(FakeLlm(_score_json(90), _score_json(30)))  # ordered by posting_id: high<low alpha?
-    summary = score_gold(run_id="r", repo=repo, scorer=scorer, user_id=user)
+    summary = score_gold(run_id="r", repo=repo, scorer=scorer, profile_hash="ph-int",
+                         user_id=user)
 
     # both scored; only the >=60 one surfaced (the FakeLlm replies map by deterministic order)
     assert summary["gold"] >= 2
@@ -170,12 +171,31 @@ def test_score_gold_is_idempotent_upsert(repo):
     pid = _seed_gold(repo, f"idem-{tag}", _dissected("Data Engineer"))
     _seed_profile(repo, user, threshold=60)
 
-    score_gold(run_id="r1", repo=repo, scorer=Scorer(FakeLlm(_score_json(70))), user_id=user)
+    score_gold(run_id="r1", repo=repo, scorer=Scorer(FakeLlm(_score_json(70))),
+               profile_hash="ph-r1", user_id=user)
     # re-promote so it's scoreable again, then re-score with a different value
     repo.mark_gold_candidate(pid)
-    score_gold(run_id="r2", repo=repo, scorer=Scorer(FakeLlm(_score_json(85))), user_id=user)
+    score_gold(run_id="r2", repo=repo, scorer=Scorer(FakeLlm(_score_json(85))),
+               profile_hash="ph-r2", user_id=user)
 
     rows = _score_row(repo, pid)
     assert len(rows) == 1  # upsert: still exactly one row, not duplicated
     assert rows[0]["score"] == 85
     assert rows[0]["previous_score"] == 70  # the prior score carried forward
+
+    # the append-only lineage log (migration 0004): TWO events survive the upsert, each
+    # carrying the run + profile_hash that produced it — the history the upsert overwrites
+    from sqlalchemy import select
+
+    from jobfetcher.db import tables
+
+    with repo.engine.connect() as conn:
+        events = conn.execute(
+            select(tables.score_event)
+            .where(tables.score_event.c.cluster_id == pid)
+            .order_by(tables.score_event.c.event_id)
+        ).mappings().all()
+    assert len(events) == 2
+    assert [e["score"] for e in events] == [70, 85]
+    assert [e["profile_hash"] for e in events] == ["ph-r1", "ph-r2"]
+    assert [e["run_id"] for e in events] == ["r1", "r2"]
