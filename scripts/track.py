@@ -34,16 +34,28 @@ sys.path.insert(0, str(ROOT / "src"))
 from sqlalchemy import text  # noqa: E402
 
 from jobfetcher.adapters.repository_postgres import PostgresRepository  # noqa: E402
-from jobfetcher.core.ingest import DEFAULT_USER_ID, derive_fit_category  # noqa: E402
+from jobfetcher.core.ingest import (  # noqa: E402
+    DEFAULT_USER_ID,
+    _DEFAULT_HARD_FLOOR,
+    _DEFAULT_NEAR_MISS_BAND,
+    _DEFAULT_THRESHOLD,
+    derive_fit_category,
+)
 from jobfetcher.core.models import APPLICATION_STATUSES  # noqa: E402
 from jobfetcher.core.ports import RepositoryError  # noqa: E402
 from jobfetcher.db.engine import make_engine  # noqa: E402
 from jobfetcher.handlers.pipeline import resolve_db_url  # noqa: E402 (reuse the URL builder)
 
-# Threshold-knob fallbacks when the profile row leaves one NULL — the same documented
-# defaults `core/ingest.py` applies (02-architecture "Threshold"); the row's values win
-# whenever set.
-_DEFAULT_KNOBS = {"threshold": 60, "hard_floor": 50, "near_miss_band": 10}
+# Threshold-knob fallbacks when the profile row leaves one NULL — IMPORTED from
+# core/ingest.py (the single definition of the documented defaults, 02-architecture
+# "Threshold"), never a re-hardcoded copy. The names are module-private by underscore, but
+# a first-party script duplicating the literals would be the worse sin (drift on a knob
+# change). The row's values win whenever set.
+_DEFAULT_KNOBS = {
+    "threshold": _DEFAULT_THRESHOLD,
+    "hard_floor": _DEFAULT_HARD_FLOOR,
+    "near_miss_band": _DEFAULT_NEAR_MISS_BAND,
+}
 
 
 # --------------------------------------------------------------------------- pure helpers

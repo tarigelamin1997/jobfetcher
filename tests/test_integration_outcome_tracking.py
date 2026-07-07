@@ -1,8 +1,9 @@
 """Outcome tracking + score overrides on a REAL local Postgres (migration 0005).
 
 Proves the DB-level properties no fake can: (1) the migration chain reaches 0005 and the
-new table's CHECK actually rejects a bad status at the DB layer (belt under the
-repository's braces); (2) VG1 — two events (applied → interview) → the EXPORT's
+new table's CHECK — the real, migrated one — accepts EVERY member of the shared vocabulary
+and rejects a status outside it at the DB layer (belt under the repository's braces);
+(2) VG1 — two events (applied → interview) → the EXPORT's
 latest-status LATERAL yields 'interview' with the second timestamp while BOTH rows survive
 in `application_events`; (3) VG2 — an unknown posting_id → RepositoryError with ZERO rows
 written; (4) VG5 — override 75 → `score.score_override`=75 AND a `score_event` lineage row
@@ -20,7 +21,7 @@ from uuid import uuid4
 
 import pytest
 
-from jobfetcher.core.models import DissectedPosting, Skill
+from jobfetcher.core.models import APPLICATION_STATUSES, DissectedPosting, Skill
 from jobfetcher.core.ports import RepositoryError
 
 pytestmark = pytest.mark.integration
@@ -140,8 +141,10 @@ def _score_row(repo, cluster_id: str) -> dict:
 
 # --------------------------------------------------------------------------- migration chain
 def test_migration_chain_reaches_0005_and_the_check_bites_at_the_db(repo):
-    """The chain 0001→…→0005 lands: `application_event` exists, and its CHECK rejects a
-    status outside the shared vocabulary AT THE DB LAYER — the belt under the repository's
+    """The chain 0001→…→0005 lands: `application_event` exists, the REAL migrated CHECK
+    accepts EVERY member of the shared vocabulary (one INSERT per status — the frozen
+    migration literals cover the whole runtime tuple, not just the two statuses VG1 uses),
+    and rejects a status outside it AT THE DB LAYER — the belt under the repository's
     validation braces (defense in depth, additive to this new table only)."""
     from sqlalchemy import text
     from sqlalchemy.exc import IntegrityError
@@ -151,12 +154,21 @@ def test_migration_chain_reaches_0005_and_the_check_bites_at_the_db(repo):
         assert conn.execute(
             text("SELECT to_regclass('application_event') IS NOT NULL")
         ).scalar_one()
+    # positive: every allowed status passes the migrated CHECK — an added-but-unmigrated
+    # status would fail here instead of failing in production
+    with repo.engine.begin() as conn:
+        for status in APPLICATION_STATUSES:
+            conn.execute(text(
+                "INSERT INTO application_event (posting_id, status) VALUES (:p, :s)"
+            ), {"p": pid, "s": status})
+    # negative: a status outside the vocabulary is rejected by the DB itself
     with pytest.raises(IntegrityError, match="ck_application_event_status"):
         with repo.engine.begin() as conn:
             conn.execute(text(
                 "INSERT INTO application_event (posting_id, status) VALUES (:p, 'ghosted')"
             ), {"p": pid})
-    assert _app_events(repo, pid) == []  # the rejected INSERT left nothing behind
+    # exactly the allowed set landed, in order; the rejected INSERT left nothing behind
+    assert [e["status"] for e in _app_events(repo, pid)] == list(APPLICATION_STATUSES)
 
 
 # --------------------------------------------------------------------------- VG1

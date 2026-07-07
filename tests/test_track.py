@@ -1,9 +1,10 @@
 """Outcome-tracking unit tests (no DB): the track.py CLI's argparse validation (VG3/VG4 —
 an invalid status or an out-of-range override never reaches the DB), the repository's own
 loud validation of the same inputs (defense in depth, asserted to fire BEFORE the engine is
-touched), the shared-vocabulary wiring (`APPLICATION_STATUSES` → CLI subcommands AND the
-`application_event` CHECK constraint — one definition, no drift), and the override-context
-fallbacks. The DB-backed behavior (rows written / rolled back) is in the integration test."""
+touched), the shared-vocabulary pin (migration 0005's FROZEN status literals ==
+`APPLICATION_STATUSES`, read from the migration source — the one copy that can drift), and
+the override-context fallbacks. The DB-backed behavior (rows written / rolled back) is in
+the integration test."""
 from __future__ import annotations
 
 import importlib.util
@@ -103,21 +104,22 @@ def test_repository_rejects_empty_cluster_id():
 
 
 # --------------------------------------------------------------------------- shared vocabulary
-def test_check_constraint_is_built_from_the_shared_status_set():
-    # The DB CHECK and the CLI/repository vocabulary share ONE definition — every allowed
-    # status appears in the constraint SQL, and nothing else sneaks in.
-    from sqlalchemy import CheckConstraint
+def test_migration_0005_literals_match_the_shared_vocabulary():
+    # The drift that can ACTUALLY happen: `db/tables.py` builds its CHECK from
+    # `APPLICATION_STATUSES` (equal by construction — comparing those two proves nothing),
+    # but migration 0005's literals are FROZEN in the file, as migrations must be. Pin them
+    # to the tuple by reading the migration SOURCE — same members, same order, same count —
+    # so an added-but-unmigrated status fails this suite instead of failing in production.
+    import re
 
-    from jobfetcher.db import tables
-
-    checks = [
-        c for c in tables.application_event.constraints if isinstance(c, CheckConstraint)
-    ]
-    assert len(checks) == 1
-    sql = str(checks[0].sqltext)
-    for status in APPLICATION_STATUSES:
-        assert f"'{status}'" in sql
-    assert sql.count("'") == 2 * len(APPLICATION_STATUSES)  # no extra literals
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "migrations" / "versions" / "0005_application_event.py"
+    ).read_text(encoding="utf-8")
+    check = re.search(r"status IN \(([^)]*)\)", source)
+    assert check, "migration 0005 lost its status CHECK"
+    literals = re.findall(r"'([^']*)'", check.group(1))
+    assert literals == list(APPLICATION_STATUSES)
 
 
 # --------------------------------------------------------------------------- override context
