@@ -3,6 +3,7 @@
 Your job history lives in the operational DB (Aurora). To **filter / search / sort / organize** it,
 export a portable snapshot and open it in a tool built for exactly that ([ADR-0024](adr/0024-query-via-export.md)) —
 no custom UI, full "basic operations" for free, offline.
+*(The daily digest's still-open overflow — "…and n more — see your export" — points here: run the export below to see the full still-open list; [ADR-0027](adr/0027-digest-truthfulness.md).)*
 
 ## 1. Export a snapshot
 

@@ -28,7 +28,7 @@ A personal-scale tool built to **production standards**, and deliberately an exe
 
 ### As-built (what's live today, `v0.6.0`)
 
-One EventBridge-scheduled Lambda (`jobfetcher.handlers.pipeline.handler`) runs the whole operational medallion, threading one correlation `run_id` through logs, rows, and S3 objects. Since v0 it has gained **in-Lambda concurrency** (a `ThreadPoolExecutor` fans out silver dissection with all DB writes kept on the main thread) behind a **deadline guard** (a run returns `partial` rather than timing out), a **`{"mode":"reassess"}` replay path** (re-score already-bronzed postings against the current profile, zero JSearch calls), **runtime config read from S3** (settings change with no rebuild/redeploy), and a **card-style SES digest**:
+One EventBridge-scheduled Lambda (`jobfetcher.handlers.pipeline.handler`) runs the whole operational medallion, threading one correlation `run_id` through logs, rows, and S3 objects. Since v0 it has gained **in-Lambda concurrency** (a `ThreadPoolExecutor` fans out silver dissection with all DB writes kept on the main thread) behind a **deadline guard** (a run returns `partial` rather than timing out), a **`{"mode":"reassess"}` replay path** (re-score already-bronzed postings against the current profile, zero JSearch calls), **runtime config read from S3** (settings change with no rebuild/redeploy), and a **card-style SES digest that tells the truth** — "new since last digest" leads (graduations badged `↑ old→new`), earlier matches compact into a "still open" count, and same-fingerprint repeats collapse to one card ([ADR-0027](docs/adr/0027-digest-truthfulness.md)):
 
 ```mermaid
 flowchart LR
@@ -97,7 +97,7 @@ The CV tailor, multi-source clustering dedup, Step Functions, Notion, and the db
 | **Secrets** | Secrets Manager (`jobfetcher/deepseek`, `jobfetcher/jsearch`) |
 | **IaC** | Terraform 1.14 — **14 resources**, us-east-1, least-privilege IAM (no Bedrock) |
 | **AWS SDK** | boto3 |
-| **Tests** | pytest — **283 unit + 36 integration green**, live smoke, 85%+ coverage floor |
+| **Tests** | pytest — **311 unit + 39 integration green**, live smoke, 85%+ coverage floor |
 | **CI** | GitHub Actions — ruff + tests + 85% coverage floor + `terraform validate` + **gitleaks** secret-scan; pre-commit (gitleaks + ruff) |
 
 dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in sibling projects — not in this repo today. See the [decision journal](docs/01-session-decision-journal.md).
@@ -143,6 +143,7 @@ python scripts/preview_digest.py      # render the card-style email in a browser
 - **Re-score on a better profile** — add a skill, push config, invoke `{"mode":"reassess"}`; watch `stretch` roles graduate to `strong_fit` ([ADR-0023](docs/adr/0023-reassess-replay.md)).
 - **Query your data** — `export.py` gives you a file you filter/search/sort in Datasette, DB Browser, or Excel — no custom UI ([ADR-0024](docs/adr/0024-query-via-export.md) · [`docs/querying.md`](docs/querying.md)).
 - **Record what happens after the digest** — `track.py applied|interview|offer|rejected|withdrawn <posting_id>` appends to an immutable outcome log (`find "<title>"` looks up the id; `events` shows a job's trail); the next `export.py` shows each job's **latest application status**. **Override a score you disagree with** — `track.py override <posting_id> <score>`: it sets `score_override` *and* lands in the same lineage log as the LLM's scorings — nothing is erased, and the override survives later re-scores ([ADR-0026](docs/adr/0026-outcome-tracking-override-lineage.md)).
+- **Read the digest as news** — "New since last digest" leads with full cards (a graduation is badged `↑ old→new`); everything already announced compacts into a "still open" count with top-5 one-liners, same-role repeats collapse to one card (`seen n×`), and `digest_max_age_days` ages stale postings out ([ADR-0027](docs/adr/0027-digest-truthfulness.md)).
 - **Preview the email** — `preview_digest.py` renders the digest locally so format changes are seen before send.
 
 ### Local dev & tests
