@@ -33,9 +33,13 @@ Other options: **DB Browser for SQLite** (desktop GUI → Browse Data → filter
 
 ## What's in the snapshot
 
-- **`jobs`** — one row per posting (the table you filter): `posting_id`, `run_id`, `status` (silver/gold_candidate/scored), `normalized_title`, `raw_title`, `company`, `seniority`, `sector`, `employment_type`, `country`/`city`/`state`/`location`, `skills` (text) + `skills_json`, `score`, `previous_score`, `fit_category` (strong_fit/near_miss/stretch/misaligned), `poster_type`, `legitimacy_verified`, `strengths`, `gaps`, `apply_url`, `scored_at`, `fetched_at`, `posting_count`.
+- **`jobs`** — one row per posting (the table you filter): `posting_id`, `run_id`, `status` (silver/gold_candidate/scored), `normalized_title`, `raw_title`, `company`, `seniority`, `sector`, `employment_type`, `country`/`city`/`state`/`location`, `skills` (text) + `skills_json`, `score`, `score_override` (your human correction, if any), `previous_score`, `fit_category` (strong_fit/near_miss/stretch/misaligned), `poster_type`, `legitimacy_verified`, `strengths`, `gaps`, `latest_application_status` + `application_noted_at` (the newest `track.py` event per posting; NULL if you haven't recorded one), `apply_url`, `scored_at`, `fetched_at`, `posting_count`.
 - **`bronze`** — the full fetch history (ids, source, run_id, S3 key, fetched_at; the raw JSON stays in S3).
 - **`runs`** — the digest send log · **`profile_current`** — your current profile + thresholds.
+- **`score_events`** — the append-only score history + lineage (one row per scoring/reassess/override: score, `previous_score`, `scoring_model` — `'human-override'` marks your corrections — `profile_hash`, `run_id`, `scored_at`; [ADR-0025](adr/0025-score-event-lineage.md)).
+- **`application_events`** — the full outcome trail written by `scripts/track.py` (every applied/interview/offer/rejected/withdrawn note, with `noted_at` + your free-text `note`; the `jobs` columns above show only the *latest*; [ADR-0026](adr/0026-outcome-tracking-override-lineage.md)).
+
+> **Caveat — override vs. category:** `score_override` sits next to the **LLM's** `fit_category` — an override never rewrites `score.fit_category`. The override's own derived category lives on its `score_event` row (`scoring_model='human-override'`) in `score_events`.
 
 ## Example filters
 
@@ -45,5 +49,7 @@ Other options: **DB Browser for SQLite** (desktop GUI → Browse Data → filter
 | Jobs that **graduated** on the last reassess | `SELECT normalized_title, company, previous_score, score FROM jobs WHERE previous_score < 60 AND score >= 60` |
 | "Architect" roles scoring 50–70 | `SELECT * FROM jobs WHERE normalized_title LIKE '%Architect%' AND score BETWEEN 50 AND 70` |
 | Everything from one run | `SELECT * FROM jobs WHERE run_id = '<run_id>'` |
+| Your application funnel | `SELECT latest_application_status, count(*) FROM jobs WHERE latest_application_status IS NOT NULL GROUP BY 1` |
+| Strong fits you haven't applied to yet | `SELECT * FROM jobs WHERE fit_category='strong_fit' AND latest_application_status IS NULL ORDER BY score DESC` |
 
 In Datasette you can do all of these by clicking facets (country, fit_category, status) and typing in the search box — no SQL needed.
