@@ -6,6 +6,8 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
+- **Milestone `milestone/pre-agentic-workflow-2026-07-07`** — the complete-documentation baseline (v0.1.0→v0.6.0 shipped + docs/diagrams swept current, 257 tests green). The clean checkpoint before the build phase switches to an **agentic workflow**.
+
 *Next candidate (P2): fold the reassess "what graduated" digest into the email; then re-evaluate the roadmap from usage.*
 
 ## [v0.6.0] — 2026-07-06 — email UX: a scannable digest with prominent apply-links
