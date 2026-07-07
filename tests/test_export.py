@@ -59,11 +59,15 @@ def test_row_to_job_flattens_jsonb_and_timestamps():
 def test_write_snapshot_creates_all_tables_and_csv(tmp_path):
     jobs = [
         {"posting_id": "p1", "normalized_title": "Data Engineer", "company": "Acme",
-         "country": "sa", "status": "scored", "score": 85, "previous_score": 45,
-         "fit_category": "strong_fit", "skills": "Python, SQL", "apply_url": "http://x"},
+         "country": "sa", "status": "scored", "score": 85, "score_override": 75,
+         "previous_score": 45, "fit_category": "strong_fit", "skills": "Python, SQL",
+         "latest_application_status": "interview",
+         "application_noted_at": "2026-07-07T09:00:00+00:00", "apply_url": "http://x"},
         {"posting_id": "p2", "normalized_title": "Data Architect", "company": "Beta",
-         "country": "ae", "status": "silver", "score": None, "previous_score": None,
-         "fit_category": None, "skills": "", "apply_url": "http://y"},
+         "country": "ae", "status": "silver", "score": None, "score_override": None,
+         "previous_score": None, "fit_category": None, "skills": "",
+         "latest_application_status": None, "application_noted_at": None,
+         "apply_url": "http://y"},
     ]
     sp, cp = export.write_snapshot(
         jobs=jobs,
@@ -74,28 +78,49 @@ def test_write_snapshot_creates_all_tables_and_csv(tmp_path):
                  "scoring_model": "pre-0004", "profile_hash": "pre-0004", "run_id": None},
                 {"event_id": 2, "cluster_id": "p1", "score": 85, "previous_score": 45,
                  "scoring_model": "deepseek-v4-pro", "profile_hash": "abc123", "run_id": "r1"}],
+        application_events=[
+            {"event_id": 1, "posting_id": "p1", "status": "applied",
+             "noted_at": "2026-07-06T09:00:00+00:00", "note": None},
+            {"event_id": 2, "posting_id": "p1", "status": "interview",
+             "noted_at": "2026-07-07T09:00:00+00:00", "note": "phone screen"},
+        ],
         out_dir=tmp_path,
     )
     con = sqlite3.connect(sp)
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"jobs", "bronze", "runs", "profile_current", "score_events"} <= tables
+    assert {"jobs", "bronze", "runs", "profile_current", "score_events",
+            "application_events"} <= tables
     rows = con.execute("SELECT posting_id, score, fit_category FROM jobs ORDER BY posting_id").fetchall()
     assert rows == [("p1", 85, "strong_fit"), ("p2", None, None)]  # scored + un-scored silver both present
+    # VG6: the flat jobs table carries the new outcome columns (populated + NULL both land)
+    outcome = con.execute(
+        "SELECT score_override, latest_application_status, application_noted_at "
+        "FROM jobs ORDER BY posting_id"
+    ).fetchall()
+    assert outcome == [(75, "interview", "2026-07-07T09:00:00+00:00"), (None, None, None)]
     # the score history rides along: both events for p1, in order, with their lineage
     ev = con.execute(
         "SELECT score, previous_score, profile_hash FROM score_events ORDER BY event_id"
     ).fetchall()
     assert ev == [(45, None, "pre-0004"), (85, 45, "abc123")]
-    # the flat CSV exists + has a header + both rows
+    # VG6: the application-outcome trail rides along too (both rows, in order)
+    app_ev = con.execute(
+        "SELECT posting_id, status, note FROM application_events ORDER BY event_id"
+    ).fetchall()
+    assert app_ev == [("p1", "applied", None), ("p1", "interview", "phone screen")]
+    # the flat CSV exists + has a header (incl. the new columns) + both rows
     text = cp.read_text(encoding="utf-8")
-    assert "posting_id" in text.splitlines()[0]
+    header = text.splitlines()[0]
+    assert "posting_id" in header
+    assert "score_override" in header and "latest_application_status" in header
     assert len(text.strip().splitlines()) == 3  # header + 2 jobs
 
 
 def test_write_snapshot_empty_is_safe(tmp_path):
     # negative: an empty DB must not crash — the tables exist, the CSV is empty
     sp, cp = export.write_snapshot(
-        jobs=[], bronze=[], runs=[], profile=[], events=[], out_dir=tmp_path
+        jobs=[], bronze=[], runs=[], profile=[], events=[], application_events=[],
+        out_dir=tmp_path,
     )
     assert sp.exists() and cp.exists()
     con = sqlite3.connect(sp)

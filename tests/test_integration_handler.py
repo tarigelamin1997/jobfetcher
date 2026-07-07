@@ -451,11 +451,14 @@ def test_export_snapshot_from_db(repo, patched, tmp_path):
 
     sp, cp = export.write_snapshot(
         jobs=data["jobs"], bronze=data["bronze"], runs=data["runs"], profile=data["profile"],
-        events=data["events"], out_dir=tmp_path / "export",
+        events=data["events"], application_events=data["application_events"],
+        out_dir=tmp_path / "export",
     )
     con = sqlite3.connect(sp)
     assert con.execute("SELECT count(*) FROM jobs WHERE score >= 60").fetchone()[0] == 2
     assert con.execute("SELECT count(*) FROM score_events").fetchone()[0] == 2
+    # migration 0005: the outcome table exists in the snapshot (empty — no track.py calls here)
+    assert con.execute("SELECT count(*) FROM application_events").fetchone()[0] == 0
     # count CSV rows via the parser (fields like strengths carry embedded newlines)
     import csv as _csv
     with cp.open(encoding="utf-8", newline="") as f:

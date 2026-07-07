@@ -17,7 +17,7 @@ from sqlalchemy import Engine, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 
-from ..core.models import DissectedPosting, RequirementLevel, Skill
+from ..core.models import APPLICATION_STATUSES, DissectedPosting, RequirementLevel, Skill
 from ..core.ports import RepositoryError, ShortlistItem
 from ..db import tables
 from ..db.engine import make_engine
@@ -453,6 +453,99 @@ class PostgresRepository:
         except SQLAlchemyError as e:
             raise RepositoryError(f"save_score failed for {cluster_id!r}: {e}") from e
         return cluster_id
+
+    def track_application_event(
+        self, *, posting_id: str, status: str, note: str | None = None
+    ) -> None:
+        # Validate BEFORE touching the DB: an invalid status fails loudly here (the same
+        # vocabulary the table's CHECK enforces — `APPLICATION_STATUSES`, core/models.py),
+        # never as an opaque constraint error, and never with a row half-written.
+        if status not in APPLICATION_STATUSES:
+            raise RepositoryError(
+                f"track_application_event: invalid status {status!r} — "
+                f"allowed: {', '.join(APPLICATION_STATUSES)}"
+            )
+        if not posting_id:
+            raise RepositoryError("track_application_event requires a non-empty posting_id")
+        exists_stmt = select(tables.posting.c.posting_id).where(
+            tables.posting.c.posting_id == posting_id
+        )
+        # `.inline()` + the table's implicit_returning=False keep this a plain single-statement
+        # INSERT — no RETURNING, no PK prefetch (the score_event Data-API hardening, see
+        # db/tables.py); the server assigns `event_id` and stamps `noted_at` (default now()).
+        insert_stmt = tables.application_event.insert().inline().values(
+            posting_id=posting_id, status=status, note=note
+        )
+        try:
+            with self.engine.begin() as conn:
+                if conn.execute(exists_stmt).first() is None:
+                    # Raising inside the block rolls the transaction back — zero rows written.
+                    raise RepositoryError(
+                        f"track_application_event: no posting {posting_id!r} — "
+                        "nothing written (find the id with `scripts/track.py find`)"
+                    )
+                conn.execute(insert_stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(
+                f"track_application_event failed for {posting_id!r}: {e}"
+            ) from e
+
+    def set_score_override(
+        self,
+        *,
+        cluster_id: str,
+        score_override: int,
+        fit_category: str,
+        profile_hash: str,
+        previous_score: int | None,
+    ) -> None:
+        if not cluster_id:
+            raise RepositoryError("set_score_override requires a non-empty cluster_id")
+        # Range-validated here AND at the CLI (scripts/track.py argparse) — no DB constraint
+        # (additive-only: nothing retrofitted onto the existing `score`/`score_event` DDL).
+        if not 0 <= score_override <= 100:
+            raise RepositoryError(
+                f"set_score_override: score_override must be 0-100, got {score_override}"
+            )
+        upd = (
+            update(tables.score)
+            .where(tables.score.c.cluster_id == cluster_id)
+            .values(score_override=score_override)
+        )
+        # The override joins the SAME lineage log as LLM scorings (`score_event`, migration
+        # 0004): scoring_model='human-override' marks provenance, `score` carries the human
+        # number, `previous_score` the pre-override score, and the LLM-judgment fields are
+        # honestly empty ([] / NULL — a human override has no strengths/gaps narrative).
+        # Append-only: a second override never erases the first. Same plain-INSERT hardening
+        # as every server-generated-PK write (.inline() + implicit_returning=False).
+        event_stmt = tables.score_event.insert().inline().values(
+            cluster_id=cluster_id,
+            score=score_override,
+            fit_category=fit_category,
+            strengths=[],
+            gaps=[],
+            strategic_assessment=None,
+            poster_type=None,
+            legitimacy_verified=None,
+            previous_score=previous_score,
+            scoring_model="human-override",
+            profile_hash=profile_hash,
+            run_id=None,
+        )
+        try:
+            # ONE transaction: the `score.score_override` UPDATE and the lineage APPEND
+            # commit together or not at all (the save_score dual-write discipline).
+            with self.engine.begin() as conn:
+                result = conn.execute(upd)
+                if result.rowcount == 0:
+                    # Raising inside the block rolls back — no event without a score row.
+                    raise RepositoryError(
+                        f"set_score_override: no score row for cluster {cluster_id!r} — "
+                        "nothing written"
+                    )
+                conn.execute(event_stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"set_score_override failed for {cluster_id!r}: {e}") from e
 
     def mark_scored(self, posting_id: str) -> None:
         stmt = (

@@ -14,6 +14,19 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+# The application-outcome vocabulary (migration 0005) — the ONE definition every layer
+# validates against: the `application_event` CHECK constraint (db/tables.py builds its SQL
+# from this tuple), the repository's loud pre-INSERT validation, and the `scripts/track.py`
+# argparse subcommands. A tuple (not a set) so the CHECK's SQL and the CLI's subcommand
+# order are deterministic. Adding a status = append here + an additive migration.
+APPLICATION_STATUSES: tuple[str, ...] = (
+    "applied",
+    "interview",
+    "offer",
+    "rejected",
+    "withdrawn",
+)
+
 
 class RequirementLevel(str, Enum):
     must = "must"        # explicitly required / essential / minimum

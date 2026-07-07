@@ -259,6 +259,36 @@ class Repository(Protocol):
         """Mark a posting done: set `posting.status = 'scored'`."""
         ...
 
+    def track_application_event(
+        self, *, posting_id: str, status: str, note: str | None = None
+    ) -> None:
+        """APPEND one immutable `application_event` row (migration 0005) — a human outcome
+        note (`applied`/`interview`/`offer`/`rejected`/`withdrawn`, the shared
+        `APPLICATION_STATUSES` vocabulary) against a posting, written by `scripts/track.py`.
+        Append-only: latest-status is a read-side query, never an overwrite, so the full
+        outcome trail survives. Raises `RepositoryError` — with ZERO rows written — for an
+        invalid status, an empty/unknown `posting_id`, or a backend failure."""
+        ...
+
+    def set_score_override(
+        self,
+        *,
+        cluster_id: str,
+        score_override: int,
+        fit_category: str,
+        profile_hash: str,
+        previous_score: int | None,
+    ) -> None:
+        """Record a human score correction: ONE transaction that UPDATEs
+        `score.score_override` for the cluster AND APPENDs a `score_event` lineage row with
+        `scoring_model='human-override'` (score = the override, `previous_score` = the
+        pre-override score, LLM-judgment fields honestly empty) — human overrides join the
+        same append-only log as LLM scorings, so a second override never erases the first.
+        `score_override` is validated 0-100 here and at the CLI (no DB constraint —
+        additive-only). Raises `RepositoryError` — with ZERO rows written — for an
+        out-of-range score, an empty/unknown `cluster_id`, or a backend failure."""
+        ...
+
     def get_scored_shortlist(
         self, *, threshold: int
     ) -> "tuple[list[ShortlistItem], int]":
