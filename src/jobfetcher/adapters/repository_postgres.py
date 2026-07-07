@@ -428,7 +428,11 @@ class PostgresRepository:
         )
         # The event's `previous_score` is exactly what THIS call received (an explicit old
         # score on reassess, None on first scoring) — self-contained, never re-derived.
-        event_stmt = tables.score_event.insert().values(
+        # `scored_at` is deliberately omitted — the column's server_default (now()) stamps it.
+        # `.inline()` + the table's implicit_returning=False keep this INSERT a plain
+        # single-statement write: no RETURNING and no PK prefetch (`select nextval(...)`) —
+        # both are Data-API-untested paths (see db/tables.py); the server assigns `event_id`.
+        event_stmt = tables.score_event.insert().inline().values(
             cluster_id=cluster_id,
             score=score,
             fit_category=fit_category,
@@ -441,7 +445,6 @@ class PostgresRepository:
             scoring_model=scoring_model,
             profile_hash=profile_hash,
             run_id=run_id,
-            scored_at=text("now()"),
         )
         try:
             with self.engine.begin() as conn:

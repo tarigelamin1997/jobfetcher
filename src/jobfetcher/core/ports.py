@@ -211,6 +211,24 @@ class Repository(Protocol):
         a run is deterministic. Raises `RepositoryError` on a backend failure."""
         ...
 
+    def get_scored_for_reassess(
+        self,
+        *,
+        max_age_days: int | None = None,
+    ) -> "list[tuple[str, str, DissectedPosting, int, str]]":
+        """Read the reassess set (ADR-0023): every `status='scored'` posting + its CURRENT
+        score and fit_category as `(posting_id, cluster_id, dissected, current_score,
+        current_fit_category)` — the replay's input, so `reassess()` can re-score against the
+        updated profile and report the old→new delta. **Ordered by `posting_id`** so a run is
+        deterministic.
+
+        `max_age_days` bounds the replay by posting age (LLM-token thrift): when set and > 0,
+        only postings fetched within the last N days are returned — a posting whose age is
+        unknown (no fetched timestamp resolvable) is INCLUDED, never silently dropped from
+        replay forever. `None` or `0` = unbounded (every scored posting). Raises
+        `RepositoryError` on a backend failure."""
+        ...
+
     def save_score(
         self,
         *,

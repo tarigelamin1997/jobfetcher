@@ -136,6 +136,10 @@ score_event = Table(
     Column("profile_hash", Text, nullable=False),  # provenance: which profile+knobs it scored against
     Column("run_id", Text, index=True),  # correlation id
     Column("scored_at", _TS, nullable=False, server_default=text("now()")),
+    # No implicit `RETURNING event_id` on INSERT: nothing reads the id back, and this is the
+    # schema's first server-generated PK — RETURNING has never been exercised over the Aurora
+    # Data API dialect (the ERR-004/005 lesson: dialect divergence only surfaces live).
+    implicit_returning=False,
 )
 
 
