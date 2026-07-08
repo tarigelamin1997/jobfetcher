@@ -100,11 +100,27 @@ class ScoreResult(BaseModel):
     `fit_category` is **NOT** here — it is derived in code from `score` against the per-user
     runtime threshold/floor/band (VG8), never asked of the LLM (band routing must not vary
     with the model). The LLM judges only what it can see in the JD: the legitimacy/scam gate
-    (`legitimacy_verified`) + the poster-type label (`poster_type`)."""
+    (`legitimacy_verified`) + the poster-type label (`poster_type`).
+
+    The 7 per-factor subscores (one per factor of the framework, 0-100 each) are OPTIONAL —
+    an older model reply without them still validates (`None`), so the pipeline never breaks
+    on their absence; a present-but-out-of-range subscore is rejected like any bad field
+    (the existing ScorerError/skip path). `score` remains the product number (SHADOW mode,
+    ADR-0028-to-be): the code-side weighted total is computed FROM these in
+    `core/scorer.py`, logged and persisted for calibration — never substituted."""
 
     model_config = {"extra": "ignore"}
 
     score: int = Field(..., ge=0, le=100, description="overall ATS fit, 0-100")
+    # Per-factor subscores (optional — see the class docstring). Field names mirror
+    # `FACTOR_WEIGHTS` in core/scorer.py exactly (a test pins the correspondence).
+    core_skill_match: int | None = Field(None, ge=0, le=100)
+    tool_tech_alignment: int | None = Field(None, ge=0, le=100)
+    achievement_relevance: int | None = Field(None, ge=0, le=100)
+    seniority_scope: int | None = Field(None, ge=0, le=100)
+    ats_keyword_coverage: int | None = Field(None, ge=0, le=100)
+    domain_sector_fit: int | None = Field(None, ge=0, le=100)
+    realistic_fit: int | None = Field(None, ge=0, le=100)
     strengths: list[str] = Field(default_factory=list, description="why this is a fit")
     gaps: list[str] = Field(default_factory=list, description="what's missing / a stretch")
     strategic_assessment: str = Field(

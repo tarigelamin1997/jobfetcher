@@ -19,6 +19,7 @@ label only, exactly like the Dissector.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -31,13 +32,39 @@ if TYPE_CHECKING:
     from .ports import LlmClient
     from .profile import Profile
 
+log = logging.getLogger(__name__)
+
+# Tarig's documented 7-factor formula (ADR-0028-to-be — scorer subscores / shadow totals):
+# the weights from the PDF scoring framework, written down in code for the FIRST time.
+# Keys mirror the `ScoreResult` subscore field names exactly (a test pins the
+# correspondence); the LLM's holistic `score` stays the product number (SHADOW mode) —
+# this formula only produces the logged/persisted `code_total` for M7 calibration.
+FACTOR_WEIGHTS: dict[str, float] = {
+    "core_skill_match": 0.30,
+    "tool_tech_alignment": 0.20,
+    "achievement_relevance": 0.15,
+    "seniority_scope": 0.15,
+    "ats_keyword_coverage": 0.10,
+    "domain_sector_fit": 0.05,
+    "realistic_fit": 0.05,
+}
+# Module-load guard: a mis-edited weight table must fail the import, not skew every total.
+assert sum(FACTOR_WEIGHTS.values()) == 1.0, "FACTOR_WEIGHTS must sum to exactly 1.0"
+
+# |LLM holistic - code total| above this logs the shadow line at WARNING (a divergence worth
+# eyeballing), below it at INFO. Observability-only — no behavior changes either way.
+_SHADOW_DELTA_WARN = 20
+
 SCORING_SYSTEM_PROMPT = """\
 You are an expert technical recruiter scoring how well ONE candidate fits ONE job, using an \
 ATS-style 7-factor framework. You are given the job's already-extracted structured fields and \
 the candidate's profile — reason over those; do NOT invent requirements not present in them.
 
 Return ONLY a single JSON object — no prose, no explanation, no markdown fences:
-{"score": <int 0-100>, "strengths": [<short phrase>, ...], "gaps": [<short phrase>, ...], \
+{"score": <int 0-100>, "core_skill_match": <int 0-100>, "tool_tech_alignment": <int 0-100>, \
+"achievement_relevance": <int 0-100>, "seniority_scope": <int 0-100>, \
+"ats_keyword_coverage": <int 0-100>, "domain_sector_fit": <int 0-100>, \
+"realistic_fit": <int 0-100>, "strengths": [<short phrase>, ...], "gaps": [<short phrase>, ...], \
 "strategic_assessment": <2-4 sentence narrative>, "poster_type": "direct employer" | \
 "staffing" | "consulting" | "unknown", "legitimacy_verified": true | false}
 
@@ -49,6 +76,12 @@ Score with these 7 factors (weigh them; the score is your holistic judgment, 0-1
 5. ATS-keyword coverage — would the candidate's profile surface for this posting's keywords?
 6. Domain/sector fit — does the candidate's background suit the company's sector?
 7. Realistic fit — accounting for must-haves vs nice-to-haves, is this a genuine, winnable fit?
+
+Report EACH factor as its own 0-100 subscore under its JSON key above (factor 1 -> \
+"core_skill_match", 2 -> "tool_tech_alignment", 3 -> "achievement_relevance", 4 -> \
+"seniority_scope", 5 -> "ats_keyword_coverage", 6 -> "domain_sector_fit", 7 -> \
+"realistic_fit"); all 7 are required. `score` remains your holistic judgment, not a \
+mechanical average of them.
 
 Rules (accuracy depends on these):
 1. `score` is 0-100. A strong, well-aligned fit scores high (>=60); a clearly-misaligned role \
@@ -63,6 +96,36 @@ a real role; true otherwise. `poster_type` is informational only — it never ch
 
 class ScorerError(Exception):
     """The LLM output could not be parsed/validated into a `ScoreResult` (after one retry)."""
+
+
+def compute_code_total(result: ScoreResult) -> tuple[int | None, str]:
+    """The code-side weighted total over the 7 subscores (`FACTOR_WEIGHTS`) — SHADOW mode
+    (ADR-0028-to-be): computed, logged, and persisted for M7 calibration; NEVER the product
+    number (`result.score`, the LLM's holistic judgment, stays it everywhere).
+
+    Pure and total: all 7 subscores present -> `(round(weighted_sum), "complete")` (Python
+    `round`, i.e. half-to-even — pinned by test); ANY missing/None -> `(None,
+    "subscores_missing")`. Never raises (fail-open, the ERR-006 philosophy) — out-of-range
+    values can't reach here because the Pydantic bounds already rejected them at validation
+    (which surfaces as the existing ScorerError/skip path)."""
+    values = {name: getattr(result, name, None) for name in FACTOR_WEIGHTS}
+    if any(v is None for v in values.values()):
+        return None, "subscores_missing"
+    return round(sum(FACTOR_WEIGHTS[name] * v for name, v in values.items())), "complete"
+
+
+def subscores_payload(result: ScoreResult) -> dict[str, int] | None:
+    """The persisted `subscores` JSONB shape (migration 0006): the 7 factors + `code_total`
+    + `llm_total` (the LLM's holistic score at this write) — what `save_score` stores on
+    `score`/`score_event` for M7 calibration. Returns `None` when the LLM omitted ANY
+    subscore (the column stays NULL — never a partial dict)."""
+    code_total, _status = compute_code_total(result)
+    if code_total is None:
+        return None
+    payload: dict[str, int] = {name: getattr(result, name) for name in FACTOR_WEIGHTS}
+    payload["code_total"] = code_total
+    payload["llm_total"] = result.score
+    return payload
 
 
 def _profile_summary(profile: "Profile") -> str:
@@ -126,7 +189,23 @@ class Scorer:
                 )
             raw = self.llm.complete(system=system, user=user)
             try:
-                return ScoreResult.model_validate(_extract_json(raw))
+                result = ScoreResult.model_validate(_extract_json(raw))
             except (DissectionError, json.JSONDecodeError, ValidationError) as e:
                 last_err = e
+                continue
+            # SHADOW mode (ADR-0028-to-be): the code total is computed + logged after every
+            # validated score, but `result.score` (the LLM holistic) stays the product number.
+            code_total, status = compute_code_total(result)
+            delta = None if code_total is None else code_total - result.score
+            shadow_log = (
+                log.warning if delta is not None and abs(delta) > _SHADOW_DELTA_WARN else log.info
+            )
+            shadow_log(
+                "score shadow: llm=%d code=%s delta=%s status=%s",
+                result.score,
+                code_total,
+                delta,
+                status,
+            )
+            return result
         raise ScorerError(f"no valid score after one retry: {last_err}")

@@ -68,6 +68,12 @@ def test_live_score_is_deterministic(capsys):
     non-deterministic even at temp 0 (MoE routing / FP); a borderline job can occasionally drift
     across the threshold. Precise stability + calibration is deferred to M7 (the score_override
     accuracy loop).
+
+    M7 re-tightening criterion (ADR-0028-to-be, subscore SHADOW mode): once enough subscore
+    shadow data has accumulated (the persisted `subscores` blobs: 7 factors + code_total +
+    llm_total per scoring event), if the observed code-total spread on a repeated JD is <= the
+    near-miss band, this test's tolerance gets re-tightened from "logged, not gated" to a real
+    delta bound. Behavior deliberately unchanged until then.
     """
     jd_text, meta = load_probe("sample_sa.json")
     profile = _sample_profile()
