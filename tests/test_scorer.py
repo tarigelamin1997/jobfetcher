@@ -261,6 +261,15 @@ def test_scorer_logs_shadow_line_info_and_warning(caplog):
     |llm − code| <= 20 (or subscores missing), WARNING when the divergence exceeds 20."""
     import logging
 
+    # Order-independence (belt to the migrations/env.py fix): a programmatic alembic run
+    # earlier in the SAME process (the migration integration tests) used to
+    # fileConfig()-DISABLE every already-imported app logger — a disabled logger emits zero
+    # records and this test would fail only in full-suite ordering. Fixed at the source
+    # (disable_existing_loggers=False); re-enable defensively here so this test never
+    # depends on what earlier tests did to global logging state.
+    logging.getLogger("jobfetcher.core.scorer").disabled = False
+    caplog.set_level(logging.INFO, logger="jobfetcher.core.scorer")
+
     with caplog.at_level(logging.INFO, logger="jobfetcher.core.scorer"):
         Scorer(FakeLlm(_score_json(88, **_subscores(88)))).score(_dissected(), _profile())
     rec = next(r for r in caplog.records if "score shadow" in r.message)
