@@ -254,6 +254,7 @@ class Repository(Protocol):
         profile_hash: str,
         run_id: str | None = None,
         previous_score: int | None = None,
+        subscores: dict[str, Any] | None = None,
     ) -> str:
         """Upsert a `score` row keyed on `cluster_id` (1:1 with cluster). Idempotent —
         re-scoring overwrites; the prior `score` is carried into `previous_score` when one
@@ -262,7 +263,14 @@ class Repository(Protocol):
         and `profile_hash` are required (an event is never written without its provenance),
         `run_id` is the correlation id when the caller has one. A failure of either write
         rolls back both. Returns the `cluster_id`. Raises `RepositoryError` on a backend
-        failure."""
+        failure.
+
+        `subscores` (migration 0006, ADR-0028-to-be) is the per-factor breakdown blob the
+        caller built via `core.scorer.subscores_payload` — `{7 factors, code_total,
+        llm_total}` — written to BOTH the `score` upsert and the `score_event` append (each
+        event self-contained). `None` (the LLM omitted subscores, or a pre-0006 caller)
+        leaves the column NULL — never a partial dict. SHADOW data only: `score` remains
+        the product number."""
         ...
 
     def mark_scored(self, posting_id: str) -> None:

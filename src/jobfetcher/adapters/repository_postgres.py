@@ -382,6 +382,7 @@ class PostgresRepository:
         profile_hash: str,
         run_id: str | None = None,
         previous_score: int | None = None,
+        subscores: dict[str, Any] | None = None,
     ) -> str:
         if not cluster_id:
             raise RepositoryError("save_score requires a non-empty cluster_id")
@@ -408,6 +409,9 @@ class PostgresRepository:
             legitimacy_verified=legitimacy_verified,
             previous_score=previous_score,
             scored_at=text("now()"),
+            # `subscores` (migration 0006): the caller-built blob, or None → SQL NULL — the
+            # column is never a partial dict (subscores_payload guarantees all-or-nothing).
+            subscores=subscores,
         )
         carried_previous = (
             previous_score if previous_score is not None else tables.score.c.score
@@ -424,6 +428,9 @@ class PostgresRepository:
                 "legitimacy_verified": stmt.excluded.legitimacy_verified,
                 "previous_score": carried_previous,
                 "scored_at": stmt.excluded.scored_at,
+                # A re-score REPLACES the blob (even with NULL — a judgment without
+                # subscores must not keep wearing a stale breakdown from the prior one).
+                "subscores": stmt.excluded.subscores,
             },
         )
         # The event's `previous_score` is exactly what THIS call received (an explicit old
@@ -445,6 +452,7 @@ class PostgresRepository:
             scoring_model=scoring_model,
             profile_hash=profile_hash,
             run_id=run_id,
+            subscores=subscores,  # same blob as the upsert — each event self-contained
         )
         try:
             with self.engine.begin() as conn:

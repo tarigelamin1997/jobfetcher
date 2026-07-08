@@ -34,10 +34,12 @@ class _FakeReassessRepo:
 
     def save_score(self, *, cluster_id, score, fit_category, strengths, gaps,
                    strategic_assessment, poster_type, legitimacy_verified,
-                   scoring_model, profile_hash, run_id=None, previous_score=None):
+                   scoring_model, profile_hash, run_id=None, previous_score=None,
+                   subscores=None):
         self.saved[cluster_id] = {
             "score": score, "fit_category": fit_category, "previous_score": previous_score,
             "scoring_model": scoring_model, "profile_hash": profile_hash, "run_id": run_id,
+            "subscores": subscores,
         }
         self.events.append({"cluster_id": cluster_id, **self.saved[cluster_id]})
         return cluster_id
@@ -90,6 +92,12 @@ def test_reassess_graduates_downgrades_and_tracks_previous_score():
     assert grads[0]["old_score"] == 45 and grads[0]["new_score"] == 75
     assert grads[0]["new_category"] == "strong_fit"
 
+    # the delta-distribution keys are present (additive — nothing existing renamed):
+    # |75-45|=30, |40-80|=40, |92-90|=2 → one small delta, two 21+
+    assert report["delta_buckets"] == {"0-5": 1, "6-10": 0, "11-20": 0, "21+": 2}
+    assert report["max_delta"] == 40
+    assert report["mean_delta"] == 24.0  # (30+40+2)/3
+
 
 def test_reassess_never_fetches():
     """The replay guarantee (ADR-0023): reassess must touch NO source/raw-store — a repo that
@@ -141,6 +149,9 @@ def test_reassess_defers_on_expired_deadline():
     assert report == {
         "reassessed": 0, "graduated": 0, "downgraded": 0, "unchanged": 0,
         "failed": 0, "deferred": 3, "graduations": [],
+        # nothing reassessed → an all-zero distribution (honest zeros, keys still present)
+        "delta_buckets": {"0-5": 0, "6-10": 0, "11-20": 0, "21+": 0},
+        "max_delta": 0, "mean_delta": 0.0,
     }
     assert _CountingScorer.calls == 0
     assert repo.saved == {}
@@ -188,6 +199,68 @@ def test_score_then_reassess_appends_two_events():
     assert (first["run_id"], second["run_id"]) == ("r1", "r2")
     # the current-judgment mirror holds ONE entry — the latest
     assert repo.saved["c-1"]["score"] == 75
+
+
+def test_reassess_delta_distribution_bucket_edges_and_mean():
+    """The bucket edges pinned on a crafted delta set: deltas 5, 6, 10, 11, 20, 21 land in
+    0-5 / 6-10 / 6-10 / 11-20 / 11-20 / 21+ respectively (inclusive upper bounds); max=21;
+    mean=(5+6+10+11+20+21)/6=12.1666… → 12.2 (1 decimal)."""
+    targets = [
+        (f"p-{i}", f"c-{i}", _dissected(chr(65 + i)), old, "near_miss")
+        for i, old in enumerate([50, 50, 50, 50, 50, 50])
+    ]
+    # new scores craft |new − old| = 5, 6, 10, 11, 20, 21 (mixing up- and down-moves to
+    # prove the distribution is over ABSOLUTE deltas)
+    new_scores = [55, 44, 60, 39, 70, 29]
+    repo = _FakeReassessRepo(_profile_row(60), targets)
+    report = reassess(run_id="r", repo=repo, profile_hash="ph-unit",
+                      scorer=_scorer_for(new_scores), max_workers=1)
+    assert report["reassessed"] == 6
+    assert report["delta_buckets"] == {"0-5": 1, "6-10": 2, "11-20": 2, "21+": 1}
+    assert report["max_delta"] == 21
+    assert report["mean_delta"] == 12.2
+
+
+def test_reassess_delta_distribution_excludes_failures():
+    """The distribution covers only SUCCESSFUL reassessments: with the middle target failing,
+    its would-be delta never pollutes the buckets/mean (3 targets, 1 failed → 2 deltas)."""
+    class _MiddleBoom:
+        model_id = "test-model"
+
+        def __init__(self):
+            self._n = 0
+
+        def score(self, dissected, profile):
+            self._n += 1
+            from jobfetcher.core.models import ScoreResult
+            from jobfetcher.core.scorer import ScorerError
+            if self._n == 2:
+                raise ScorerError("boom")
+            return ScoreResult.model_validate(json.loads(_score_json(48)))
+
+    # olds 45/80/90; successes score 48 → deltas |48-45|=3 and |48-90|=42 (the failed 80 absent)
+    repo = _FakeReassessRepo(_profile_row(60), _targets())
+    report = reassess(run_id="r", repo=repo, profile_hash="ph-unit",
+                      scorer=_MiddleBoom(), max_workers=1)
+    assert report["failed"] == 1 and report["reassessed"] == 2
+    assert report["delta_buckets"] == {"0-5": 1, "6-10": 0, "11-20": 0, "21+": 1}
+    assert report["max_delta"] == 42
+    assert report["mean_delta"] == 22.5  # (3+42)/2
+
+
+def test_reassess_threads_subscores_into_save_score():
+    """Migration 0006 threading: a reply WITH all 7 subscores → the saved row + appended
+    event carry the blob (7 factors + code_total + llm_total); a reply WITHOUT → None."""
+    from jobfetcher.core.scorer import FACTOR_WEIGHTS
+
+    subs = {name: 70 for name in FACTOR_WEIGHTS}
+    repo = _FakeReassessRepo(_profile_row(60), _targets()[:2])
+    scorer = Scorer(FakeLlm(_score_json(75, **subs), _score_json(80)))
+    reassess(run_id="r", repo=repo, profile_hash="ph-unit", scorer=scorer, max_workers=1)
+    with_subs = repo.saved["c-grad"]["subscores"]
+    assert with_subs == {**subs, "code_total": 70, "llm_total": 75}
+    assert repo.saved["c-drop"]["subscores"] is None  # omitted → NULL, never partial
+    assert [e["subscores"] for e in repo.events] == [with_subs, None]  # events self-contained
 
 
 def test_reassess_passes_max_age_days_through():

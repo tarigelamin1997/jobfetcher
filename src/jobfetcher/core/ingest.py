@@ -22,7 +22,7 @@ from .fingerprint import fingerprint
 from .notifier import render_digest
 from .ports import FilterError, LlmError, NotifierError, RepositoryError
 from .profile import Profile
-from .scorer import ScorerError
+from .scorer import ScorerError, subscores_payload
 
 if TYPE_CHECKING:
     from ..adapters.s3_raw import RawStore
@@ -474,6 +474,10 @@ def score_gold(
                     scoring_model=scorer.model_id,
                     profile_hash=profile_hash,
                     run_id=run_id,
+                    # Migration 0006 (SHADOW): the 7-factor blob + code_total + llm_total,
+                    # or None (→ NULL) when the LLM omitted any subscore. `result.score`
+                    # above stays the product number regardless.
+                    subscores=subscores_payload(result),
                 )
                 repo.mark_scored(posting_id)
                 scored += 1
@@ -524,7 +528,12 @@ def reassess(
     Returns `{reassessed, graduated, downgraded, unchanged, failed, deferred}` plus a
     `graduations` list (`posting_id/title/company/old_score→new_score/old_cat→new_cat`) — a
     **graduation** = a posting that newly reached at/above the threshold (`old < threshold <=
-    new`). The digest of these rides the email-UX unit; here they are reported + persisted."""
+    new`). The digest of these rides the email-UX unit; here they are reported + persisted.
+
+    The report also carries the |new − old| **delta distribution** over the successfully
+    reassessed postings (scoring-stability observability, an M7 input): `delta_buckets`
+    (`{"0-5", "6-10", "11-20", "21+"}` counts), `max_delta`, and `mean_delta` (1 decimal;
+    `0`/`0.0` when nothing was reassessed). Additive — nothing existing renamed."""
     profile, threshold, hard_floor, near_miss_band = _load_profile_and_knobs(repo, user_id)
     targets = repo.get_scored_for_reassess(max_age_days=max_age_days)
 
@@ -535,6 +544,7 @@ def reassess(
     failed = 0
     deferred = 0
     graduations: list[dict[str, Any]] = []
+    deltas: list[int] = []  # |new − old| per successful reassess — the distribution input
 
     def _rescore_task(target: tuple) -> Any:
         posting_id = target[0]
@@ -577,8 +587,12 @@ def reassess(
                     profile_hash=profile_hash,
                     run_id=run_id,
                     previous_score=old_score,
+                    # Migration 0006 (SHADOW): same threading as score_gold — the blob or
+                    # None (→ NULL); the LLM holistic stays the product number.
+                    subscores=subscores_payload(result),
                 )
                 reassessed += 1
+                deltas.append(abs(result.score - old_score))
                 if old_score < threshold <= result.score:  # crossed UP → graduated
                     graduated += 1
                     graduations.append(
@@ -608,6 +622,28 @@ def reassess(
         graduated,
         downgraded,
     )
+    # |new − old| distribution over the successful reassessments (M7 calibration input):
+    # bucket edges are inclusive upper bounds (0-5, 6-10, 11-20, 21+); empty run → all-zero
+    # buckets, max 0, mean 0.0 (honest zeros, not None — the keys are always present).
+    delta_buckets = {"0-5": 0, "6-10": 0, "11-20": 0, "21+": 0}
+    for d in deltas:
+        if d <= 5:
+            delta_buckets["0-5"] += 1
+        elif d <= 10:
+            delta_buckets["6-10"] += 1
+        elif d <= 20:
+            delta_buckets["11-20"] += 1
+        else:
+            delta_buckets["21+"] += 1
+    max_delta = max(deltas) if deltas else 0
+    mean_delta = round(sum(deltas) / len(deltas), 1) if deltas else 0.0
+    log.info(
+        "reassess delta distribution (run_id=%s): buckets=%s max=%d mean=%.1f",
+        run_id,
+        delta_buckets,
+        max_delta,
+        mean_delta,
+    )
     return {
         "reassessed": reassessed,
         "graduated": graduated,
@@ -616,6 +652,9 @@ def reassess(
         "failed": failed,
         "deferred": deferred,
         "graduations": graduations,
+        "delta_buckets": delta_buckets,
+        "max_delta": max_delta,
+        "mean_delta": mean_delta,
     }
 
 

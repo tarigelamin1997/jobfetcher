@@ -8,8 +8,10 @@ failure of the score upsert writes no event (one transaction, never divergent); 
 `COALESCE(posting.fetched_at, bronze.fetched_at)` because `save_posting` leaves
 `posting.fetched_at` NULL, so old bronze → excluded (the bound actually bites), recent →
 included, posting-level timestamp wins, a COALESCE'd-NULL row is ALWAYS included, and
-`max_age_days=0`/`None` = unbounded (the pre-0004 regression guard). SKIPS CLEANLY when no
-Postgres is reachable (same harness as the sibling integration modules)."""
+`max_age_days=0`/`None` = unbounded (the pre-0004 regression guard); (4) the `subscores`
+JSONB (migration 0006) round-trips through both writes, NULL when omitted, and a re-score
+replaces the blob (never a stale breakdown). SKIPS CLEANLY when no Postgres is reachable
+(same harness as the sibling integration modules)."""
 from __future__ import annotations
 
 import os
@@ -161,12 +163,13 @@ def _score_rows(repo, cluster_id: str) -> list[dict]:
 
 
 def _save(repo, cluster_id: str, score: int, *, profile_hash: str, run_id: str,
-          scoring_model: str = "test-model", previous_score: int | None = None) -> None:
+          scoring_model: str = "test-model", previous_score: int | None = None,
+          subscores: dict | None = None) -> None:
     repo.save_score(cluster_id=cluster_id, score=score, fit_category="near_miss",
                     strengths=["python"], gaps=["spark"], strategic_assessment="x",
                     poster_type="direct employer", legitimacy_verified=True,
                     scoring_model=scoring_model, profile_hash=profile_hash,
-                    run_id=run_id, previous_score=previous_score)
+                    run_id=run_id, previous_score=previous_score, subscores=subscores)
 
 
 # --------------------------------------------------------------------------- the append-only log
@@ -188,6 +191,46 @@ def test_three_scorings_three_events_score_holds_current_plus_previous(repo):
     rows = _score_rows(repo, pid)
     assert len(rows) == 1  # the current-judgment table is still 1:1
     assert rows[0]["score"] == 90 and rows[0]["previous_score"] == 70  # only current + previous
+
+
+# --------------------------------------------------------------------------- subscores (0006)
+def test_save_score_persists_subscores_jsonb_on_both_tables(repo):
+    """Migration 0006: the subscores blob (7 factors + code_total + llm_total) round-trips
+    through the `score` upsert AND the appended `score_event` — and a later re-score's blob
+    REPLACES the score row's while the first event keeps its own (self-contained history)."""
+    from jobfetcher.core.scorer import FACTOR_WEIGHTS
+
+    pid = _seed_scored(repo, f"subs-{uuid4().hex[:8]}", score=50)  # seeded WITHOUT subscores
+    blob1 = {**{name: 70 for name in FACTOR_WEIGHTS}, "code_total": 70, "llm_total": 72}
+    blob2 = {**{name: 85 for name in FACTOR_WEIGHTS}, "code_total": 85, "llm_total": 80}
+    _save(repo, pid, 72, profile_hash="ph-2", run_id="r2", previous_score=50, subscores=blob1)
+    _save(repo, pid, 80, profile_hash="ph-3", run_id="r3", previous_score=72, subscores=blob2)
+
+    rows = _score_rows(repo, pid)
+    assert len(rows) == 1
+    assert rows[0]["subscores"] == blob2  # the current judgment wears the LATEST blob
+    assert rows[0]["score"] == 80  # shadow: the LLM total stays the product number
+
+    events = _events(repo, pid)
+    assert [e["subscores"] for e in events] == [None, blob1, blob2]  # each self-contained
+
+
+def test_save_score_leaves_subscores_null_when_omitted(repo):
+    """The negative: a save WITHOUT subscores (LLM omitted them / pre-0006 caller) leaves
+    the column NULL on both tables — and a re-score without a blob REPLACES a prior blob
+    with NULL (a fresh judgment never wears a stale breakdown)."""
+    from jobfetcher.core.scorer import FACTOR_WEIGHTS
+
+    pid = _seed_scored(repo, f"nullsubs-{uuid4().hex[:8]}", score=50)
+    assert _score_rows(repo, pid)[0]["subscores"] is None  # seeded without → NULL
+    assert _events(repo, pid)[0]["subscores"] is None
+
+    blob = {**{name: 60 for name in FACTOR_WEIGHTS}, "code_total": 60, "llm_total": 65}
+    _save(repo, pid, 65, profile_hash="ph-2", run_id="r2", previous_score=50, subscores=blob)
+    assert _score_rows(repo, pid)[0]["subscores"] == blob
+    _save(repo, pid, 55, profile_hash="ph-3", run_id="r3", previous_score=65)  # no blob
+    assert _score_rows(repo, pid)[0]["subscores"] is None  # replaced with NULL, not stale
+    assert [e["subscores"] for e in _events(repo, pid)] == [None, blob, None]
 
 
 # --------------------------------------------------------------------------- atomicity

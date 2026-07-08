@@ -113,6 +113,10 @@ score = Table(
     Column("previous_score", Integer),  # for near-miss re-scoring
     Column("scored_at", _TS),
     Column("score_override", Integer),  # human correction → calibration data
+    # Migration 0006: the 7 per-factor subscores + code_total + llm_total (one JSONB blob,
+    # ADR-0028-to-be) — SHADOW data for M7 calibration; NULL when the LLM omitted subscores
+    # (never a partial dict) and on every pre-0006 row (no backfill).
+    Column("subscores", JSONB),
     # 1:1 with cluster on the natural key — the unique key the upsert conflict-targets.
     UniqueConstraint("cluster_id", name="uq_score_cluster_id"),
 )
@@ -139,6 +143,9 @@ score_event = Table(
     Column("profile_hash", Text, nullable=False),  # provenance: which profile+knobs it scored against
     Column("run_id", Text, index=True),  # correlation id
     Column("scored_at", _TS, nullable=False, server_default=text("now()")),
+    # Migration 0006: the subscores blob as of THIS event (same shape as score.subscores) —
+    # each event stays self-contained; NULL when omitted / pre-0006 (no backfill).
+    Column("subscores", JSONB),
     # No implicit `RETURNING event_id` on INSERT: nothing reads the id back, and this is the
     # schema's first server-generated PK — RETURNING has never been exercised over the Aurora
     # Data API dialect (the ERR-004/005 lesson: dialect divergence only surfaces live).

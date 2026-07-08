@@ -11,7 +11,14 @@ from pydantic import ValidationError
 from jobfetcher.core.ingest import derive_fit_category, score_gold
 from jobfetcher.core.models import DissectedPosting, ScoreResult, Skill
 from jobfetcher.core.profile import Profile
-from jobfetcher.core.scorer import Scorer, ScorerError
+from jobfetcher.core.scorer import (
+    FACTOR_WEIGHTS,
+    SCORING_SYSTEM_PROMPT,
+    Scorer,
+    ScorerError,
+    compute_code_total,
+    subscores_payload,
+)
 from jobfetcher.core.ports import LlmError
 from tests.helpers import FakeLlm
 
@@ -62,6 +69,13 @@ def _score_json(score: int, **over) -> str:
     return json.dumps(payload)
 
 
+def _subscores(value: int = 80, **over) -> dict[str, int]:
+    """All 7 subscore keys at `value` (uniform → the weighted total is exactly `value`)."""
+    subs = {name: value for name in FACTOR_WEIGHTS}
+    subs.update(over)
+    return subs
+
+
 # --------------------------------------------------------------------------- ScoreResult contract
 def test_score_result_happy():
     r = ScoreResult.model_validate(json.loads(_score_json(82)))
@@ -85,6 +99,97 @@ def test_score_result_rejects_missing_required_field():
 def test_score_result_tolerates_extra_keys():
     r = ScoreResult.model_validate({**json.loads(_score_json(60)), "chatter": "ignored"})
     assert r.score == 60
+
+
+def test_score_result_accepts_all_seven_subscores():
+    r = ScoreResult.model_validate(json.loads(_score_json(82, **_subscores(75))))
+    assert all(getattr(r, name) == 75 for name in FACTOR_WEIGHTS)
+    assert r.score == 82  # the holistic stays independent of the subscores
+
+
+def test_score_result_subscores_default_to_none():
+    # regression: a pre-subscore reply (no subscore keys at all) still validates — optional.
+    r = ScoreResult.model_validate(json.loads(_score_json(70)))
+    assert all(getattr(r, name) is None for name in FACTOR_WEIGHTS)
+
+
+@pytest.mark.parametrize("bad_value", [-1, 101])
+@pytest.mark.parametrize("field", sorted(FACTOR_WEIGHTS))
+def test_score_result_rejects_out_of_range_subscore(field, bad_value):
+    # negative: ANY subscore out of 0-100 → ValidationError (the existing ScorerError/skip
+    # path downstream) — bounds are enforced at validation, compute_code_total never re-checks.
+    bad = json.loads(_score_json(70, **_subscores(80, **{field: bad_value})))
+    with pytest.raises(ValidationError):
+        ScoreResult.model_validate(bad)
+
+
+# --------------------------------------------------------------------------- compute_code_total
+def test_factor_weights_sum_to_exactly_one_and_mirror_the_model():
+    """The module-load assertion's invariant, pinned: the documented weights (ADR-0028-to-be)
+    sum to exactly 1.0, and every weight key is a real `ScoreResult` subscore field."""
+    assert sum(FACTOR_WEIGHTS.values()) == 1.0
+    assert set(FACTOR_WEIGHTS) == {
+        "core_skill_match", "tool_tech_alignment", "achievement_relevance",
+        "seniority_scope", "ats_keyword_coverage", "domain_sector_fit", "realistic_fit",
+    }
+    for name in FACTOR_WEIGHTS:
+        assert name in ScoreResult.model_fields
+
+
+def test_compute_code_total_exact_weighted_sum():
+    """Hand-computed: .30*85 + .20*90 + .15*77 + .15*63 + .10*52 + .05*41 + .05*33
+    = 25.5 + 18 + 11.55 + 9.45 + 5.2 + 2.05 + 1.65 = 73.4 → rounds to 73."""
+    r = ScoreResult.model_validate(json.loads(_score_json(
+        70,
+        core_skill_match=85, tool_tech_alignment=90, achievement_relevance=77,
+        seniority_scope=63, ats_keyword_coverage=52, domain_sector_fit=41, realistic_fit=33,
+    )))
+    assert compute_code_total(r) == (73, "complete")
+
+
+def test_compute_code_total_rounding_rule_is_pinned_half_to_even():
+    """Python `round` = banker's rounding, pinned in BOTH directions: a weighted sum of
+    73.5 → 74 (up to even) and 72.5 → 72 (down to even). Hand-computed:
+    73.5 = 27 + 16 + 10.5 + 10.5 + 5 + 2 + 2.5 ; 72.5 = 27 + 16 + 10.5 + 9 + 5 + 2 + 3."""
+    up = ScoreResult.model_validate(json.loads(_score_json(
+        70,
+        core_skill_match=90, tool_tech_alignment=80, achievement_relevance=70,
+        seniority_scope=70, ats_keyword_coverage=50, domain_sector_fit=40, realistic_fit=50,
+    )))
+    assert compute_code_total(up) == (74, "complete")
+    down = ScoreResult.model_validate(json.loads(_score_json(
+        70,
+        core_skill_match=90, tool_tech_alignment=80, achievement_relevance=70,
+        seniority_scope=60, ats_keyword_coverage=50, domain_sector_fit=40, realistic_fit=60,
+    )))
+    assert compute_code_total(down) == (72, "complete")
+
+
+@pytest.mark.parametrize("missing", sorted(FACTOR_WEIGHTS))
+def test_compute_code_total_any_missing_subscore_fails_open(missing):
+    # negative: ANY single missing subscore → (None, "subscores_missing"), never a raise.
+    subs = _subscores(80)
+    del subs[missing]
+    r = ScoreResult.model_validate(json.loads(_score_json(70, **subs)))
+    assert compute_code_total(r) == (None, "subscores_missing")
+
+
+def test_compute_code_total_all_missing_fails_open():
+    r = ScoreResult.model_validate(json.loads(_score_json(70)))
+    assert compute_code_total(r) == (None, "subscores_missing")
+
+
+def test_subscores_payload_full_and_missing():
+    """The persisted JSONB shape: the 7 factors + code_total + llm_total when complete;
+    None (→ SQL NULL, never a partial dict) when ANY subscore was omitted."""
+    full = ScoreResult.model_validate(json.loads(_score_json(70, **_subscores(90))))
+    payload = subscores_payload(full)
+    assert payload == {**_subscores(90), "code_total": 90, "llm_total": 70}
+
+    partial = _subscores(90)
+    del partial["realistic_fit"]
+    r = ScoreResult.model_validate(json.loads(_score_json(70, **partial)))
+    assert subscores_payload(r) is None
 
 
 # --------------------------------------------------------------------------- Scorer
@@ -127,6 +232,57 @@ def test_scorer_prompt_includes_profile_and_dissected_fields():
     # the 7-factor framework + JSON-only contract is in the system prompt
     assert "7-factor" in system or "Core-skill match" in system
     assert "legitimacy_verified" in system
+
+
+def test_prompt_regression_all_output_fields_present():
+    """Prompt regression (cheap string asserts): the system prompt still requires every
+    pre-existing output field AND the 7 new subscore keys — extending for subscores must
+    never drop an existing instruction/field."""
+    for pre_existing in (
+        '"score"', '"strengths"', '"gaps"', '"strategic_assessment"',
+        '"poster_type"', '"legitimacy_verified"',
+    ):
+        assert pre_existing in SCORING_SYSTEM_PROMPT
+    for subscore_key in FACTOR_WEIGHTS:  # the 7 new keys, each named in the JSON contract
+        assert f'"{subscore_key}"' in SCORING_SYSTEM_PROMPT
+    # the factor descriptions (the definition of each subscore) survived too
+    for factor_phrase in (
+        "Core-skill match", "Tool/tech alignment", "Achievement relevance",
+        "Seniority/scope", "ATS-keyword coverage", "Domain/sector fit", "Realistic fit",
+    ):
+        assert factor_phrase in SCORING_SYSTEM_PROMPT
+    # and the JSON-only + holistic-judgment instructions are intact
+    assert "Return ONLY a single JSON object" in SCORING_SYSTEM_PROMPT
+    assert "holistic judgment" in SCORING_SYSTEM_PROMPT
+
+
+def test_scorer_logs_shadow_line_info_and_warning(caplog):
+    """SHADOW mode observability: every validated score logs `score shadow:` — INFO when
+    |llm − code| <= 20 (or subscores missing), WARNING when the divergence exceeds 20."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="jobfetcher.core.scorer"):
+        Scorer(FakeLlm(_score_json(88, **_subscores(88)))).score(_dissected(), _profile())
+    rec = next(r for r in caplog.records if "score shadow" in r.message)
+    assert rec.levelno == logging.INFO
+    assert "llm=88" in rec.getMessage() and "code=88" in rec.getMessage()
+    assert "status=complete" in rec.getMessage()
+
+    caplog.clear()
+    # llm=50 vs code=90 → |delta|=40 > 20 → the WARNING variant
+    with caplog.at_level(logging.INFO, logger="jobfetcher.core.scorer"):
+        Scorer(FakeLlm(_score_json(50, **_subscores(90)))).score(_dissected(), _profile())
+    rec = next(r for r in caplog.records if "score shadow" in r.message)
+    assert rec.levelno == logging.WARNING
+    assert "delta=40" in rec.getMessage()
+
+    caplog.clear()
+    # no subscores → INFO with code=None / status=subscores_missing (never a raise/skip)
+    with caplog.at_level(logging.INFO, logger="jobfetcher.core.scorer"):
+        Scorer(FakeLlm(_score_json(70))).score(_dissected(), _profile())
+    rec = next(r for r in caplog.records if "score shadow" in r.message)
+    assert rec.levelno == logging.INFO
+    assert "code=None" in rec.getMessage() and "status=subscores_missing" in rec.getMessage()
 
 
 # --------------------------------------------------------------------------- VG2 (behavioral)
@@ -193,10 +349,12 @@ class _FakeScoreRepo:
 
     def save_score(self, *, cluster_id, score, fit_category, strengths, gaps,
                    strategic_assessment, poster_type, legitimacy_verified,
-                   scoring_model, profile_hash, run_id=None, previous_score=None):
+                   scoring_model, profile_hash, run_id=None, previous_score=None,
+                   subscores=None):
         self.saved[cluster_id] = {
             "score": score, "fit_category": fit_category,
             "scoring_model": scoring_model, "profile_hash": profile_hash, "run_id": run_id,
+            "subscores": subscores,
         }
         return cluster_id
 
@@ -332,6 +490,31 @@ def test_score_gold_threads_lineage_into_save_score():
         and v["run_id"] == "run-lineage"
         for v in repo.saved.values()
     )
+
+
+def test_shadow_invariant_llm_score_is_persisted_untouched():
+    """THE shadow invariant (ADR-0028-to-be): llm=70 with subscores computing code=90 →
+    the persisted score is 70 (the LLM holistic, the product number) — code_total rides
+    along ONLY inside the subscores blob, never substituted."""
+    repo = _FakeScoreRepo(_profile_row(60), _candidates()[:1], None)
+    scorer = Scorer(FakeLlm(_score_json(70, **_subscores(90))))
+    summary = score_gold(run_id="r", repo=repo, profile_hash="ph", scorer=scorer, max_workers=1)
+    saved = repo.saved["c-low"]
+    assert saved["score"] == 70  # NOT 90 — shadow mode never touches the product number
+    assert saved["subscores"]["code_total"] == 90
+    assert saved["subscores"]["llm_total"] == 70
+    assert saved["fit_category"] == "strong_fit"  # banding runs on the LLM 70, not code 90
+    assert summary["surfaced"] == 1  # and so does the threshold cut
+
+
+def test_score_gold_persists_null_subscores_when_llm_omits_them():
+    # negative twin: a reply without subscores → subscores=None reaches save_score (NULL
+    # column), while the score itself still persists normally.
+    repo = _FakeScoreRepo(_profile_row(60), _candidates()[:1], None)
+    score_gold(run_id="r", repo=repo, profile_hash="ph",
+               scorer=_scorer_for([70]), max_workers=1)
+    assert repo.saved["c-low"]["score"] == 70
+    assert repo.saved["c-low"]["subscores"] is None
 
 
 def test_score_gold_lineage_differs_when_inputs_differ():
