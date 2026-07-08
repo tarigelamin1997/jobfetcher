@@ -31,6 +31,8 @@ import uuid
 from datetime import date, datetime, timezone
 from typing import Any
 
+from sqlalchemy import text
+
 from ..adapters.filter_deterministic import DeterministicFilterStrategy
 from ..adapters.jsearch_source import JSearchSourceAdapter
 from ..adapters.llm_openai import OpenAICompatLlmClient
@@ -74,6 +76,12 @@ _DB_NAME_ENV = "DB_NAME"
 _RECIPIENT_ENV = "RECIPIENT_EMAIL"
 _MAX_WORKERS_ENV = "PIPELINE_MAX_WORKERS"
 _GOLD_FILTER_ENV = "GOLD_FILTER_STRATEGY"
+_ALEMBIC_HEAD_ENV = "ALEMBIC_HEAD"
+
+# The alembic head THIS code was written against — the smoke gate's fallback expectation when
+# $ALEMBIC_HEAD is unset. Update per migration (terraform/lambda.tf pins the deployed value);
+# the unit test cross-checks it against migrations/versions/ so it can't silently go stale.
+_EXPECTED_MIGRATION_HEAD = "0006_subscores"
 
 # Seconds reserved before the Lambda's hard timeout: in-flight LLM calls + the tail of DB
 # writes + notify must finish inside this margin (H-2 deadline guard).
@@ -118,10 +126,19 @@ def resolve_run_id(event: dict[str, Any] | None) -> str:
 def resolve_mode(event: dict[str, Any] | None) -> str:
     """The run mode (ADR-0023): `event['mode']` lowercased, else `""` (the normal
     fetch→gold→score→notify pipeline). `"reassess"` = replay scoring over existing scored
-    postings against the current profile, no fetch. Pure."""
+    postings against the current profile, no fetch. `"smoke"` = the post-deploy gate: DB
+    reachability + migration-head check only, zero side effects. Pure."""
     if event and isinstance(event.get("mode"), str):
         return event["mode"].strip().lower()
     return ""
+
+
+def resolve_expected_migration_head(env: dict[str, str]) -> str:
+    """The alembic head the deployed code EXPECTS the database to be at: `$ALEMBIC_HEAD`
+    (pinned by terraform/lambda.tf, updated per migration) or the hardcoded head this code
+    was built against. The `{"mode":"smoke"}` gate compares the live `alembic_version` to
+    this — a deploy against an unmigrated DB fails loudly instead of at the first write. Pure."""
+    return (env.get(_ALEMBIC_HEAD_ENV) or "").strip() or _EXPECTED_MIGRATION_HEAD
 
 
 def resolve_run_date(event: dict[str, Any] | None) -> date:
@@ -223,6 +240,42 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
 
     try:
         env = dict(os.environ)
+
+        # --- smoke mode (deploy gate): prove the Lambda reaches the DB AND the schema is at
+        # the head this code expects — with ZERO side effects. Runs BEFORE any config read or
+        # adapter construction, so it touches env + the repo engine ONLY: no S3, no LLM/source/
+        # notifier clients, no writes, nothing sent. Post-`terraform apply` one-liner:
+        # docs/runbooks/deploy.md §2. Inside this try deliberately — a connection failure
+        # surfaces as the standard 500 below. ---
+        if mode == "smoke":
+            repo = PostgresRepository(resolve_db_url(env))
+            expected = resolve_expected_migration_head(env)
+            with repo.engine.connect() as conn:
+                # alembic_version is a single-row, single-column table — no ORDER BY exists.
+                actual = conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalar_one()
+            if actual != expected:
+                rlog.error("mode=smoke migration mismatch: db=%s expected=%s", actual, expected)
+                return {
+                    "statusCode": 400,
+                    "run_id": run_id,
+                    "run_date": run_date.isoformat(),
+                    "mode": "smoke",
+                    "error": (
+                        f"migration mismatch: DB is at {actual!r} but this code expects "
+                        f"{expected!r} — run `alembic upgrade head` (or fix $ALEMBIC_HEAD)"
+                    ),
+                }
+            rlog.info("mode=smoke ok — alembic_version=%s", actual)
+            return {
+                "statusCode": 200,
+                "run_id": run_id,
+                "run_date": run_date.isoformat(),
+                "mode": "smoke",
+                "alembic_version": actual,
+            }
+
         # Config is read at RUNTIME from its location (an s3://bucket/key URI in deployment, a
         # local path in tests/dev) — ADR-0022. Not bundled in the zip, so editing a setting +
         # `scripts/push_config.py` takes effect on the next run with no rebuild/redeploy.
