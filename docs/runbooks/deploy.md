@@ -27,8 +27,8 @@ AWS_MAX_ATTEMPTS=1 aws lambda invoke --function-name jobfetcher-dev-pipeline \
 ```
 
 - **PASS:** `{"statusCode": 200, "mode": "smoke", "alembic_version": "0006_subscores", ...}` — the version must equal the `ALEMBIC_HEAD` env var terraform pinned (update both per migration: `lambda.tf` + `_EXPECTED_MIGRATION_HEAD` in `handlers/pipeline.py`; a unit test catches a stale constant).
-- **400** (`migration mismatch`): the DB isn't at the expected head → `alembic upgrade head`, re-invoke.
-- **500:** the Lambda can't reach the DB (Aurora paused + timeout, IAM, ARNs) — a config/infra problem, not a schema one.
+- **400** (`migration mismatch`): the DB is migrated, but to the **wrong head** → `alembic upgrade head`, re-invoke.
+- **500:** the Lambda can't reach the DB (Aurora paused + timeout, IAM, ARNs) — **or** the DB is reachable but was **never migrated at all** (missing/empty `alembic_version` table makes the SELECT itself fail). The `error` field tells them apart: an `UndefinedTable`/`NoResultFound` = run the first `alembic upgrade head`; a connect/timeout error = infra.
 - `AWS_MAX_ATTEMPTS=1` + `--cli-read-timeout 120` per the *invocation pattern* registry row (ERR-008: the CLI silently re-invokes slow sync calls); the smoke itself is one `SELECT`, but a scale-to-0 Aurora resume can take ~30 s.
 
 ## 3 · ONE-TIME state migration (local → S3) — human-present
