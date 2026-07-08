@@ -110,6 +110,18 @@
 - **Blast radius:** wasted JSearch quota (a scarce free-tier resource) + LLM tokens per retry; no data corruption (idempotent upserts + `already`-skip + the `run_log` send-once guard meant even overlapping runs produced one email).
 - **Prevention implemented?** Yes — `maximum_retry_attempts=0` in Terraform + the deadline guard (v0.2.0 / [ADR-0021](../adr/0021-m1-pipeline-hardening.md)).
 
+### ERR-008 — AWS CLI client-side retry re-invoked a long synchronous reassess (~3× token spend)   [Resolved]
+- Stage: v0.7.0 release live smoke (reassess invoke) · Layer: client tooling / invocation pattern · Type: client default mismatched to a long synchronous call (ERR-007's client-side twin)
+- Discovered: 2026-07-08 · Resolved: 2026-07-08 (procedure) · Source: CloudWatch (extra full runs) + `score_event` counts (771 ≈ 3 × 228 — the lineage log itself exposed the duplicates)
+
+1. **What happened?** A synchronous (`RequestResponse`) `aws lambda invoke` of `{"mode":"reassess"}` timed out **client-side**; the CLI's default retry re-sent the request, spawning additional full runs — the DB showed ~3 passes' worth of `score_event` rows (771 for ~228 postings) where one was intended.
+2. **Why?** botocore's standard retry mode treats a slow response as retryable, and an 11–12-minute Lambda response exceeds the client read timeout. **`maximum_retry_attempts=0` (ERR-007's fix) governs *async* invokes only** — it cannot stop the *client* from retrying a synchronous call.
+3. **How?** Long LLM batch + synchronous invocation + default client retry policy. Idempotency held throughout (append-only events, idempotent upserts, send-once guard) — the cost was duplicate LLM spend and `previous_score` churn, not corruption.
+4. **How fixed?** Procedure: long-running invokes go **async** (`--invocation-type Event`, protected by the server-side retry-0) or, if synchronous, with the client retry disabled (`AWS_MAX_ATTEMPTS=1`) + an adequate `--cli-read-timeout`. Registered in the [procedure registry](procedure-registry.md).
+5. **Prevention + Detection:** procedure-registry entry (invocation pattern per job shape). **Detection:** `score_event` counts per `run_id` — Run 1's lineage log is what made the duplicates visible at all. **Lesson:** retry policies exist on **both** sides of an invocation; each must be matched to the job's shape (the server side was fixed in ERR-007; the client side is this entry).
+- **Blast radius:** ~2 extra reassess passes of pro-model tokens (DeepSeek ≈ pennies) + benign `previous_score` churn; zero corruption.
+- **Prevention implemented?** Procedure now; a `scripts/invoke.py` wrapper that encodes the right pattern is a Run-5 (ops hardening) candidate.
+
 | ID | Severity | Stage | Symptom | Status |
 |---|---|---|---|---|
 | ERR-001 | Critical | pre-build (Bedrock) | base-id ValidationException + new-account daily token quota = 0 (non-adjustable) | **Mitigated** — routed around via DeepSeek / OpenAI-compatible ([ADR-0017]); quota still 0 but no longer blocking; AWS case `178220019100382` open (optional) |
@@ -117,3 +129,6 @@
 | ERR-003 | Info | dev-infra (PR hygiene) | GitGuardian generic-password on a local-dev literal | **Resolved** (false positive) — env-interpolated `${POSTGRES_PASSWORD}` |
 | ERR-004 | High | Step 10 deploy (Alembic over Data API) | `configparser` `%`-interpolation choked on `%`-encoded ARNs in the Data-API URL | **Resolved** — escape `%`→`%%` in `migrations/env.py`; caught only by the live deploy (no Data-API test) |
 | ERR-005 | High | Step 10 deploy (Lambda DB connect) | `connect() got an unexpected keyword argument 'cluster_arn'` (dialect wants `aurora_cluster_arn`) | **Resolved** — renamed kwarg in `handlers/pipeline.py`; would have broken every deploy; caught only by the live run |
+| ERR-006 | High | M1 live run (LLM transport) | one transient DeepSeek `503` aborted the whole run (no retry; asymmetric isolation) | **Resolved** — retry+jitter on transients + symmetric per-posting isolation (v0.2.0 / ADR-0021) |
+| ERR-007 | High | M1 live run (async invoke) | AWS async auto-retry re-ran a timed-out sweep (quota + token burn) | **Resolved** — `maximum_retry_attempts=0` in Terraform + the deadline guard (v0.2.0 / ADR-0021) |
+| ERR-008 | Medium | v0.7.0 live smoke (sync invoke) | AWS **CLI client-side** retry re-invoked a long synchronous reassess → ~3× LLM spend | **Resolved** (procedure) — long invokes go async or with `AWS_MAX_ATTEMPTS=1`; `scripts/invoke.py` wrapper = Run-5 candidate |
