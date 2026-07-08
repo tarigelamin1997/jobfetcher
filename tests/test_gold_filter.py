@@ -30,7 +30,7 @@ def _spec(titles=None, countries=None, cities=None) -> SearchSpec:
             },
             "date_posted": "week", "language": "en", "employment_types": [],
             "remote": "off", "threshold": 60, "hard_floor": 50, "near_miss_band": 10,
-            "reassess_max_age_days": 45,
+            "reassess_max_age_days": 45, "digest_max_age_days": 90,
             "budget": {"max_pages_per_query": 1, "request_budget_per_run": 10},
         }
     )

@@ -627,6 +627,7 @@ def notify(
     recipient_email: str,
     user_id: str = DEFAULT_USER_ID,
     run_date: date | None = None,
+    max_age_days: int | None = None,
 ) -> dict[str, int]:
     """Step-6 notification: load the profile (its **runtime** threshold) → read the scored
     shortlist (surfaced + below count) → render the daily digest → send it.
@@ -635,9 +636,18 @@ def notify(
     used — and a NULL falls back to the documented default. The recipient is the caller's arg
     (the Step-7 handler passes `$RECIPIENT_EMAIL`), not hardcoded.
 
+    **Digest truthfulness:** `since` = `repo.get_last_digest_sent_at(user_id)` — when the last
+    digest actually went out (`MAX(run_log.digest_sent_at)`; no rows ⇒ `None` ⇒ the first-ever
+    digest, everything is new). The renderer splits the shortlist into "new since last digest"
+    vs "still open" from each item's `scored_at` vs `since` (fresh judgment) + its
+    `previous_score` (first scoring / graduation — pure functions in `core/notifier.py`).
+    `max_age_days` (the handler threads `spec.digest_max_age_days`) drops still-open matches
+    older than N days from the digest entirely — `None`/`0` = keep forever.
+
     **A send failure is LOUD** (re-raised): email is the v0 surface, so a failed send is a
     failed run, never a silent skip. **Zero surfaced matches still sends** a valid "no matches
-    today" email (VG5 negative) — the digest renderer handles the empty case, not the caller.
+    today" email (VG5 negative) — the digest renderer handles the empty case, not the caller
+    (and a zero-NEW day sends an honest "no new matches since {date}" email).
 
     Returns `{surfaced, below_threshold, sent}` (`sent` is 1 — a send failure raises before
     we get here)."""
@@ -651,9 +661,12 @@ def notify(
     # `notify()` is the SINGLE threshold authority (VG8): it resolves the runtime threshold
     # (DB row → documented default) and passes it down, so the surfaced/below split is computed
     # against the one config knob — the Repository no longer re-derives its own constant.
-    items, below = repo.get_scored_shortlist(threshold=threshold)
+    since = repo.get_last_digest_sent_at(user_id=user_id)
+    items, below = repo.get_scored_shortlist(
+        threshold=threshold, since=since, max_age_days=max_age_days
+    )
     subject, html_body, text_body = render_digest(
-        items, below, threshold=threshold, date=run_date or date.today()
+        items, below, threshold=threshold, date=run_date or date.today(), since=since
     )
     # A send failure propagates (NotifierError) — the v0 surface is the email; a failed send is
     # a failed run, not a swallowed warning (mirrors the loud DB-failure stance in score_gold).

@@ -174,6 +174,7 @@ def _write_config(tmp_path: Path, *, threshold: int = 60) -> tuple[str, str]:
         "hard_floor: 50\n"
         "near_miss_band: 10\n"
         "reassess_max_age_days: 45\n"
+        "digest_max_age_days: 90\n"
         "budget:\n"
         "  max_pages_per_query: 1\n"
         "  request_budget_per_run: 5\n",

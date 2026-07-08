@@ -53,6 +53,11 @@ near_miss_band: 10               # how far below threshold still counts as "almo
 # so replaying it forever just burns LLM tokens. 0 = no cutoff (replay everything). 0..365.
 reassess_max_age_days: 45              # recommended: 45
 
+# ── Digest age bound (the daily email) ─────────────────────────────────────
+# Still-open matches older than this drop out of the digest — an old posting is likely
+# filled, so the email stops resurfacing it forever. 0 = keep forever (no age cutoff). 0..365.
+digest_max_age_days: 90                # recommended: 90
+
 # ── Request-budget guardrails (free Basic = 200 req/mo) ──────────────────
 budget:
   max_pages_per_query: 5         # ~10 results/page, ~1 request/page

@@ -348,6 +348,9 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 recipient_email=recipient,
                 user_id=user_id,
                 run_date=run_date,
+                # Digest truthfulness: still-open matches older than this drop out of the
+                # digest (0 = keep forever) — the user knob, threaded like every other spec knob.
+                max_age_days=spec.digest_max_age_days,
             )
             # Mark sent ONLY after a successful send (notify raises on a failed send, so we never
             # get here on failure — the guard is not written, the next run re-sends).
