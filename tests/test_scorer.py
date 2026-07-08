@@ -277,6 +277,22 @@ def test_scorer_logs_shadow_line_info_and_warning(caplog):
     assert "delta=40" in rec.getMessage()
 
     caplog.clear()
+    # the boundary pinned, both edges: |delta| == 20 is NOT a warning (the rule is strictly
+    # "> 20"), |delta| == 21 is — llm=70/code=90 vs llm=69/code=90.
+    with caplog.at_level(logging.INFO, logger="jobfetcher.core.scorer"):
+        Scorer(FakeLlm(_score_json(70, **_subscores(90)))).score(_dissected(), _profile())
+    rec = next(r for r in caplog.records if "score shadow" in r.message)
+    assert rec.levelno == logging.INFO
+    assert "delta=20" in rec.getMessage()
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="jobfetcher.core.scorer"):
+        Scorer(FakeLlm(_score_json(69, **_subscores(90)))).score(_dissected(), _profile())
+    rec = next(r for r in caplog.records if "score shadow" in r.message)
+    assert rec.levelno == logging.WARNING
+    assert "delta=21" in rec.getMessage()
+
+    caplog.clear()
     # no subscores → INFO with code=None / status=subscores_missing (never a raise/skip)
     with caplog.at_level(logging.INFO, logger="jobfetcher.core.scorer"):
         Scorer(FakeLlm(_score_json(70))).score(_dissected(), _profile())
@@ -493,18 +509,21 @@ def test_score_gold_threads_lineage_into_save_score():
 
 
 def test_shadow_invariant_llm_score_is_persisted_untouched():
-    """THE shadow invariant (ADR-0028-to-be): llm=70 with subscores computing code=90 →
-    the persisted score is 70 (the LLM holistic, the product number) — code_total rides
-    along ONLY inside the subscores blob, never substituted."""
+    """THE shadow invariant (ADR-0028-to-be): llm=55 with subscores computing code=90 —
+    values chosen so llm and code land in DIFFERENT bands AND on different sides of the
+    threshold (60, band 10), so ALL THREE assertions discriminate a code_total leak on
+    every consumer path: persisted score 55 (not 90), fit_category near_miss (code 90
+    would be strong_fit), surfaced 0 (code 90 would clear the cut). code_total rides
+    ONLY inside the subscores blob, never substituted."""
     repo = _FakeScoreRepo(_profile_row(60), _candidates()[:1], None)
-    scorer = Scorer(FakeLlm(_score_json(70, **_subscores(90))))
+    scorer = Scorer(FakeLlm(_score_json(55, **_subscores(90))))
     summary = score_gold(run_id="r", repo=repo, profile_hash="ph", scorer=scorer, max_workers=1)
     saved = repo.saved["c-low"]
-    assert saved["score"] == 70  # NOT 90 — shadow mode never touches the product number
+    assert saved["score"] == 55  # NOT 90 — shadow mode never touches the product number
     assert saved["subscores"]["code_total"] == 90
-    assert saved["subscores"]["llm_total"] == 70
-    assert saved["fit_category"] == "strong_fit"  # banding runs on the LLM 70, not code 90
-    assert summary["surfaced"] == 1  # and so does the threshold cut
+    assert saved["subscores"]["llm_total"] == 55
+    assert saved["fit_category"] == "near_miss"  # banding ran on llm 55 — code 90 → strong_fit
+    assert summary["surfaced"] == 0  # threshold cut ran on llm 55 — code 90 would surface
 
 
 def test_score_gold_persists_null_subscores_when_llm_omits_them():
