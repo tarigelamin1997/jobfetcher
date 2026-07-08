@@ -120,7 +120,7 @@
 4. **How fixed?** Procedure: long-running invokes go **async** (`--invocation-type Event`, protected by the server-side retry-0) or, if synchronous, with the client retry disabled (`AWS_MAX_ATTEMPTS=1`) + an adequate `--cli-read-timeout`. Registered in the [procedure registry](procedure-registry.md).
 5. **Prevention + Detection:** procedure-registry entry (invocation pattern per job shape). **Detection:** `score_event` counts per `run_id` — Run 1's lineage log is what made the duplicates visible at all. **Lesson:** retry policies exist on **both** sides of an invocation; each must be matched to the job's shape (the server side was fixed in ERR-007; the client side is this entry).
 - **Blast radius:** ~2 extra reassess passes of pro-model tokens (DeepSeek ≈ pennies) + benign `previous_score` churn; zero corruption.
-- **Prevention implemented?** Procedure now; a `scripts/invoke.py` wrapper that encodes the right pattern is a Run-5 (ops hardening) candidate.
+- **Prevention implemented?** Yes — procedure (the *invocation pattern per job shape* [registry row](procedure-registry.md)). **Run-5 decision (2026-07-08, [ADR-0029](../adr/0029-ops-hardening.md)): procedure-only** — the pattern is encoded in the [deploy runbook](../runbooks/deploy.md) §2 one-liner (`AWS_MAX_ATTEMPTS=1` + `--cli-read-timeout`); the once-mooted `scripts/invoke.py` wrapper was **explicitly decided against**, deferred until real ops friction demands it.
 
 | ID | Severity | Stage | Symptom | Status |
 |---|---|---|---|---|
@@ -131,4 +131,4 @@
 | ERR-005 | High | Step 10 deploy (Lambda DB connect) | `connect() got an unexpected keyword argument 'cluster_arn'` (dialect wants `aurora_cluster_arn`) | **Resolved** — renamed kwarg in `handlers/pipeline.py`; would have broken every deploy; caught only by the live run |
 | ERR-006 | High | M1 live run (LLM transport) | one transient DeepSeek `503` aborted the whole run (no retry; asymmetric isolation) | **Resolved** — retry+jitter on transients + symmetric per-posting isolation (v0.2.0 / ADR-0021) |
 | ERR-007 | High | M1 live run (async invoke) | AWS async auto-retry re-ran a timed-out sweep (quota + token burn) | **Resolved** — `maximum_retry_attempts=0` in Terraform + the deadline guard (v0.2.0 / ADR-0021) |
-| ERR-008 | Medium | v0.7.0 live smoke (sync invoke) | AWS **CLI client-side** retry re-invoked a long synchronous reassess → ~3× LLM spend | **Resolved** (procedure) — long invokes go async or with `AWS_MAX_ATTEMPTS=1`; `scripts/invoke.py` wrapper = Run-5 candidate |
+| ERR-008 | Medium | v0.7.0 live smoke (sync invoke) | AWS **CLI client-side** retry re-invoked a long synchronous reassess → ~3× LLM spend | **Resolved** (procedure) — long invokes go async or with `AWS_MAX_ATTEMPTS=1`; Run-5 decision: **procedure-only** ([runbook](../runbooks/deploy.md) §2 encodes the pattern; the `invoke.py` wrapper deferred until ops friction demands it — [ADR-0029](../adr/0029-ops-hardening.md)) |
