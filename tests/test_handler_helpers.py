@@ -4,6 +4,7 @@ env-driven branches are exercised with a plain dict so the wiring is provable wi
 integration run."""
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timezone
 
 import pytest
@@ -13,6 +14,7 @@ from jobfetcher.handlers.pipeline import (
     _DEFAULT_SEARCH_CONFIG_PATH,
     _EXPECTED_MIGRATION_HEAD,
     compute_profile_hash,
+    configure_log_level,
     resolve_db_url,
     resolve_deadline,
     resolve_expected_migration_head,
@@ -223,6 +225,40 @@ def test_resolve_filter_strategy_rejects_junk():
 
     with pytest.raises(ValueError, match="GOLD_FILTER_STRATEGY"):
         resolve_filter_strategy({"GOLD_FILTER_STRATEGY": "fuzzy"})
+
+
+# --------------------------------------------------------------------------- log level (ERR-009 rider)
+@pytest.fixture
+def pkg_logger():
+    """The `jobfetcher` package logger, level restored after the test (no cross-test bleed)."""
+    logger = logging.getLogger("jobfetcher")
+    before = logger.level
+    yield logger
+    logger.setLevel(before)
+
+
+def test_configure_log_level_defaults_to_info(pkg_logger):
+    # Lambda's root logger sits at WARNING; with no package level set, ALL INFO telemetry was
+    # invisible in CloudWatch — the default must be an explicit INFO on the package logger.
+    assert configure_log_level({}) == "INFO"
+    assert pkg_logger.level == logging.INFO
+
+
+def test_configure_log_level_env_override(pkg_logger):
+    # $LOG_LEVEL is the knob — trimmed + case-insensitive, any standard level name
+    assert configure_log_level({"LOG_LEVEL": " debug "}) == "DEBUG"
+    assert pkg_logger.level == logging.DEBUG
+    assert configure_log_level({"LOG_LEVEL": "WARNING"}) == "WARNING"
+    assert pkg_logger.level == logging.WARNING
+
+
+def test_configure_log_level_junk_falls_back_to_info(pkg_logger, caplog):
+    # negative: a logging typo must never kill the run — safe fallback to INFO plus a WARNING
+    # (which is visible even under the broken pre-fix WARNING-gated config)
+    with caplog.at_level(logging.WARNING, logger="jobfetcher.handlers.pipeline"):
+        assert configure_log_level({"LOG_LEVEL": "CHATTY"}) == "INFO"
+    assert pkg_logger.level == logging.INFO
+    assert any("CHATTY" in r.getMessage() for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- profile hash (0004)

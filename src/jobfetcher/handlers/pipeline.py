@@ -55,6 +55,7 @@ from ..core.ingest import (
 from ..core.profile import Profile
 from ..core.scorer import Scorer
 from ..core.search_spec import SearchSpec
+from ..db.engine import wait_for_db_resume
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ _DB_NAME_ENV = "DB_NAME"
 _RECIPIENT_ENV = "RECIPIENT_EMAIL"
 _MAX_WORKERS_ENV = "PIPELINE_MAX_WORKERS"
 _GOLD_FILTER_ENV = "GOLD_FILTER_STRATEGY"
+_LOG_LEVEL_ENV = "LOG_LEVEL"
 _ALEMBIC_HEAD_ENV = "ALEMBIC_HEAD"
 
 # The alembic head THIS code was written against — the smoke gate's fallback expectation when
@@ -89,6 +91,30 @@ _DEADLINE_MARGIN_S = 60.0
 
 
 # --------------------------------------------------------------------------- pure helpers
+def configure_log_level(env: dict[str, str]) -> str:
+    """Set the `jobfetcher` package logger's level from `$LOG_LEVEL` (default INFO); return
+    the applied level name.
+
+    Why (ERR-009's detection follow-up): AWS Lambda's Python runtime pre-attaches a handler to
+    the ROOT logger, so package records already propagate to CloudWatch — only the LEVEL gates
+    them. With no level ever set in the package, the effective level resolved to the root's
+    WARNING and every `log.info(...)` was dropped at the originating logger (verified live:
+    771 reassess events written, zero matching INFO lines in the log group). Setting the
+    package logger's level is sufficient: a record propagated to ancestors is re-gated only by
+    HANDLER levels (Lambda's root handler is NOTSET), never by ancestor LOGGER levels.
+
+    A junk value falls back to INFO with a WARNING (visible even under the broken pre-fix
+    config) — the one knob where fail-loud is wrong: a logging typo must never kill the run.
+    """
+    raw = (env.get(_LOG_LEVEL_ENV) or "").strip().upper() or "INFO"
+    level = logging.getLevelName(raw)  # a known name → its int; junk → a "Level X" string
+    if not isinstance(level, int):
+        log.warning("invalid $%s %r — falling back to INFO", _LOG_LEVEL_ENV, raw)
+        raw, level = "INFO", logging.INFO
+    logging.getLogger(__name__.split(".")[0]).setLevel(level)
+    return raw
+
+
 def resolve_db_url(env: dict[str, str]) -> str:
     """Resolve the SQLAlchemy connection URL from the environment (a pure function — unit-tested).
 
@@ -232,6 +258,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
     (sending early would trip the send-once `run_log` guard with an incomplete shortlist).
     """
     event = event or {}
+    configure_log_level(os.environ)  # FIRST: the run's INFO telemetry must reach CloudWatch
     run_id = resolve_run_id(event)
     run_date = resolve_run_date(event)
     mode = resolve_mode(event)
@@ -249,6 +276,11 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         # surfaces as the standard 500 below. ---
         if mode == "smoke":
             repo = PostgresRepository(resolve_db_url(env))
+            # Aurora scale-to-zero (ERR-009): the post-deploy gate is the invocation MOST
+            # exposed to a paused cluster (it runs right after `terraform apply`, often on an
+            # idle stack) — wait out the resume before the version probe. Read-only `SELECT 1`
+            # on the same engine, so the gate's zero-side-effects contract holds.
+            wait_for_db_resume(repo.engine)
             expected = resolve_expected_migration_head(env)
             with repo.engine.connect() as conn:
                 # alembic_version is a single-row, single-column table — no ORDER BY exists.
@@ -286,6 +318,12 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         deadline = resolve_deadline(context)
 
         repo = PostgresRepository(resolve_db_url(env))
+        # Aurora scale-to-zero (ERR-009): a run that catches the cluster asleep must WAIT out
+        # the ~15–30s resume, not die at the first DB touch (retry_attempts=0 ⇒ a dead run
+        # stays dead). Two explicit call sites cover every mode: the smoke gate's own repo
+        # above, and this shared repo BEFORE the profile sync / remaining-mode split. The 90s
+        # budget costs nothing against the 900s Lambda timeout + the deadline guard's margin.
+        wait_for_db_resume(repo.engine)
 
         # Re-sync the single-user profile row from the config files EVERY run (idempotent upsert):
         # the config is the single source of truth for the user's profile + shortlist strictness,
