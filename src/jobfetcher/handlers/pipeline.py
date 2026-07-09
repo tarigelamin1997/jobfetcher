@@ -276,6 +276,11 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         # surfaces as the standard 500 below. ---
         if mode == "smoke":
             repo = PostgresRepository(resolve_db_url(env))
+            # Aurora scale-to-zero (ERR-009): the post-deploy gate is the invocation MOST
+            # exposed to a paused cluster (it runs right after `terraform apply`, often on an
+            # idle stack) — wait out the resume before the version probe. Read-only `SELECT 1`
+            # on the same engine, so the gate's zero-side-effects contract holds.
+            wait_for_db_resume(repo.engine)
             expected = resolve_expected_migration_head(env)
             with repo.engine.connect() as conn:
                 # alembic_version is a single-row, single-column table — no ORDER BY exists.
@@ -315,8 +320,9 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         repo = PostgresRepository(resolve_db_url(env))
         # Aurora scale-to-zero (ERR-009): a run that catches the cluster asleep must WAIT out
         # the ~15–30s resume, not die at the first DB touch (retry_attempts=0 ⇒ a dead run
-        # stays dead). Sits BEFORE every mode's first query; the 90s budget costs nothing
-        # against the 900s Lambda timeout + the deadline guard's margin.
+        # stays dead). Two explicit call sites cover every mode: the smoke gate's own repo
+        # above, and this shared repo BEFORE the profile sync / remaining-mode split. The 90s
+        # budget costs nothing against the 900s Lambda timeout + the deadline guard's margin.
         wait_for_db_resume(repo.engine)
 
         # Re-sync the single-user profile row from the config files EVERY run (idempotent upsert):

@@ -1,9 +1,12 @@
 """ERR-009 unit tests: `wait_for_db_resume` absorbs ONLY Aurora Serverless v2's scale-to-zero
 resume signal (name-matched — botocore generates the class dynamically), re-raises everything
 else immediately, and gives up loudly when the budget is spent. Plus the handler wiring: the
-wait runs BEFORE the first real DB touch (`upsert_profile`) in every mode, and a wait failure
+wait runs BEFORE every mode's first real DB touch (`upsert_profile` on the pipeline paths, the
+`alembic_version` probe in the Run-5 smoke gate — two explicit call sites), and a wait failure
 still surfaces as the loud 500. All fakes, no DB, `time.sleep` patched — the suite stays fast."""
 from __future__ import annotations
+
+import logging
 
 import pytest
 from sqlalchemy.exc import StatementError
@@ -162,6 +165,47 @@ _PROFILE_YML = (
 )
 
 
+@pytest.fixture
+def pkg_logger_restored():
+    """Restore the `jobfetcher` package logger level after a real-handler invoke — the handler's
+    `configure_log_level` sets it, and this repo was already bitten once by logger-state order
+    dependence (the `migrations/env.py` caplog incident)."""
+    logger = logging.getLogger("jobfetcher")
+    before = logger.level
+    yield
+    logger.setLevel(before)
+
+
+class _FakeVersionResult:
+    def __init__(self, version: str) -> None:
+        self._version = version
+
+    def scalar_one(self) -> str:
+        return self._version
+
+
+class _FakeWiredEngine:
+    """The fake repo's engine: the smoke gate runs its version probe on it — record the probe
+    so the placement test can assert the resume wait came first."""
+
+    def __init__(self, calls: list[str], version: str) -> None:
+        self._calls = calls
+        self._version = version
+
+    def connect(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, stmt):  # noqa: ARG002
+        self._calls.append("version_select")
+        return _FakeVersionResult(self._version)
+
+
 def _wire_handler(monkeypatch, tmp_path, calls: list[str], *, wait=None):
     """Stub every adapter + stage the handler builds, recording the DB-relevant call order.
     Returns the pipeline module. No DB, no AWS, no network."""
@@ -171,7 +215,8 @@ def _wire_handler(monkeypatch, tmp_path, calls: list[str], *, wait=None):
     profile_dump = Profile.from_yaml_text(_PROFILE_YML).model_dump()
 
     class _FakeRepo:
-        engine = object()  # the sentinel wait_for_db_resume must receive
+        # the engine wait_for_db_resume must receive; answers the smoke gate's version probe
+        engine = _FakeWiredEngine(calls, pipe._EXPECTED_MIGRATION_HEAD)
 
         def upsert_profile(self, **kw):  # noqa: ARG002
             calls.append("upsert_profile")
@@ -213,32 +258,39 @@ def _wire_handler(monkeypatch, tmp_path, calls: list[str], *, wait=None):
     # resolve_db_url runs before the (faked) repo constructor — it must resolve, not raise
     monkeypatch.setenv("JOBFETCHER_DB_URL", "postgresql://u:p@localhost:5433/jobfetcher")
     monkeypatch.delenv("GOLD_FILTER_STRATEGY", raising=False)
+    monkeypatch.delenv("ALEMBIC_HEAD", raising=False)  # smoke falls back to the code's head
     return pipe
 
 
-# Every dispatch shape the handler has at this base: the normal pipeline (event None and an
-# explicit empty mode) + reassess. The wait sits before the mode split, so ANY future mode
-# inherits the protection — these pin that placement behaviorally.
+# Every dispatch shape the handler has: the normal pipeline (event None and an explicit empty
+# mode), reassess, and the Run-5 smoke gate. Smoke constructs its OWN repo before the shared
+# wait point, so it carries its own explicit wait call — two call sites, every mode's first
+# DB touch protected; these pin that placement behaviorally.
 @pytest.mark.parametrize(
-    ("event", "expect_stage"),
+    ("event", "first_db_touch", "expect_stage"),
     [
-        (None, "ingest"),  # normal pipeline, bare cron event
-        ({"mode": ""}, "ingest"),  # normal pipeline, explicit empty mode
-        ({"mode": "reassess"}, "reassess"),  # ADR-0023 replay
+        (None, "upsert_profile", "ingest"),  # normal pipeline, bare cron event
+        ({"mode": ""}, "upsert_profile", "ingest"),  # normal pipeline, explicit empty mode
+        ({"mode": "reassess"}, "upsert_profile", "reassess"),  # ADR-0023 replay
+        # Run 5's post-deploy gate — the invocation MOST exposed to a paused cluster (F-1):
+        # the wait must precede the alembic_version SELECT
+        ({"mode": "smoke"}, "version_select", "version_select"),
     ],
 )
-def test_handler_waits_for_resume_before_any_db_touch(monkeypatch, tmp_path, event, expect_stage):
+def test_handler_waits_for_resume_before_any_db_touch(
+    monkeypatch, tmp_path, pkg_logger_restored, event, first_db_touch, expect_stage
+):
     calls: list[str] = []
     pipe = _wire_handler(monkeypatch, tmp_path, calls)
     out = pipe.handler(event, None)
     assert out["statusCode"] == 200
-    # the resume wait is the FIRST DB-touching call — strictly before the profile sync
+    # the resume wait is the FIRST DB-touching call — strictly before the mode's first query
     assert calls[0] == "wait_for_db_resume"
-    assert calls.index("wait_for_db_resume") < calls.index("upsert_profile")
+    assert calls.index("wait_for_db_resume") < calls.index(first_db_touch)
     assert expect_stage in calls
 
 
-def test_handler_wait_failure_is_still_a_loud_500(monkeypatch, tmp_path):
+def test_handler_wait_failure_is_still_a_loud_500(monkeypatch, tmp_path, pkg_logger_restored):
     # negative: budget exhausted (the cluster never resumed) → the run dies BEFORE any DB
     # write, loudly, with the resume error named in the 500 — never a silent skip
     calls: list[str] = []
