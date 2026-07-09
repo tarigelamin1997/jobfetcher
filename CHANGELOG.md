@@ -16,6 +16,8 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ### Fixed
 
+- **[ERR-009] Cold-start runs died at the first DB touch — Aurora's scale-to-zero resume is now waited out, not fatal.** Aurora Serverless v2 resuming from pause raises `DatabaseResumingException` for ~15–30s; with `maximum_retry_attempts=0` (ERR-007, deliberate) a run that caught the cluster asleep returned 500 and stayed dead — **three identical live kills in two days** (incl. the daily 06:00 cron), latent since v0.1 and masked only by dev activity keeping the cluster warm. New **`wait_for_db_resume`** (`db/engine.py`) probes `SELECT 1` and retries **only** the resume signal (root-cause name match walking `.orig`/`__cause__` + message-substring belt; 90s budget, 5s interval, each wait logged to CloudWatch); any other failure re-raises immediately. Wired once in the handler before every mode's first query. A returned-500 is invisible to the Run-5 alarms (the ADR-0029 gap) — this fix removes the failure class rather than detecting it.
+
 - **`migrations/env.py` silenced app loggers after any programmatic alembic use** — bare `fileConfig(...)` left Python's default `disable_existing_loggers=True`, disabling every imported `jobfetcher.*` logger (surfaced as an order-dependent caplog failure in the full suite). Fixed with `disable_existing_loggers=False` + order-independence hardening in the test (`cda34b9`) — protects all future caplog tests.
 
 ### ⚠️ Deploy sequencing (v0.9.0) — migrate 0006 BEFORE deploying this code

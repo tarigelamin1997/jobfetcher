@@ -53,6 +53,7 @@ from ..core.ingest import (
 from ..core.profile import Profile
 from ..core.scorer import Scorer
 from ..core.search_spec import SearchSpec
+from ..db.engine import wait_for_db_resume
 
 log = logging.getLogger(__name__)
 
@@ -233,6 +234,11 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         deadline = resolve_deadline(context)
 
         repo = PostgresRepository(resolve_db_url(env))
+        # Aurora scale-to-zero (ERR-009): a run that catches the cluster asleep must WAIT out
+        # the ~15–30s resume, not die at the first DB touch (retry_attempts=0 ⇒ a dead run
+        # stays dead). Sits BEFORE every mode's first query; the 90s budget costs nothing
+        # against the 900s Lambda timeout + the deadline guard's margin.
+        wait_for_db_resume(repo.engine)
 
         # Re-sync the single-user profile row from the config files EVERY run (idempotent upsert):
         # the config is the single source of truth for the user's profile + shortlist strictness,
