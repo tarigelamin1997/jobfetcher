@@ -75,6 +75,7 @@ _DB_NAME_ENV = "DB_NAME"
 _RECIPIENT_ENV = "RECIPIENT_EMAIL"
 _MAX_WORKERS_ENV = "PIPELINE_MAX_WORKERS"
 _GOLD_FILTER_ENV = "GOLD_FILTER_STRATEGY"
+_LOG_LEVEL_ENV = "LOG_LEVEL"
 
 # Seconds reserved before the Lambda's hard timeout: in-flight LLM calls + the tail of DB
 # writes + notify must finish inside this margin (H-2 deadline guard).
@@ -82,6 +83,30 @@ _DEADLINE_MARGIN_S = 60.0
 
 
 # --------------------------------------------------------------------------- pure helpers
+def configure_log_level(env: dict[str, str]) -> str:
+    """Set the `jobfetcher` package logger's level from `$LOG_LEVEL` (default INFO); return
+    the applied level name.
+
+    Why (ERR-009's detection follow-up): AWS Lambda's Python runtime pre-attaches a handler to
+    the ROOT logger, so package records already propagate to CloudWatch — only the LEVEL gates
+    them. With no level ever set in the package, the effective level resolved to the root's
+    WARNING and every `log.info(...)` was dropped at the originating logger (verified live:
+    771 reassess events written, zero matching INFO lines in the log group). Setting the
+    package logger's level is sufficient: a record propagated to ancestors is re-gated only by
+    HANDLER levels (Lambda's root handler is NOTSET), never by ancestor LOGGER levels.
+
+    A junk value falls back to INFO with a WARNING (visible even under the broken pre-fix
+    config) — the one knob where fail-loud is wrong: a logging typo must never kill the run.
+    """
+    raw = (env.get(_LOG_LEVEL_ENV) or "").strip().upper() or "INFO"
+    level = logging.getLevelName(raw)  # a known name → its int; junk → a "Level X" string
+    if not isinstance(level, int):
+        log.warning("invalid $%s %r — falling back to INFO", _LOG_LEVEL_ENV, raw)
+        raw, level = "INFO", logging.INFO
+    logging.getLogger(__name__.split(".")[0]).setLevel(level)
+    return raw
+
+
 def resolve_db_url(env: dict[str, str]) -> str:
     """Resolve the SQLAlchemy connection URL from the environment (a pure function — unit-tested).
 
@@ -216,6 +241,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
     (sending early would trip the send-once `run_log` guard with an incomplete shortlist).
     """
     event = event or {}
+    configure_log_level(os.environ)  # FIRST: the run's INFO telemetry must reach CloudWatch
     run_id = resolve_run_id(event)
     run_date = resolve_run_date(event)
     mode = resolve_mode(event)
