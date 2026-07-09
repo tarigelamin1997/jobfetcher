@@ -12,10 +12,12 @@ import pytest
 from jobfetcher.handlers.pipeline import (
     _DEFAULT_PROFILE_PATH,
     _DEFAULT_SEARCH_CONFIG_PATH,
+    _EXPECTED_MIGRATION_HEAD,
     compute_profile_hash,
     configure_log_level,
     resolve_db_url,
     resolve_deadline,
+    resolve_expected_migration_head,
     resolve_max_workers,
     resolve_mode,
     resolve_profile_path,
@@ -130,6 +132,33 @@ def test_resolve_mode_default_and_reassess():
 def test_resolve_mode_ignores_non_string():
     # a non-string mode is ignored (falls back to the normal pipeline), never crashes
     assert resolve_mode({"mode": 123}) == ""
+
+
+# --------------------------------------------------------------------------- smoke gate (Run 5)
+def test_resolve_expected_migration_head_env_override_wins():
+    assert resolve_expected_migration_head({"ALEMBIC_HEAD": "0007_future"}) == "0007_future"
+    assert resolve_expected_migration_head({"ALEMBIC_HEAD": " 0007_future "}) == "0007_future"
+
+
+def test_resolve_expected_migration_head_defaults_when_unset_or_blank():
+    # unset OR blank env → the hardcoded head this code was built against, never ""
+    assert resolve_expected_migration_head({}) == _EXPECTED_MIGRATION_HEAD
+    assert resolve_expected_migration_head({"ALEMBIC_HEAD": "   "}) == _EXPECTED_MIGRATION_HEAD
+
+
+def test_expected_migration_head_matches_migrations_directory():
+    """The staleness gate: a new migration landed but `_EXPECTED_MIGRATION_HEAD` (and thus the
+    smoke gate's fallback) wasn't bumped → this fails in unit CI, not at the next deploy."""
+    from pathlib import Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    real_head = ScriptDirectory.from_config(cfg).get_current_head()
+    assert resolve_expected_migration_head({}) == real_head
 
 
 # --------------------------------------------------------------------------- H-2 knobs

@@ -58,6 +58,9 @@ resource "aws_lambda_function" "pipeline" {
       # setting with `scripts/push_config.py` (no rebuild/redeploy).
       SEARCH_CONFIG_PATH = "s3://${aws_s3_bucket.data.id}/${var.search_config_key}"
       PROFILE_PATH       = "s3://${aws_s3_bucket.data.id}/${var.profile_key}"
+      # Update per migration — the {"mode":"smoke"} gate pins deployed code to the migrated
+      # schema: post-apply it compares the DB's alembic_version to this (200 match / 400 not).
+      ALEMBIC_HEAD = "0006_subscores"
     }
   }
 }

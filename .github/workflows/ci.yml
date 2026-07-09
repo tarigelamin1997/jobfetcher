@@ -62,7 +62,8 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
 
-      # No backend block in terraform/ → -backend=false validates config without AWS creds.
+      # -backend=false parses the S3 backend block WITHOUT initializing it → the config
+      # still validates with no AWS creds (the state bucket is never touched in CI).
       - name: Terraform init (no backend)
         run: terraform init -backend=false
         working-directory: terraform

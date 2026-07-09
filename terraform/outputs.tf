@@ -44,3 +44,8 @@ output "digest_recipient_email" {
   description = "Destination for the daily digest. In SES sandbox this address must also be a verified identity before the first send."
   value       = var.recipient_email
 }
+
+output "alarms_topic_arn" {
+  description = "SNS alarms topic ARN — used to verify the email subscription is confirmed (deploy runbook §4)."
+  value       = aws_sns_topic.alarms.arn
+}

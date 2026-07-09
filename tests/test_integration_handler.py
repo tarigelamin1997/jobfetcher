@@ -517,6 +517,104 @@ def test_handler_crash_mid_run_then_resume_sends_once(repo, patched, tmp_path, m
     assert _count(repo, "run_log") == 1  # send guard now recorded
 
 
+# --------------------------------------------------------------------------- smoke mode (Run 5)
+# The post-deploy gate: {"mode":"smoke"} must prove DB reachability + migration head with ZERO
+# side effects — no S3 config read, no LLM/source/notifier construction, no row written anywhere.
+
+_ALL_TABLES = (
+    "bronze_posting", "posting", "cluster", "score",
+    "score_event", "application_event", "run_log", "profile",
+)
+
+
+def _table_counts(repo) -> dict[str, int]:
+    return {t: _count(repo, t) for t in _ALL_TABLES}
+
+
+class _ExplodingSymbol:
+    """A stand-in for every adapter/config symbol smoke mode must NEVER touch: constructing or
+    calling it IS the failure (the exploding-fake pattern from the reassess test above)."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(f"smoke mode must not touch {self._name}!")
+
+
+@pytest.fixture
+def smoke_guard(monkeypatch, repo):
+    """Wire the handler for smoke tests: the repo engine is REAL (migrated to head by the
+    module fixture); everything else the normal pipeline would read or build explodes on touch."""
+    import jobfetcher.handlers.pipeline as pipe
+
+    monkeypatch.setattr(pipe, "PostgresRepository", lambda url: repo)  # noqa: ARG005
+    for symbol in (
+        "JSearchSourceAdapter", "OpenAICompatLlmClient", "S3RawStore", "SesNotifier",
+        "read_config_text", "resolve_filter_strategy",
+    ):
+        monkeypatch.setattr(pipe, symbol, _ExplodingSymbol(symbol))
+    monkeypatch.delenv("ALEMBIC_HEAD", raising=False)
+
+
+def test_handler_smoke_mode_matching_head_200_and_writes_nothing(repo, smoke_guard):
+    """Positive path: migrated DB + matching expected head → 200 with the version echoed —
+    and NOT ONE row written in ANY table (the whole point of a smoke gate). The exploding
+    fakes prove no LLM/source/notifier/S3-config access happened either."""
+    from jobfetcher.handlers.pipeline import handler, resolve_expected_migration_head
+
+    _truncate(repo)
+    before = _table_counts(repo)
+
+    out = handler({"run_id": "smoke1", "mode": "smoke"}, None)
+
+    assert out["statusCode"] == 200
+    assert out["mode"] == "smoke"
+    assert out["run_id"] == "smoke1"
+    # the DB is migrated to head by the fixture, so the echoed version IS the code's expectation
+    assert out["alembic_version"] == resolve_expected_migration_head({})
+    assert _table_counts(repo) == before  # zero writes anywhere
+
+
+def test_handler_smoke_mode_mismatched_head_400_and_writes_nothing(repo, smoke_guard, monkeypatch):
+    """Negative: $ALEMBIC_HEAD points at a migration the DB doesn't have → 400 with a loud
+    'mismatch' error naming both versions, and still zero writes — the gate reports, never
+    repairs."""
+    from jobfetcher.handlers.pipeline import handler
+
+    _truncate(repo)
+    before = _table_counts(repo)
+    monkeypatch.setenv("ALEMBIC_HEAD", "9999_not_yet_migrated")
+
+    out = handler({"run_id": "smoke2", "mode": "smoke"}, None)
+
+    assert out["statusCode"] == 400
+    assert out["mode"] == "smoke"
+    assert "mismatch" in out["error"]
+    assert "9999_not_yet_migrated" in out["error"]  # the expected side is named
+    assert _table_counts(repo) == before  # zero writes anywhere
+
+
+def test_handler_smoke_mode_connection_failure_returns_500(smoke_guard, monkeypatch):
+    """Negative: an unreachable DB (engine.connect raises) surfaces through the handler's
+    standard outer except as a retryable 500 — the smoke branch lives INSIDE the try."""
+    import jobfetcher.handlers.pipeline as pipe
+
+    class _DeadEngine:
+        def connect(self):
+            raise RuntimeError("injected: DB unreachable")
+
+    class _DeadRepo:
+        engine = _DeadEngine()
+
+    monkeypatch.setattr(pipe, "PostgresRepository", lambda url: _DeadRepo())  # noqa: ARG005
+
+    out = pipe.handler({"run_id": "smoke3", "mode": "smoke"}, None)
+
+    assert out["statusCode"] == 500
+    assert "DB unreachable" in out["error"]
+
+
 def test_handler_send_failure_not_double_marked_then_retry_sends_once(
     repo, patched, tmp_path, monkeypatch
 ):
