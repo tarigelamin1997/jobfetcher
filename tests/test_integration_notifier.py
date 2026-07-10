@@ -346,3 +346,75 @@ def test_get_last_digest_sent_at_none_then_max_and_user_scoped(repo):
     assert got is not None
     assert abs((got - t_newer).total_seconds()) < 1  # MAX of the user's rows...
     assert (now - got).total_seconds() > timedelta(days=19).total_seconds()  # ...not other's
+
+
+# --------------------------------------------------------------------------- full-list report (B-1)
+def test_get_all_scored_returns_surfaced_and_below_with_override_and_status(repo):
+    """B-1 over real SQL: `get_all_scored` returns the WHOLE scored set (surfaced AND below the
+    threshold), score DESC, and carries `score_override` (the human correction) + the latest
+    `application_event.status` via the correlated newest-row subquery."""
+    _truncate_pipeline(repo)
+    tag = uuid4().hex[:8]
+    hi, lo = f"hi-{tag}", f"lo-{tag}"
+    _seed_scored(repo, hi, "Senior Data Engineer", 92,
+                 company="Acme", apply_url="https://jobs.test/apply/hi")
+    _seed_scored(repo, lo, "Junior Analyst", 40,
+                 company="Gamma", apply_url="https://jobs.test/apply/lo")
+
+    rows = repo.get_all_scored()
+    ids = [r.posting_id for r in rows]
+    assert hi in ids and lo in ids  # the BELOW-threshold row is included, not dropped
+    assert [r.score for r in rows] == sorted((r.score for r in rows), reverse=True)  # score DESC
+
+    # a human override + an application outcome now round-trip onto the item
+    repo.track_application_event(posting_id=hi, status="applied")
+    repo.set_score_override(cluster_id=hi, score_override=99, fit_category="strong_fit",
+                            profile_hash="ph", previous_score=92)
+    (hi_row,) = [r for r in repo.get_all_scored() if r.posting_id == hi]
+    assert hi_row.score_override == 99
+    assert hi_row.application_status == "applied"
+
+
+def test_notify_writes_report_object_and_embeds_presigned_url(repo):
+    """End-to-end (real Postgres + moto S3 + moto SES): `notify` with a real `S3ReportStore`
+    writes a `reports/…` object (the full-list page listing surfaced + below) and embeds its
+    presigned URL in the sent digest — the artifact is reachable, not dead text."""
+    from jobfetcher.adapters.s3_reports import S3ReportStore
+    from jobfetcher.adapters.ses_notifier import SesNotifier
+
+    with mock_aws():
+        import boto3
+
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="jobfetcher-report-test")
+        ses = boto3.client("ses", region_name="us-east-1")
+        ses.verify_email_identity(EmailAddress="from@jobfetcher.test")
+
+        _truncate_pipeline(repo)
+        tag = uuid4().hex[:8]
+        user = f"user-{tag}"
+        _seed_profile(repo, user, threshold=60)
+        _seed_scored(repo, f"hi-{tag}", "Senior Data Engineer", 92,
+                     company="Acme", apply_url="https://jobs.test/apply/hi")
+        _seed_scored(repo, f"lo-{tag}", "Junior Analyst", 40,
+                     company="Gamma", apply_url="https://jobs.test/apply/lo")
+
+        notifier = SesNotifier(sender="from@jobfetcher.test", client=ses)
+        report_store = S3ReportStore(bucket="jobfetcher-report-test", client=s3)
+        out = notify(run_id="rr", repo=repo, notifier=notifier,
+                     recipient_email="report@jobfetcher.test", user_id=user,
+                     run_date=date(2026, 6, 27), report_store=report_store)
+        assert out["sent"] == 1
+
+        # the report object landed at the dated key and lists BOTH jobs (surfaced + below)
+        key = "reports/2026-06-27/jobs-rr.html"
+        keys = [o["Key"] for o in s3.list_objects_v2(Bucket="jobfetcher-report-test").get("Contents", [])]
+        assert key in keys
+        page = s3.get_object(Bucket="jobfetcher-report-test", Key=key)["Body"].read().decode("utf-8")
+        assert "Senior Data Engineer" in page and "Junior Analyst" in page
+        assert page.lower().startswith("<!doctype html>")
+
+        # the email embeds a presigned link to that exact key (the below-threshold footer)
+        mine = [m for m in _moto_sent_messages() if "report@jobfetcher.test" in m["destinations"]]
+        assert len(mine) == 1
+        assert key in mine[0]["body"]  # the presigned url path carries the report key

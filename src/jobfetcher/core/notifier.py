@@ -200,6 +200,7 @@ def render_digest(
     threshold: int,
     date: "date",
     since: "datetime | None" = None,
+    full_list_url: str | None = None,
 ) -> tuple[str, str, str]:
     """Render `(subject, html_body, text_body)` for the daily digest.
 
@@ -207,6 +208,12 @@ def render_digest(
     Repository); `below_count` is how many scored matches fell below the threshold (the footer).
     `since` is when the LAST digest went out (`repo.get_last_digest_sent_at`) — `None` = the
     first-ever digest.
+
+    `full_list_url` (B-1) is a presigned https link to the full-list report page (every scored
+    job). When present it LINKIFIES the two otherwise-dead lines — the below-threshold footer
+    and the still-open "…and N more" overflow — so the compressed tail is reachable from the
+    email. It is scheme-allowlisted via `_safe_apply_url`; a hostile scheme (or `None`) degrades
+    gracefully to today's plain text (no link), never emitting an unsafe href.
 
     Digest truthfulness: the items are split into **"New since last digest"** (full cards,
     first; a graduation gets the green `↑ old→new` badge) and **"still open"** (a count + the
@@ -220,6 +227,9 @@ def render_digest(
     applied by the Repository) simply never reach this renderer. Emits BOTH an HTML body and
     a plaintext fallback."""
     day = date.isoformat()
+    # Scheme-allowlist the full-list link ONCE (untrusted-URL discipline, mirrors apply_url): a
+    # non-http(s) or None value → the two dead lines keep today's plain text (graceful).
+    safe_full_url = _safe_apply_url(full_list_url)
     new_items, _ = split_new_and_still_open(items, since=since, threshold=threshold)
     new_ids = {i.posting_id for i in new_items}
     new_cards: list[DigestCard] = []
@@ -274,9 +284,12 @@ def render_digest(
     for card in new_cards:
         text_lines.extend(_card_text_lines(card, threshold=threshold))
     if open_cards:
-        text_lines.extend(_still_open_text_lines(open_cards))
+        text_lines.extend(_still_open_text_lines(open_cards, safe_full_url))
     if footer:
-        text_lines.append(footer)
+        # B-1: linkify the below-threshold footer — the full list is where those N are reachable.
+        text_lines.append(
+            f"{footer} — see the full list: {safe_full_url}" if safe_full_url else footer
+        )
     text_body = "\n".join(text_lines) + "\n"
 
     # ---- HTML body (new section first: one card per group; then the compact still-open) ----
@@ -299,11 +312,18 @@ def render_digest(
                 "New since last digest</h3>"
             )
         new_html += "".join(_card_html(card, threshold=threshold) for card in new_cards)
-    open_html = _still_open_html(open_cards) if open_cards else ""
-    footer_html = (
-        f'<p style="color:#80868b;font-size:13px;margin:8px 0 0;">{escape(footer)}</p>'
-        if footer else ""
-    )
+    open_html = _still_open_html(open_cards, safe_full_url) if open_cards else ""
+    if not footer:
+        footer_html = ""
+    elif safe_full_url:
+        # B-1: the below-threshold footer becomes a link to the full-list page.
+        footer_html = (
+            f'<p style="color:#80868b;font-size:13px;margin:8px 0 0;">{escape(footer)} &mdash; '
+            f'<a href="{escape(safe_full_url, quote=True)}" '
+            f'style="color:{_APPLY_BG};text-decoration:none;">see the full list &rarr;</a></p>'
+        )
+    else:
+        footer_html = f'<p style="color:#80868b;font-size:13px;margin:8px 0 0;">{escape(footer)}</p>'
     html_body = _html_shell(day, summary + new_html + open_html + footer_html)
     return subject, html_body, text_body
 
@@ -332,9 +352,12 @@ def _card_text_lines(card: DigestCard, *, threshold: int) -> list[str]:
     return lines
 
 
-def _still_open_text_lines(cards: list[DigestCard]) -> list[str]:
+def _still_open_text_lines(
+    cards: list[DigestCard], full_list_url: str | None = None
+) -> list[str]:
     """The still-open section, plaintext: the count line + top-N compact one-liners + the
-    "…and n more — see your export" overflow line."""
+    "…and n more" overflow line. `full_list_url` (already scheme-checked) linkifies that
+    overflow line at the full-list page; without it, today's "see your export" text (B-1)."""
     on = len(cards)
     lines = [f"{on} earlier match{'es' if on != 1 else ''} still open:"]
     for card in cards[:_STILL_OPEN_TOP_N]:
@@ -345,7 +368,9 @@ def _still_open_text_lines(cards: list[DigestCard]) -> list[str]:
             f"{_safe_apply_url(rep.apply_url) or '(no link)'}"
         )
     if on > _STILL_OPEN_TOP_N:
-        lines.append(f"  …and {on - _STILL_OPEN_TOP_N} more — see your export")
+        more = on - _STILL_OPEN_TOP_N
+        tail = f"see the full list: {full_list_url}" if full_list_url else "see your export"
+        lines.append(f"  …and {more} more — {tail}")
     lines.append("")
     return lines
 
@@ -421,10 +446,11 @@ def _card_html(card: DigestCard, *, threshold: int) -> str:
     )
 
 
-def _still_open_html(cards: list[DigestCard]) -> str:
+def _still_open_html(cards: list[DigestCard], full_list_url: str | None = None) -> str:
     """The still-open section, HTML: the count heading + top-N compact one-liners
     (`{score} · {title} — {company} · Apply`) + the "…and n more" overflow line. Deliberately
-    NOT full cards — these already surfaced in an earlier digest; they stay reachable, not loud."""
+    NOT full cards — these already surfaced in an earlier digest; they stay reachable, not loud.
+    `full_list_url` (already scheme-checked) linkifies the overflow line to the full-list page."""
     on = len(cards)
     parts = [
         '<h3 style="color:#202124;font-size:15px;margin:20px 0 8px;">'
@@ -446,9 +472,17 @@ def _still_open_html(cards: list[DigestCard]) -> str:
             f"&mdash; {company}{link}</div>"
         )
     if on > _STILL_OPEN_TOP_N:
+        more = on - _STILL_OPEN_TOP_N
+        if full_list_url:
+            tail = (
+                f'<a href="{escape(full_list_url, quote=True)}" '
+                f'style="color:{_APPLY_BG};text-decoration:none;">see the full list &rarr;</a>'
+            )
+        else:
+            tail = "see your export"
         parts.append(
             '<p style="color:#80868b;font-size:13px;margin:6px 0 0;">'
-            f"&hellip;and {on - _STILL_OPEN_TOP_N} more &mdash; see your export</p>"
+            f"&hellip;and {more} more &mdash; {tail}</p>"
         )
     return "".join(parts)
 

@@ -216,10 +216,15 @@ def patched(monkeypatch, repo, db_url):
         ses.verify_email_identity(EmailAddress="from@jobfetcher.test")
 
         from jobfetcher.adapters.s3_raw import S3RawStore
+        from jobfetcher.adapters.s3_reports import S3ReportStore
         from jobfetcher.adapters.ses_notifier import SesNotifier
 
         monkeypatch.setattr(
             pipe, "S3RawStore", lambda: S3RawStore(bucket="jobfetcher-test-bucket", client=s3)
+        )
+        monkeypatch.setattr(
+            pipe, "S3ReportStore",
+            lambda: S3ReportStore(bucket="jobfetcher-test-bucket", client=s3),
         )
         monkeypatch.setattr(
             pipe, "SesNotifier", lambda: SesNotifier(sender="from@jobfetcher.test", client=ses)

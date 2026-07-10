@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from ..adapters.jsearch_source import QUERY_COUNTRY_KEY, jd_and_metadata_from_jsearch
@@ -22,10 +22,12 @@ from .fingerprint import fingerprint
 from .notifier import render_digest
 from .ports import FilterError, LlmError, NotifierError, RepositoryError
 from .profile import Profile
+from .report import render_full_list
 from .scorer import ScorerError, subscores_payload
 
 if TYPE_CHECKING:
     from ..adapters.s3_raw import RawStore
+    from ..adapters.s3_reports import ReportStore
     from .dissector import Dissector
     from .ports import FilterStrategy, Notifier, Repository, SourceAdapter
     from .scorer import Scorer
@@ -46,6 +48,11 @@ log = logging.getLogger(__name__)
 # LLM calls are pure I/O — this many run concurrently per stage (H-2). DB writes always stay
 # on the main thread (the Data-API dialect's thread-safety is deliberately not relied on).
 DEFAULT_MAX_WORKERS = 8
+
+# Presigned full-list-report link lifetime (B-1). A daily email only needs same-day
+# reachability; a link signed with the Lambda role's temporary creds is capped at the session
+# TTL anyway (hours) — requesting 12h is a sane ask, tomorrow's digest regenerates the link.
+_REPORT_URL_EXPIRY_S = 12 * 3600
 
 # Sentinel returned by a worker whose task started after the deadline: the item was neither
 # processed nor failed — it is deferred to the next (idempotent) run.
@@ -667,6 +674,7 @@ def notify(
     user_id: str = DEFAULT_USER_ID,
     run_date: date | None = None,
     max_age_days: int | None = None,
+    report_store: "ReportStore | None" = None,
 ) -> dict[str, int]:
     """Step-6 notification: load the profile (its **runtime** threshold) → read the scored
     shortlist (surfaced + below count) → render the daily digest → send it.
@@ -688,6 +696,11 @@ def notify(
     today" email (VG5 negative) — the digest renderer handles the empty case, not the caller
     (and a zero-NEW day sends an honest "no new matches since {date}" email).
 
+    **The full-list report link is an enhancement, NEVER a new way to fail (B-1):** when a
+    `report_store` is supplied, the whole build→upload→presign is best-effort inside a guard —
+    any failure is logged and the digest STILL sends, degraded to today's plain text (no link).
+    The email send itself stays loud, unchanged.
+
     Returns `{surfaced, below_threshold, sent}` (`sent` is 1 — a send failure raises before
     we get here)."""
     if not recipient_email:
@@ -701,11 +714,42 @@ def notify(
     # (DB row → documented default) and passes it down, so the surfaced/below split is computed
     # against the one config knob — the Repository no longer re-derives its own constant.
     since = repo.get_last_digest_sent_at(user_id=user_id)
+    the_date = run_date or date.today()
     items, below = repo.get_scored_shortlist(
         threshold=threshold, since=since, max_age_days=max_age_days
     )
+
+    # B-1: build the full-list report + presign a link to it. NON-FATAL by contract — read,
+    # render, upload and presign are ALL inside the guard; any failure degrades the digest to
+    # plain text (full_list_url stays None) and is logged, never raised. The link is same-day
+    # reachability, never a reason the daily run fails.
+    full_list_url: str | None = None
+    if report_store is not None:
+        try:
+            all_scored = repo.get_all_scored(max_age_days=max_age_days)
+            report_html = render_full_list(
+                all_scored,
+                threshold=threshold,
+                run_date=the_date,
+                generated_at=datetime.now(timezone.utc),
+            )
+            report_key = f"reports/{the_date.isoformat()}/jobs-{run_id}.html"
+            report_store.put_report(html=report_html, key=report_key)
+            full_list_url = report_store.presign(key=report_key, expires=_REPORT_URL_EXPIRY_S)
+            log.info(
+                "notify: full-list report uploaded (run_id=%s key=%s jobs=%d)",
+                run_id, report_key, len(all_scored),
+            )
+        except Exception as exc:  # noqa: BLE001 — the link is an enhancement; NEVER fail the send
+            log.warning(
+                "notify: full-list report skipped (run_id=%s) — digest sends without a link: %s",
+                run_id, exc,
+            )
+            full_list_url = None
+
     subject, html_body, text_body = render_digest(
-        items, below, threshold=threshold, date=run_date or date.today(), since=since
+        items, below, threshold=threshold, date=the_date, since=since,
+        full_list_url=full_list_url,
     )
     # A send failure propagates (NotifierError) — the v0 surface is the email; a failed send is
     # a failed run, not a swallowed warning (mirrors the loud DB-failure stance in score_gold).

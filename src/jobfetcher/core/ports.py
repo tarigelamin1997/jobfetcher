@@ -43,6 +43,11 @@ class ShortlistItem:
     fingerprint: str | None = None
     fetched_at: "datetime | None" = None
     scored_at: "datetime | None" = None
+    # B-1 (the full-list report — `get_all_scored` only): the human `score_override` and the
+    # latest application-outcome status. The daily-digest path (`get_scored_shortlist`) never
+    # sets these, so they stay None there and the digest renderer reads neither.
+    score_override: int | None = None
+    application_status: str | None = None
 
 
 class LlmError(Exception):
@@ -340,6 +345,19 @@ class Repository(Protocol):
 
         "Surfaced" matches Step 5's `surfaced`/`strong_fit` cut. Raises `RepositoryError` on a
         backend failure."""
+        ...
+
+    def get_all_scored(
+        self, *, max_age_days: "int | None" = None
+    ) -> "list[ShortlistItem]":
+        """Read EVERY scored posting — surfaced AND below-threshold — as `ShortlistItem`s ordered
+        by score DESC (the full-list report's input, B-1). The SAME `score`↔`posting`↔`bronze`
+        join as `get_scored_shortlist` but WITHOUT the threshold cut, plus `score_override` and
+        the latest `application_event.status` (a correlated newest-row subquery) on each item.
+
+        `max_age_days` bounds by posting age identically to `get_scored_shortlist` (unknown-age
+        rows INCLUDED; `None`/`0` = unbounded), so the report scopes to the same window the
+        digest does. Read-only. Raises `RepositoryError` on a backend failure."""
         ...
 
     def upsert_profile(
