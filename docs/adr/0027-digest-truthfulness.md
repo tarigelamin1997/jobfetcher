@@ -1,6 +1,6 @@
 # ADR-0027 — Digest truthfulness: new/still-open scoping, graduation visibility, render-time duplicate collapse
 
-**Status:** Accepted
+**Status:** Accepted · **shipped in v0.7.0's tag tree** (2026-07-08; live-validated 2026-07-09/10)
 **Date:** 2026-07-08
 
 ## Context
@@ -9,7 +9,7 @@ The daily digest was **cumulative and unbounded**: `get_scored_shortlist` was de
 
 ## Decision
 
-Make the digest tell the truth **render-side** — **no migration, no new table** (everything rides existing columns: `score.scored_at`/`previous_score`, `posting.fingerprint`, `run_log.digest_sent_at`). Commits `7364cc7` + `0eca0f7`; unreleased, ships as **v0.8.0**.
+Make the digest tell the truth **render-side** — **no migration, no new table** (everything rides existing columns: `score.scored_at`/`previous_score`, `posting.fingerprint`, `run_log.digest_sent_at`). Commits `7364cc7` + `0eca0f7`; **shipped inside the `v0.7.0` tag tree** (merged before the tag was cut; credited to v0.7.0 — see the CHANGELOG release-numbering note).
 
 - **The new/still-open rule (the Examiner-corrected version — see Consequences):** an item is **NEW** iff `since is None` (the first-ever digest — no `run_log` rows, everything is new) OR `scored_at is None` (defensive: an unknown judgment time never silently demotes a match) OR (`scored_at > since` AND (`previous_score is None` OR `previous_score < threshold <= score`)) — i.e. a **fresh judgment that is actually news**: a first scoring, or a graduation. Everything else above threshold is **STILL OPEN** — the daily repeat (scored before the last digest), the fresh-but-non-graduated re-score (being re-judged is not news), and a graduation an earlier digest already announced.
 - **`since` = the new `Repository.get_last_digest_sent_at(user_id)`** — `MAX(run_log.digest_sent_at)`, NULL-safe (`None` = first-ever) — resolved **once** by `notify()` and threaded to both the shortlist read and the renderer.

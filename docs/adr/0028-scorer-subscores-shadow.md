@@ -1,6 +1,6 @@
 # ADR-0028 — Scorer subscores + shadow code-total: the 7-factor formula exists at last
 
-**Status:** Accepted
+**Status:** Accepted · **shipped v0.8.0** (2026-07-10)
 **Date:** 2026-07-08
 
 ## Context
@@ -11,7 +11,7 @@ The deeper finding: the **7-factor weights existed NOWHERE**. The architecture d
 
 ## Decision
 
-Decompose the score into **7 per-factor subscores**, write the weight formula down **in code for the first time**, and run the code-side total in **SHADOW mode** — observed, logged, persisted, but **never the product number** until M7 says so. Ships as migration **`0006_subscores`** (chains to `0005_application_event`); commits `168ab39` + `33a8ef4` + `cda34b9`; unreleased, rides **v0.9.0**. **CRUCIAL tier under the severity-gated policy — the PR goes to Tarig** (unlike Run 3's auto-pilot merge).
+Decompose the score into **7 per-factor subscores**, write the weight formula down **in code for the first time**, and run the code-side total in **SHADOW mode** — observed, logged, persisted, but **never the product number** until M7 says so. Ships as migration **`0006_subscores`** (chains to `0005_application_event`); commits `168ab39` + `33a8ef4` + `cda34b9`; **shipped as v0.8.0** (2026-07-10). **CRUCIAL tier under the severity-gated policy — PR-reviewed by Tarig** (unlike Run 3's auto-pilot merge).
 
 - **`ScoreResult` gains 7 OPTIONAL bounded (0–100) subscore fields** — `core_skill_match`, `tool_tech_alignment`, `achievement_relevance`, `seniority_scope`, `ats_keyword_coverage`, `domain_sector_fit`, `realistic_fit`.
 - **`FACTOR_WEIGHTS` ([core/scorer.py](../../src/jobfetcher/core/scorer.py)) — the formula's first documented existence.** Chosen by Tarig 2026-07-08; provenance: the original draft-PDF's ATS scoring framework, adapted. **core_skill_match 0.30 · tool_tech_alignment 0.20 · achievement_relevance 0.15 · seniority_scope 0.15 · ats_keyword_coverage 0.10 · domain_sector_fit 0.05 · realistic_fit 0.05.** A **module-load `assert sum == 1.0`** makes a mis-edited table fail the import, not skew every total (verified exact in IEEE-754 *as ordered* — see Consequences for the Examiner's order-fragility note).

@@ -27,6 +27,8 @@ This is the **engine**, run *after every release*:
 
 > Every migration's ADR must be honestly labeled **tool-bottleneck-driven** or, if it's a deliberate portfolio showcase, **portfolio-capability-driven (minimal version)** — never disguised as a need it isn't.
 
+> **Where candidates come from:** friction found by *using the tool* accumulates in the [backlog ledger](ledgers/backlog.md) — the raw input to **step 2** above. Open items (2026-07-10): **B-1** reachable full-list-from-the-digest (the "…and 55 more / +225 below threshold" lines are dead text, not links) · **B-2** digest deliverability (landed in Gmail Spam). These are ranked alongside the directional candidates when the next migration is chosen.
+
 ---
 
 ## Directional roadmap (hypothesis)

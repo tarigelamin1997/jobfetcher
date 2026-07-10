@@ -1,6 +1,6 @@
 # ADR-0029 — Ops hardening: S3 remote state · dead-man + errors alarms · the `{"mode":"smoke"}` deploy gate
 
-**Status:** Accepted
+**Status:** Accepted · **shipped v0.9.0** (2026-07-10)
 **Date:** 2026-07-08
 
 ## Context
@@ -13,7 +13,7 @@ Three operational risks had accumulated under eight releases of capability work,
 
 ## Decision
 
-Fix all three as one **ops-hardening** unit — **Squad Run 5, the final run of the squad program**. Commits `7b724ce` (terraform) + `09335b2` (handler + tests) + `2c48b1b` (runbook) + `a359431` (Examiner fixes); unreleased, ships as a **chore release** after Tarig's PR review + the one-time state migration. **CRUCIAL tier — the PR goes to Tarig.**
+Fix all three as one **ops-hardening** unit — **Squad Run 5, the final run of the squad program**. Commits `7b724ce` (terraform) + `09335b2` (handler + tests) + `2c48b1b` (runbook) + `a359431` (Examiner fixes); **shipped as v0.9.0** (2026-07-10) after Tarig's PR review + the one-time state migration. **CRUCIAL tier — PR-reviewed by Tarig.**
 
 - **S3 remote state** ([providers.tf](../../terraform/providers.tf)): a **`backend "s3"`** block — bucket **`jobfetcher-tfstate-198592435375`, deliberately UNMANAGED** (created once outside the stack, never a resource in this config) because the state must **survive `terraform destroy`** — the end-of-day teardown cadence makes a stack-managed state bucket a chicken-and-egg: destroying the stack would delete the record of its own teardown (the Investigator's draft had exactly that; the orchestrator caught it). Locking is **`use_lockfile = true`** — TF ≥ 1.10 **native S3 locking**, no DynamoDB lock table — so `required_version` bumps **1.6 → 1.10** accordingly. The **ONE-TIME local→S3 migration is human-present** ([deploy runbook §3](../runbooks/deploy.md)): **backup first → `terraform init -migrate-state` → a ZERO-drift `terraform plan` as the stop condition → local-file removal last.**
 - **Two CloudWatch alarms → one SNS topic → email** ([alarms.tf](../../terraform/alarms.tf); endpoint `var.recipient_email`; the subscription delivers nothing until the **confirmation click** — [runbook §4](../runbooks/deploy.md); new **`alarms_topic_arn`** output for the verify step, Examiner S1):
