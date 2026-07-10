@@ -112,6 +112,8 @@ dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in s
 
 ## How to run
 
+> **New here?** Follow the self-contained **[Getting Started guide](docs/getting-started.md)** — a clone-to-first-run walkthrough (accounts → keys → SES → your own state bucket → deploy → first digest → teardown, with troubleshooting). The steps below are the concise reference for readers already comfortable with AWS + Terraform.
+
 ### Prerequisites
 
 - An **AWS session** for the `jobfetcher-dev` IAM user (region us-east-1).
@@ -221,6 +223,7 @@ This project treats **documentation as infrastructure** — the repo is the memo
 
 | Doc | What it holds |
 |---|---|
+| 🚀 [`docs/getting-started.md`](docs/getting-started.md) | **Clone → first run** — the self-contained setup walkthrough (start here) |
 | 🧭 [`CLAUDE.md`](CLAUDE.md) | Operating rules + navigation |
 | 🧩 [`docs/00-design-philosophy.md`](docs/00-design-philosophy.md) | P1/P2, the defensibility rubric, the two pillars — the constitution |
 | 📓 [`docs/01-session-decision-journal.md`](docs/01-session-decision-journal.md) | *Why* the design is what it is — including the reversals (the Bedrock-quota wall, the silver-dissection evolution) |
