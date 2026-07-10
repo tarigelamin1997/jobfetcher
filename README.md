@@ -2,7 +2,7 @@
 
 **A serverless job-matching pipeline that fetches roles, scores them against your real profile with an LLM, and emails you a daily shortlist — built as an *evolutionary architecture* you can watch grow, one deliberate, documented migration at a time.**
 
-> **Status: `v0.6.0` SHIPPED (2026-07-06).** The minimal core (`v0.1.0`) is live on AWS; five bottleneck-driven migrations have shipped on top of it, each a clean release. A single scheduled Lambda runs **JSearch fetch → bronze (S3 + Postgres) → silver (DeepSeek dissect) → gold filter → 7-factor ATS score → SES daily digest**, on Aurora Serverless v2 + the RDS Data API, with Terraform infra, Secrets Manager, a real test pyramid, and GitHub Actions CI. **The release arc since v0:** `v0.2.0` **M1 pipeline hardening** (concurrent in-Lambda dissection + deadline guard + failure isolation → ~13× throughput, 0 run-fatal errors) → `v0.3.0/.1` **user-customizable settings + runtime config in S3** (change any knob with `push_config.py`, no rebuild/redeploy) → `v0.4.0` **reassess/replay** (`{"mode":"reassess"}` re-scores against your current profile with zero JSearch calls — a `stretch` job graduates to `strong_fit` as you grow) → `v0.5.0` **query/filter access** (`export.py` → portable SQLite + CSV for Datasette/Excel) → `v0.6.0` **email UX** (a scannable one-card-per-job digest with a prominent Apply button). Everything past v0 is a *hypothesis* re-derived after each release via the bottleneck protocol — see the [roadmap](docs/03-roadmap.md) · [CHANGELOG](CHANGELOG.md) · live [phase index](docs/ledgers/phase-index.md).
+> **Status: `v0.10.0` SHIPPED (2026-07-10).** The minimal core (`v0.1.0`) is live on AWS; nine bottleneck-driven releases have shipped on top of it, each a clean release — and as of `v0.9.0` the pipeline **runs itself fully unattended** (the daily 06:00 UTC EventBridge cron flew solo end-to-end on 2026-07-10, digest delivered with nobody watching). A single scheduled Lambda runs **JSearch fetch → bronze (S3 + Postgres) → silver (DeepSeek dissect) → gold filter → 7-factor ATS score (+7 shadow subscores) → SES daily digest (with a presigned full-list report link)**, on Aurora Serverless v2 + the RDS Data API, with Terraform infra (S3 remote state), Secrets Manager, CloudWatch alarms → SNS, a real test pyramid, and GitHub Actions CI. **The release arc since v0:** `v0.2.0` **M1 pipeline hardening** (concurrent in-Lambda dissection + deadline guard + failure isolation → ~13× throughput, 0 run-fatal errors) → `v0.3.0/.1` **user-customizable settings + runtime config in S3** (change any knob with `push_config.py`, no rebuild/redeploy) → `v0.4.0` **reassess/replay** (`{"mode":"reassess"}` re-scores against your current profile with zero JSearch calls — a `stretch` job graduates to `strong_fit` as you grow) → `v0.5.0` **query/filter access** (`export.py` → portable SQLite + CSV for Datasette/Excel) → `v0.6.0` **email UX** (a scannable one-card-per-job digest with a prominent Apply button) → `v0.7.0` **"the pipeline remembers"** (append-only `score_event` + `application_event` lineage, human-override tracking, a truthful new-vs-still-open digest) → `v0.8.0` **scorer integrity** (7 bounded subscores + `FACTOR_WEIGHTS` + a SHADOW-mode weighted `code_total`) → `v0.9.0` **ops hardening** (S3 remote state, dead-man + Errors alarms → SNS email, a `{"mode":"smoke"}` deploy gate, Aurora cold-start resume-wait) → `v0.10.0` **reachable full-list** (the digest's dead overflow lines become a presigned link to a self-contained HTML page of every scored job). `v0.7.0`–`v0.10.0` were built by the **agentic squad workflow** (Investigator → Surgeon → Examiner per bottleneck). Everything past v0 is a *hypothesis* re-derived after each release via the bottleneck protocol — see the [roadmap](docs/03-roadmap.md) · [CHANGELOG](CHANGELOG.md) · live [phase index](docs/ledgers/phase-index.md).
 
 **Dual purpose, equal weight:** a tool Tarig Elamin (Data Engineer, Riyadh → GCC) uses daily to find and score jobs, *and* a portfolio piece that proves production AWS + Data-Engineering skill. Every component must earn both.
 
@@ -26,25 +26,30 @@ A personal-scale tool built to **production standards**, and deliberately an exe
 
 ## Architecture
 
-### As-built (what's live today, `v0.6.0`)
+### As-built (what's live today, `v0.10.0`)
 
-One EventBridge-scheduled Lambda (`jobfetcher.handlers.pipeline.handler`) runs the whole operational medallion, threading one correlation `run_id` through logs, rows, and S3 objects. Since v0 it has gained **in-Lambda concurrency** (a `ThreadPoolExecutor` fans out silver dissection with all DB writes kept on the main thread) behind a **deadline guard** (a run returns `partial` rather than timing out), a **`{"mode":"reassess"}` replay path** (re-score already-bronzed postings against the current profile, zero JSearch calls), **runtime config read from S3** (settings change with no rebuild/redeploy), and a **card-style SES digest that tells the truth** — "new since last digest" leads (graduations badged `↑ old→new`), earlier matches compact into a "still open" count, and same-fingerprint repeats collapse to one card ([ADR-0027](docs/adr/0027-digest-truthfulness.md)):
+One EventBridge-scheduled Lambda (`jobfetcher.handlers.pipeline.handler`) runs the whole operational medallion **fully unattended** (the daily 06:00 UTC cron ran solo end-to-end 2026-07-10), threading one correlation `run_id` through logs, rows, and S3 objects. Since v0 it has gained **in-Lambda concurrency** (a `ThreadPoolExecutor` fans out silver dissection with all DB writes kept on the main thread) behind a **deadline guard** (a run returns `partial` rather than timing out), a **`{"mode":"reassess"}` replay path** (re-score already-bronzed postings against the current profile, zero JSearch calls), **runtime config read from S3** (settings change with no rebuild/redeploy), **append-only `score_event` + `application_event` lineage** (re-scores and human overrides never erase judgments), a **7-factor score carrying 7 bounded subscores + a SHADOW-mode weighted `code_total`** (logged + persisted, never yet the product number — an M7 cut-over criterion), a **card-style SES digest that tells the truth** — "new since last digest" leads (graduations badged `↑ old→new`), earlier matches compact into a "still open" count, and same-fingerprint repeats collapse to one card ([ADR-0027](docs/adr/0027-digest-truthfulness.md)) — whose overflow lines now carry a **presigned link to a self-contained HTML page of every scored job** ([ADR-0030](docs/adr/0030-reachable-full-list-from-digest.md)), and an **ops-hardened runtime** — a **`{"mode":"smoke"}` post-deploy gate**, two **CloudWatch alarms → SNS email** (a dead-man on the daily rule + a Lambda Errors alarm), and an **Aurora cold-start resume-wait** so a scale-to-zero resume is waited out, not fatal ([ADR-0029](docs/adr/0029-ops-hardening.md); [ERR-009](docs/ledgers/errors.md)):
 
 ```mermaid
 flowchart LR
-  EB["EventBridge<br/>daily cron"] --> H["one Lambda<br/>handlers.pipeline.handler"]
-  H --> F["fetch<br/>JSearch API"]
+  EB["EventBridge<br/>daily 06:00 UTC cron"] --> H["one Lambda<br/>handlers.pipeline.handler"]
+  H --> SMK{"mode?"}
+  SMK -. smoke .-> SG["smoke gate<br/>Data-API + alembic_version<br/>→ 200/400/500"]
+  SMK -- default --> F["fetch<br/>JSearch API"]
   F --> B["bronze<br/>raw JSON → S3 + bronze_posting"]
   B --> S["silver<br/>clean + DeepSeek dissect → posting"]
   S --> G["gold<br/>deterministic FilterStrategy → gold_candidate + 1:1 cluster"]
-  G --> SC["score<br/>DeepSeek 7-factor ATS → score rows"]
-  SC --> N["notify<br/>SES HTML+plaintext digest"]
+  G --> SC["score<br/>DeepSeek 7-factor ATS + 7 shadow subscores<br/>+ weighted code_total → score rows"]
+  SC --> N["notify<br/>SES card digest + presigned full-list link"]
+  N --> RPT["report<br/>self-contained HTML → S3 reports/"]
   SM["Secrets Manager<br/>jobfetcher/deepseek · jobfetcher/jsearch"] -.-> H
   B -. raw .-> S3[("S3")]
+  RPT -. presigned .-> S3
   B <--> PG[("Aurora Serverless v2<br/>+ RDS Data API")]
   S <--> PG
-  SC <--> PG
+  SC <-. score_event lineage .-> PG
   N -. send-once run_log .-> PG
+  H -. errors / dead-man .-> AL["CloudWatch alarms<br/>→ SNS email"]
 ```
 
 - **Idempotent per run-date:** upserts + a `run_log` send-once guard (PK `(run_date, user_id)`) mean a re-run produces identical rows and **at most one digest per day**; a stage failure returns `500` so the next invocation resumes. SES (external) can't join the DB transaction, so the email is **at-least-once** — send, then mark.
@@ -95,9 +100,10 @@ The CV tailor, multi-source clustering dedup, Step Functions, Notion, and the db
 | **LLM** | OpenAI-compatible API, **provider + model in config** ([ADR-0017](docs/adr/0017-llm-transport-openai-compatible-deepseek.md)); v0 = **DeepSeek** (`deepseek-v4-flash` dissect · `deepseek-v4-pro` score). Bedrock parked. |
 | **Email** | SES (HTML + plaintext digest) |
 | **Secrets** | Secrets Manager (`jobfetcher/deepseek`, `jobfetcher/jsearch`) |
-| **IaC** | Terraform 1.14 — **14 resources**, us-east-1, least-privilege IAM (no Bedrock) |
+| **IaC** | Terraform ≥ 1.10 — **21 resources**, us-east-1, least-privilege IAM (no Bedrock); **S3 remote state** (`backend "s3"`, native `use_lockfile` locking, deliberately unmanaged state bucket) |
+| **Observability** | 2 CloudWatch alarms (dead-man on the daily rule + Lambda Errors) → 1 SNS topic → email; `{"mode":"smoke"}` post-deploy gate |
 | **AWS SDK** | boto3 |
-| **Tests** | pytest — **311 unit + 39 integration green**, live smoke, 85%+ coverage floor |
+| **Tests** | pytest — **385 unit + ~45 integration green** (+5 live-key skips), live smoke, ~95% coverage (85% floor) |
 | **CI** | GitHub Actions — ruff + tests + 85% coverage floor + `terraform validate` + **gitleaks** secret-scan; pre-commit (gitleaks + ruff) |
 
 dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in sibling projects — not in this repo today. See the [decision journal](docs/01-session-decision-journal.md).
@@ -120,9 +126,10 @@ dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in s
 
 ```bash
 python scripts/build_lambda.py        # package the Lambda artifact
-terraform -chdir=infra apply          # ~14 resources (Aurora + Data API, S3, Lambda, EventBridge, SES, IAM)
+terraform -chdir=terraform init       # S3 remote-state backend (unmanaged bucket, native locking)
+terraform -chdir=terraform apply      # ~21 resources (Aurora + Data API, S3, Lambda, EventBridge, SES, IAM, alarms + SNS)
 alembic upgrade head                  # create the schema on Aurora, over the Data API
-# invoke the Lambda (EventBridge fires daily; or invoke manually) → statusCode 200
+# invoke {"mode":"smoke"} → 200 (deploy gate); EventBridge then fires daily at 06:00 UTC → statusCode 200
 ```
 
 `terraform destroy` returns the account to ~$0 when idle (Aurora scales to zero between runs regardless).
@@ -176,6 +183,9 @@ LocalStack can't mock the Aurora Data API, so integration DB tests use a **real 
 - **Live end-to-end validation (2026-06-29):** `terraform apply` → 14 resources → `alembic upgrade head` over the Data API → invoke → `statusCode 200` → **fetched 10 → bronzed 10 → silvered 8 → gold 8 → scored 8 → notify sent**. **Two emails delivered, 0 SES bounces:** a no-matches digest (threshold 60) and, on an **idempotent re-run** (`already: 8` skipped — VG4 live), a populated shortlist (threshold lowered to 20). Then `terraform destroy` → 14 destroyed, back to ~$0.
 - **M1 re-validated live (2026-07-02):** re-run on the exact ~132-posting backlog that had killed the pre-fix code → `statusCode 200`, backlog fully dissected + scored, **~13× throughput** (~1.1→~14–15 dissections/min), **0 run-fatal errors** (failures isolated per-posting), junk eliminated, **21-job digest sent** ([ADR-0021](docs/adr/0021-m1-pipeline-hardening.md); ERR-006/007).
 - **Reassess proven live (2026-07-06):** `{"mode":"reassess"}` re-scored **180** postings against an improved profile, **15 graduated** (e.g. Data Platform Engineer @ Saudi Aramco 35→85), **bronze unchanged** (no re-fetch) ([ADR-0023](docs/adr/0023-reassess-replay.md)).
+- **Lineage proven live (2026-07-08):** migrations `0004`+`0005` applied over the Data API with the **228-score baseline backfill verified**; a reassess smoke wrote **771 lineage events through the new dual-write**, **10 graduations standing**, and one `track.py override` exercised the codebase's first **`.rowcount` over the Data API** (clean) ([ADR-0025](docs/adr/0025-score-event-lineage.md) · [ADR-0026](docs/adr/0026-outcome-tracking-override-lineage.md); ERR-008).
+- **First unattended flight (2026-07-10 06:00 UTC):** the daily EventBridge cron ran the whole pipeline end-to-end and delivered a digest **with nobody watching** — post-deploy smoke gate `200 @ 0006_subscores`, both alarms armed ([ADR-0029](docs/adr/0029-ops-hardening.md)).
+- **Reachable full-list proven live (2026-07-10):** `get_all_scored` over the Aurora Data API returned **286 rows** (61 above / 225 below threshold), rendered into a **~242 KB self-contained HTML report** written to S3 and presigned into the digest ([ADR-0030](docs/adr/0030-reachable-full-list-from-digest.md)).
 - **Validation gates VG1–VG8** are **behavioral and carry a negative case** (a presence/liveness check is no gate): ingestion, scoring, best-effort determinism, idempotency, notification, teardown, secrets hygiene, threshold-is-config. Each maps to named positive + negative tests in [`tests/README.md`](tests/README.md).
 - **CI** runs ruff, the test suite with an 85% coverage floor, `terraform validate`, and a gitleaks secret-scan on every push.
 
@@ -183,13 +193,14 @@ LocalStack can't mock the Aurora Data API, so integration DB tests use a **real 
 
 ## Roadmap
 
-`v0.1.0` is the **irreducible working core**. Everything after it is chosen by the **bottleneck-decision protocol**, not a fixed plan: ship → use → surface the top-3 bottlenecks to the next real capability → rank by leverage (capability ÷ complexity) → break the biggest with the minimal migration → repeat. **The protocol has already overruled the plan:** the pre-drawn *M1 = CV tailoring* hypothesis lost to real use — live running surfaced pipeline throughput/reliability as the biggest bottleneck, so **M1 became pipeline hardening** and CV tailoring was re-queued. Five migrations have shipped; the still-future queue below is *direction, not contract* — re-derived after each release. Full protocol + migration table in [`docs/03-roadmap.md`](docs/03-roadmap.md).
+`v0.1.0` is the **irreducible working core**. Everything after it is chosen by the **bottleneck-decision protocol**, not a fixed plan: ship → use → surface the top-3 bottlenecks to the next real capability → rank by leverage (capability ÷ complexity) → break the biggest with the minimal migration → repeat. **The protocol has already overruled the plan:** the pre-drawn *M1 = CV tailoring* hypothesis lost to real use — live running surfaced pipeline throughput/reliability as the biggest bottleneck, so **M1 became pipeline hardening** and CV tailoring was re-queued. Nine releases have shipped; the still-future queue below is *direction, not contract* — re-derived after each release. Full protocol + migration table in [`docs/03-roadmap.md`](docs/03-roadmap.md).
 
 ```mermaid
 flowchart LR
   v0["v0.1.0 ✅<br/>fetch → score → email<br/>deployed · $0"] --> M1["v0.2.0 ✅<br/>M1 pipeline hardening"]
   M1 --> S["v0.3–0.6 ✅<br/>settings/config-in-S3 ·<br/>reassess · query · email UX"]
-  S --> CV["⬜ CV tailoring<br/>(old M1, re-queued)"]
+  S --> S2["v0.7–0.10 ✅<br/>lineage + outcomes · scorer<br/>subscores · ops hardening ·<br/>reachable full-list · unattended"]
+  S2 --> CV["⬜ CV tailoring<br/>(old M1, re-queued)"]
   CV --> M2["⬜ multi-source + dedup"]
   M2 --> M3["⬜ Step Functions"]
   M3 --> M4["⬜ Notion + near-miss"]

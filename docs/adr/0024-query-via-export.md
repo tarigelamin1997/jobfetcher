@@ -1,6 +1,6 @@
 # ADR-0024 — Query / filter via export-to-SQLite (not a custom UI)
 
-**Status:** Accepted
+**Status:** Accepted · shipped v0.5.0 (2026-07-06)
 **Date:** 2026-07-06
 
 ## Context

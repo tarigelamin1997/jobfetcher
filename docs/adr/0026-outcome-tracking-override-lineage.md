@@ -1,6 +1,6 @@
 # ADR-0026 — Append-only `application_event` outcome tracking + human-override lineage
 
-**Status:** Accepted
+**Status:** Accepted · shipped v0.7.0 (2026-07-08)
 **Date:** 2026-07-07
 
 ## Context

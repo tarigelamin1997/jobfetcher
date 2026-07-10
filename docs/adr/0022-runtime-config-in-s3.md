@@ -1,6 +1,6 @@
 # ADR-0022 — Runtime config in S3 (settings without a redeploy)
 
-**Status:** Accepted
+**Status:** Accepted · shipped v0.3.0 (2026-07-03)
 **Date:** 2026-07-03
 
 ## Context

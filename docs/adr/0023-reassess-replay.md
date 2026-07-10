@@ -1,6 +1,6 @@
 # ADR-0023 — Reassess / replay: re-score existing jobs on an updated profile (no re-fetch)
 
-**Status:** Accepted
+**Status:** Accepted · shipped v0.4.0 (2026-07-06)
 **Date:** 2026-07-03
 
 ## Context

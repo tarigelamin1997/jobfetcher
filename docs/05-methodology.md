@@ -21,12 +21,12 @@ Plus the **four-layer pattern** for any project-wide standard: *define once → 
 ## RIGHT-SIZE (keep the idea, shrink the ceremony — solo scale)
 - **Per-phase doc ceremony → collapsed.** One project doc set + short per-migration notes, not a heavy `CLAUDE.md`-per-phase with a 12-section template.
 - **Chaos/stress discipline → a couple of targeted negative-injection tests** on the riskiest path (folded into the validation negative-cases), **not** the full six-angle matrix. Label skipped angles with a one-line reason.
-- **Observability → right-sized:** a few real alarms (pipeline-didn't-run, cost-spike, error-rate) + documented SLOs, not a full dashboard suite (that's M7, and even then modest).
+- **Observability → right-sized:** a few real alarms (pipeline-didn't-run, cost-spike, error-rate) + documented SLOs, not a full dashboard suite. *(Shipped in v0.9.0 / [ADR-0029](adr/0029-ops-hardening.md): the dead-man "pipeline-didn't-run" alarm + a Lambda "error-rate" alarm → SNS email. The dashboards + SLO-calibration remainder stays deferred to M7, and even then modest.)*
 - **Meta-ADRs → short paragraphs**, not full ceremony.
 - **Fitness functions → only for genuine architectural invariants** (e.g. "the analytical plane never writes operational tables"), not one-per-property by rote.
 
 ## CUT / label-as-deferred (overkill at single-user scale — value is coordination across people)
-- **External PR reviewer as a hard gate** → our own CI + a self-review pass suffices. (Optional showcase later.)
+- **A *human* external PR reviewer as a hard gate** → our own CI + the fresh-context adversarial Examiner + **CodeRabbit** (now a standing per-PR automated reviewer, [ADR-0019](adr/0019-agentic-build-orchestration.md)) suffice — only the *human* external-reviewer hard gate is cut. (A human co-reviewer stays optional.)
 - **`/audit-foundation` as standing automation** → run an ad-hoc consistency check before a release, no standing command.
 - **Full Templates Library abstraction** → inline the 2–3 skeletons we actually reuse (ADR, error entry).
 - **One-file-per-phase / per-error directory sprawl** → flat ledgers (one `errors.md`, one decisions table).

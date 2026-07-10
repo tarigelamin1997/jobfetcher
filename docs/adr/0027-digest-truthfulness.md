@@ -1,6 +1,6 @@
 # ADR-0027 — Digest truthfulness: new/still-open scoping, graduation visibility, render-time duplicate collapse
 
-**Status:** Accepted · **shipped in v0.7.0's tag tree** (2026-07-08; live-validated 2026-07-09/10)
+**Status:** Accepted · **shipped in v0.7.0's tag tree** (2026-07-08; live-validated 2026-07-09/10) · *(partially superseded by [ADR-0030](0030-reachable-full-list-from-digest.md): the still-open overflow + below-threshold dead-text lines became a presigned S3 report link in v0.10.0 — the new/still-open split, graduation badges, and duplicate collapse stand)*
 **Date:** 2026-07-08
 
 ## Context
@@ -30,6 +30,7 @@ Make the digest tell the truth **render-side** — **no migration, no new table*
 ## Consequences
 
 - **The daily email is news again** — new matches lead, graduations are finally *visible* in the email (closing the "the digest of these rides the email-UX unit" promissory note from [ADR-0023](0023-reassess-replay.md)), a duplicated role costs one card instead of five, and stale postings age out instead of accumulating forever.
+- **Superseded here (v0.10.0, [ADR-0030](0030-reachable-full-list-from-digest.md)):** the still-open **"…and n more — see your export"** overflow line and the below-threshold footer were non-clickable dead text (pointing at the *local* export) — both are now replaced by a **presigned S3 link** to a self-contained, filterable HTML page of ALL scored jobs. The truthfulness machinery above (new/still-open split, `↑ old→new` graduation badges, render-time duplicate collapse, the age bound) is unchanged.
 - **A process win worth recording honestly:** this was the **first auto-pilot unit** under the severity-gated policy adopted 2026-07-07 (Claude merges on a clean Examiner pass + green CI, no per-unit human gate). The original spec carried the `previous_score`-only newness defect above; the **independent fresh-context Examiner caught it** (a *contested* finding, adjudicated fix-now), the rule was corrected (`0eca0f7`), and the re-verify came back **CLEAN PASS**. The severity gate did exactly what it was adopted to do.
 - **Known cosmetic corners (recorded, not hidden):** (1) a straddling dup group made NEW by a fresh twin uses its highest-scoring member as representative — so a *stale* graduation badge can re-render on that card (factually true, narrow); (2) `scored_at == since` exactly classifies still-open (the correct direction; not pinned by a test); (3) the plaintext dup footnote lists the collapsed raw posting ids while the HTML omits them (a deliberate plaintext-debuggability asymmetry).
 - **⚠️ Deploy sequencing (the ADR-0025 F1-class again):** `digest_max_age_days` is REQUIRED and the runtime config lives in S3 ([ADR-0022](0022-runtime-config-in-s3.md)) — the deployed S3 config **must be re-pushed** (`scripts/push_config.py`) before the next invoke after this deploys, or **every run fails loudly** (`SearchSpec` ValidationError). Same order as v0.7.0's `reassess_max_age_days`: **update the local config YML → `push_config.py` → deploy/invoke** (registered in the [procedure registry](../ledgers/procedure-registry.md)).

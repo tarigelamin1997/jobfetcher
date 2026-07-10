@@ -1,6 +1,6 @@
 # ADR-0025 — Append-only `score_event` lineage + a reassess age bound
 
-**Status:** Accepted
+**Status:** Accepted · shipped v0.7.0 (2026-07-08)
 **Date:** 2026-07-07
 
 ## Context
