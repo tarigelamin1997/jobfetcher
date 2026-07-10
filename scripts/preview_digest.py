@@ -5,7 +5,10 @@
 
 The sample exercises every branch of the truthful digest: a genuinely-new match, a
 **graduation** (green `↑ 55→72` badge), a **collapsed dup group** (seen 3× — scores 75–88),
-the no-apply-link state, and the compact **still-open** section (already-surfaced matches).
+the no-apply-link state, and the compact **still-open** section (already-surfaced matches). It
+also passes a sample `full_list_url` so the **linked state** (B-1) of the below-threshold footer
+and the "…and N more" overflow renders, and writes the full-list report page itself to
+`export/full_list_preview.html`.
 
     python scripts/preview_digest.py    # -> export/digest_preview.html (open it in a browser)
 """
@@ -20,6 +23,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from jobfetcher.core.notifier import render_digest  # noqa: E402
 from jobfetcher.core.ports import ShortlistItem  # noqa: E402
+from jobfetcher.core.report import render_full_list  # noqa: E402
+
+# A sample presigned-style link (https so it passes the notifier's scheme allowlist) — the
+# real one is minted per run by S3ReportStore.presign; here it just shows the linked state.
+_FULL_LIST_URL = "https://jobfetcher-data.example.com/reports/2026-07-10/jobs-preview.html?sig=demo"
 
 # When the "last digest" went out — the new/still-open split compares each item's scored_at
 # to this: a judgment written AFTER it (fresh) can be news; anything older is still-open.
@@ -103,15 +111,34 @@ def main() -> None:
     # grouping/ordering assumes that input invariant, so the preview honors it too.
     items = sorted(_SAMPLE, key=lambda i: i.score, reverse=True)
     subject, html, text = render_digest(
-        items, below_count=17, threshold=60, date=date.today(), since=_SINCE
+        items, below_count=17, threshold=60, date=date.today(), since=_SINCE,
+        full_list_url=_FULL_LIST_URL,
+    )
+    # The full-list report page itself: reuse the same sample + a few synthetic below-threshold
+    # rows so the "show below-threshold" filter has something to hide/show.
+    below_sample = [
+        ShortlistItem(
+            posting_id=f"below-{i}", title=f"Junior Role {i}", company=f"SmallCo {i}",
+            apply_url=f"https://jobs.example.com/apply/below-{i}",
+            normalized_title="Data Analyst", score=score, fit_category="near_miss",
+            strengths=["SQL basics"], gaps=["needs more platform depth"],
+            city="Riyadh", country="sa", scored_at=_FRESH,
+        )
+        for i, score in enumerate((55, 48, 40))
+    ]
+    full_list_html = render_full_list(
+        sorted(items + below_sample, key=lambda i: i.score, reverse=True),
+        threshold=60, run_date=date.today(), generated_at=datetime.now(timezone.utc),
     )
     out = ROOT / "export"
     out.mkdir(parents=True, exist_ok=True)
     (out / "digest_preview.html").write_text(html, encoding="utf-8")
     (out / "digest_preview.txt").write_text(text, encoding="utf-8")
+    (out / "full_list_preview.html").write_text(full_list_html, encoding="utf-8")
     print(f"subject: {subject}")
     print(f"wrote {out / 'digest_preview.html'}  (open it in a browser)")
     print(f"wrote {out / 'digest_preview.txt'}")
+    print(f"wrote {out / 'full_list_preview.html'}  (the full-list report page)")
 
 
 if __name__ == "__main__":

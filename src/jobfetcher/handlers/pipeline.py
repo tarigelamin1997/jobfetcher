@@ -39,6 +39,7 @@ from ..adapters.llm_openai import OpenAICompatLlmClient
 from ..adapters.repository_postgres import PostgresRepository
 from ..adapters.s3_config import read_config_text
 from ..adapters.s3_raw import S3RawStore
+from ..adapters.s3_reports import S3ReportStore
 from ..adapters.ses_notifier import SesNotifier
 from ..config import LlmConfig
 from ..core.dissector import Dissector
@@ -347,6 +348,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         # Build the adapters (one place; each reads its own env var / secret path).
         source_adapter = JSearchSourceAdapter()
         raw_store = S3RawStore()
+        report_store = S3ReportStore()  # B-1: same data bucket; the full-list report + presign
         dissector = Dissector(
             OpenAICompatLlmClient(LlmConfig(model=_DISSECT_MODEL)), model_id=_DISSECT_MODEL
         )
@@ -442,6 +444,9 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 # Digest truthfulness: still-open matches older than this drop out of the
                 # digest (0 = keep forever) — the user knob, threaded like every other spec knob.
                 max_age_days=spec.digest_max_age_days,
+                # B-1: the full-list report + presigned link (best-effort inside notify —
+                # a report failure degrades the digest to plain text, never fails the run).
+                report_store=report_store,
             )
             # Mark sent ONLY after a successful send (notify raises on a failed send, so we never
             # get here on failure — the guard is not written, the next run re-sends).

@@ -239,6 +239,7 @@ def _wire_handler(monkeypatch, tmp_path, calls: list[str], *, wait=None):
     monkeypatch.setattr(pipe, "wait_for_db_resume", _fake_wait)
     monkeypatch.setattr(pipe, "JSearchSourceAdapter", lambda: object())
     monkeypatch.setattr(pipe, "S3RawStore", lambda: object())
+    monkeypatch.setattr(pipe, "S3ReportStore", lambda: object())
     monkeypatch.setattr(pipe, "SesNotifier", lambda: object())
     monkeypatch.setattr(
         pipe, "OpenAICompatLlmClient", lambda cfg=None, **kw: object()  # noqa: ARG005

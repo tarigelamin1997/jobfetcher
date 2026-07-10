@@ -666,6 +666,93 @@ class PostgresRepository:
                 below += 1
         return surfaced, below
 
+    def get_all_scored(
+        self, *, max_age_days: int | None = None
+    ) -> list[ShortlistItem]:
+        # The full-list report input (B-1): the SAME score↔posting↔bronze join as
+        # get_scored_shortlist, but WITHOUT the threshold cut — every scored posting (surfaced
+        # AND below) is returned, score DESC (posting_id tiebreak for a stable page). Two extra
+        # columns vs the shortlist: `score.score_override` (the human correction) and the latest
+        # application-outcome status via a correlated newest-row subquery on `application_event`
+        # (the `scripts/export.py` "latest status" shape, as a scalar subselect — Data-API-safe:
+        # a plain SELECT, no LATERAL). The `max_age_days` age bound is byte-for-byte the shortlist
+        # rule (unknown age INCLUDED; a bound parameter, never interpolated SQL).
+        s, p, b, ae = (
+            tables.score, tables.posting, tables.bronze_posting, tables.application_event
+        )
+        age_source = func.coalesce(p.c.fetched_at, b.c.fetched_at)
+        latest_status = (
+            select(ae.c.status)
+            .where(ae.c.posting_id == p.c.posting_id)
+            .order_by(ae.c.noted_at.desc(), ae.c.event_id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(
+                p.c.posting_id,
+                p.c.title,
+                p.c.company,
+                p.c.apply_url,
+                p.c.normalized_title,
+                p.c.city,
+                p.c.country,
+                p.c.fingerprint,
+                s.c.score,
+                s.c.score_override,
+                s.c.fit_category,
+                s.c.strengths,
+                s.c.gaps,
+                s.c.strategic_assessment,
+                s.c.previous_score,
+                s.c.scored_at,
+                age_source.label("effective_fetched_at"),
+                latest_status.label("application_status"),
+            )
+            .select_from(
+                s.join(p, s.c.cluster_id == p.c.cluster_id).outerjoin(
+                    b, p.c.bronze_id == b.c.bronze_id
+                )
+            )
+            .order_by(s.c.score.desc(), p.c.posting_id)
+        )
+        if max_age_days is not None and max_age_days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            stmt = stmt.where(age_source.is_(None) | (age_source >= cutoff))
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(stmt).mappings().all()
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"get_all_scored failed: {e}") from e
+
+        out: list[ShortlistItem] = []
+        for row in rows:
+            if row["score"] is None:
+                continue  # an un-scored join artifact never reaches the report
+            out.append(
+                ShortlistItem(
+                    posting_id=row["posting_id"],
+                    title=row["title"],
+                    company=row["company"],
+                    apply_url=row["apply_url"],
+                    normalized_title=row["normalized_title"],
+                    score=row["score"],
+                    fit_category=row["fit_category"],
+                    strengths=list(row["strengths"] or []),
+                    gaps=list(row["gaps"] or []),
+                    strategic_assessment=row["strategic_assessment"],
+                    city=row["city"],
+                    country=row["country"],
+                    previous_score=row["previous_score"],
+                    fingerprint=row["fingerprint"],
+                    fetched_at=row["effective_fetched_at"],
+                    scored_at=row["scored_at"],
+                    score_override=row["score_override"],
+                    application_status=row["application_status"],
+                )
+            )
+        return out
+
     def was_digest_sent(self, *, user_id: str, run_date: date) -> bool:
         stmt = select(tables.run_log.c.run_id).where(
             (tables.run_log.c.user_id == user_id)

@@ -407,6 +407,49 @@ def test_dup_group_straddling_sections_renders_once_in_new():
     assert text.count("tw-old") == 1                       # ...and only once (no second line)
 
 
+# --------------------------------------------------------------------------- full-list link (B-1)
+_FULL_URL = "https://data.example.com/reports/2026-06-27/jobs-r.html?sig=abc"
+
+
+def test_full_list_url_linkifies_footer_and_overflow():
+    # B-1: with a full_list_url BOTH dead lines become clickable https links — the below-
+    # threshold footer AND the still-open "…and N more" overflow — in HTML and plaintext.
+    opens = [_item(90 - i, f"o{i}", scored_at=_STALE, company=f"Comp{i}ny") for i in range(6)]
+    _, html, text = render_digest(opens, below_count=3, threshold=60, date=date(2026, 6, 27),
+                                  since=_SINCE, full_list_url=_FULL_URL)
+    # HTML: the presigned link is an href on both lines; the old dead "see your export" is gone
+    assert f'href="{_FULL_URL}"' in html
+    assert html.count(f'href="{_FULL_URL}"') == 2  # overflow line + footer line
+    assert "see the full list" in html
+    assert "see your export" not in html
+    # plaintext: the url appears on both the overflow line and the footer line
+    assert f"see the full list: {_FULL_URL}" in text
+    assert text.count(_FULL_URL) == 2
+    assert "see your export" not in text
+    assert f"+3 more scored below your threshold of 60 — see the full list: {_FULL_URL}" in text
+
+
+def test_full_list_url_none_keeps_plain_text():
+    # graceful default: no full_list_url → today's plain text is unchanged (no link).
+    opens = [_item(90 - i, f"o{i}", scored_at=_STALE) for i in range(6)]
+    _, html, text = render_digest(opens, below_count=3, threshold=60, date=date(2026, 6, 27),
+                                  since=_SINCE)
+    assert "see the full list" not in html and "see the full list" not in text
+    assert "see your export" in html and "see your export" in text
+    assert "+3 more scored below your threshold of 60" in text
+
+
+def test_full_list_url_hostile_scheme_is_not_linkified():
+    # security: a hostile scheme on the full_list_url must NOT become a link — it degrades to
+    # today's plain text, exactly like a None url (reuses the _safe_apply_url allowlist).
+    opens = [_item(90 - i, f"o{i}", scored_at=_STALE) for i in range(6)]
+    _, html, text = render_digest(opens, below_count=3, threshold=60, date=date(2026, 6, 27),
+                                  since=_SINCE, full_list_url="javascript:alert(1)")
+    assert "javascript:" not in html.lower() and "javascript:" not in text.lower()
+    assert "see the full list" not in html  # no link emitted for the unsafe url
+    assert "see your export" in html and "see your export" in text  # degraded to plain text
+
+
 # --------------------------------------------------------------------------- SesNotifier
 class _FakeSes:
     """Captures send_email calls; returns a canned MessageId."""
@@ -500,6 +543,34 @@ class _FakeRepo:
         self.seen_since = since
         self.seen_max_age_days = max_age_days
         return list(self._surfaced), self._below
+
+    def get_all_scored(self, *, max_age_days=None):
+        # B-1: the full-list report input — the whole scored set (surfaced + below). The fake
+        # reuses the surfaced list (enough to render a page); records the age bound threaded in.
+        self.seen_all_max_age = max_age_days
+        return list(self._surfaced)
+
+
+class _FakeReportStore:
+    """Captures the full-list report upload + presign; can be forced to fail either step (the
+    B-1 non-fatal-degradation contract)."""
+
+    url = "https://data.example.com/reports/2026-06-27/jobs-r.html?sig=abc"
+
+    def __init__(self, *, fail_put: bool = False, fail_presign: bool = False) -> None:
+        self.puts: list[dict[str, Any]] = []
+        self._fail_put = fail_put
+        self._fail_presign = fail_presign
+
+    def put_report(self, *, html: str, key: str) -> None:
+        if self._fail_put:
+            raise RuntimeError("s3 put_object boom")
+        self.puts.append({"html": html, "key": key})
+
+    def presign(self, *, key: str, expires: int) -> str:
+        if self._fail_presign:
+            raise RuntimeError("presign boom")
+        return self.url
 
 
 class _FakeNotifier:
@@ -618,3 +689,77 @@ def test_notify_default_max_age_is_none_unbounded():
     repo = _FakeRepo(threshold=60, surfaced=[_item(90)], below=0)
     notify(run_id="r", repo=repo, notifier=_FakeNotifier(), recipient_email="to@x.com")
     assert repo.seen_max_age_days is None
+
+
+# --------------------------------------------------------------------------- notify() + report (B-1)
+def test_notify_with_report_store_builds_and_embeds_link():
+    # positive (mocked S3+repo): a report is uploaded at the dated key and its presigned https
+    # link is embedded in the digest (the below-threshold footer, since below=4).
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90)], below=4)
+    store = _FakeReportStore()
+    notifier = _FakeNotifier()
+    out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+                 run_date=date(2026, 6, 27), report_store=store)
+    assert out == {"surfaced": 1, "below_threshold": 4, "sent": 1}
+    # uploaded once, at reports/{run_date}/jobs-{run_id}.html, with real HTML
+    assert len(store.puts) == 1
+    assert store.puts[0]["key"] == "reports/2026-06-27/jobs-r.html"
+    assert store.puts[0]["html"].lower().startswith("<!doctype html>")
+    # the presigned link is in BOTH bodies (linkified footer)
+    sent = notifier.sent[0]
+    assert store.url in sent["html"] and store.url in sent["text"]
+
+
+def test_notify_report_upload_failure_is_nonfatal():
+    # NEGATIVE #1a: the S3 upload raises → notify STILL sends (degraded, no link) and does not
+    # fail. (mark_digest_sent runs in the handler AFTER notify returns — so a non-raising notify
+    # is exactly what keeps the send-once guard writing.)
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90)], below=4)
+    store = _FakeReportStore(fail_put=True)
+    notifier = _FakeNotifier()
+    out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+                 run_date=date(2026, 6, 27), report_store=store)
+    assert out["sent"] == 1  # the digest still went out
+    sent = notifier.sent[0]
+    assert store.url not in sent["html"] and store.url not in sent["text"]  # no link
+    assert "+4 more scored below your threshold of 60" in sent["text"]  # plain footer survives
+
+
+def test_notify_report_presign_failure_is_nonfatal():
+    # NEGATIVE #1b: the upload succeeds but presign raises → still sends, degraded to no link.
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90)], below=4)
+    store = _FakeReportStore(fail_presign=True)
+    notifier = _FakeNotifier()
+    out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+                 run_date=date(2026, 6, 27), report_store=store)
+    assert out["sent"] == 1
+    assert store.url not in notifier.sent[0]["html"]
+
+
+def test_notify_zero_scored_with_report_store_still_sends():
+    # NEGATIVE #2: zero scored jobs + a report store → a valid "no matches" email still sends;
+    # the empty full-list page is built without crashing, and the run does not fail.
+    repo = _FakeRepo(threshold=60, surfaced=[], below=0)
+    store = _FakeReportStore()
+    notifier = _FakeNotifier()
+    out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+                 run_date=date(2026, 6, 27), report_store=store)
+    assert out == {"surfaced": 0, "below_threshold": 0, "sent": 1}
+    assert "no matches" in notifier.sent[0]["subject"].lower()
+
+
+def test_notify_no_report_store_sends_without_link():
+    # default: no report_store → get_all_scored is never called, digest has today's plain text.
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90)], below=4)
+    notifier = _FakeNotifier()
+    notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com")
+    assert not hasattr(repo, "seen_all_max_age")  # the report path was not taken
+    assert "see the full list" not in notifier.sent[0]["html"]
+
+
+def test_notify_threads_max_age_to_get_all_scored():
+    # the report scopes to the SAME age window as the digest (spec.digest_max_age_days).
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90)], below=1)
+    notify(run_id="r", repo=repo, notifier=_FakeNotifier(), recipient_email="to@x.com",
+           report_store=_FakeReportStore(), max_age_days=90)
+    assert repo.seen_all_max_age == 90
