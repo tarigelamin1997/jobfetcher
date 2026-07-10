@@ -13,7 +13,7 @@ A second, smaller finding rode along: `get_scored_for_reassess` had **no age fil
 
 ## Decision
 
-Keep `score` as the **current view** (every read path untouched) and add an **append-only `score_event` log** written in the same transaction — plus an age bound on reassess. Ships as migration **`0004_score_event_lineage`** (chains to `0003_run_log_send_guard`); unreleased, rides **v0.7.0**.
+Keep `score` as the **current view** (every read path untouched) and add an **append-only `score_event` log** written in the same transaction — plus an age bound on reassess. Ships as migration **`0004_score_event_lineage`** (chains to `0003_run_log_send_guard`); shipped in **v0.7.0**.
 
 - **The `score_event` table** — one immutable row per scoring event: `event_id` (serial PK, server-assigned), `cluster_id` (FK, NOT NULL), `score` + `fit_category` (NOT NULL), `strengths`/`gaps` (JSONB), `strategic_assessment`, `poster_type`, `legitimacy_verified`, `previous_score`, **`scoring_model` + `profile_hash` (NOT NULL — an event is never written without its provenance)**, `run_id`, `scored_at` (timestamptz, default `now()`); indexed on `cluster_id` and `run_id`. Plus a nullable **`profile.profile_hash`** column (which profile+knobs the row was last synced from).
 - **Baseline backfill** — the migration inserts **one synthetic event per existing complete `score` row** (`scoring_model`/`profile_hash` = `'pre-0004'`), rescuing the 180 current scores into the log *before* the next reassess erases them; hollow rows (NULL cluster_id/score/fit_category, possible under the constraint-free v0 DDL) are skipped by a `WHERE` guard.
