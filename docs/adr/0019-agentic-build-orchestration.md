@@ -1,7 +1,7 @@
 # ADR-0019 — Agentic build orchestration (per-unit gate pipeline + cross-unit fan-out)
 
 ## Status
-Accepted · **amended** — added the **Independent Verifier** stage (a Step-4 learning; see the Amendment below).
+Accepted · **amended** — added the **Independent Verifier** stage (a Step-4 learning; see the Amendment below). **The current operational procedure** — the per-bottleneck squad (Investigator → Surgeon → single Examiner), the severity-gated auto-merge policy, and how to invoke it — lives in **[`.agents/agentic-workflow.md`](../../.agents/agentic-workflow.md)**; this ADR is the foundational decision behind it (its generic Builder/Reviewer/Scribe/Guardian roster was later refined into that squad).
 
 ## Context
 [ADR-0013](0013-enforcement-gate-trio-branch-pr.md) set the build discipline — the gate trio (`/start-step` → `/review-step` → `/close-step`) + branch/PR — but left *how the gates are executed* open ([05-methodology](../05-methodology.md): "enforcement is emergent — add machinery when a real need justifies it"). Crossing from design into the v0 build, two needs now justify machinery: (1) Tarig wants to build the phases with a **multi-agent team** he can drive and watch (the orchestration is itself portfolio signal), and (2) the gate roles map naturally onto distinct agents. The failure mode to avoid: naïvely running N agents *simultaneously on one unit* — the reviewer reviews a moving target and agents collide on the same files.
