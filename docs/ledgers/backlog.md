@@ -8,7 +8,7 @@
 
 ## B-1 · Reachable full job list from the digest (the "see your export" dead-end)
 
-**Logged:** 2026-07-10, from Tarig reviewing a live digest (the first unattended-cron email). **Status:** ✅ **squad-built + merged** (PR #30, 2026-07-10 — Investigator → Surgeon → Examiner CLEAN PASS, rung 2 = self-contained HTML page + presigned S3 link, non-fatal); **pending live deploy + smoke**, then release.
+**Logged:** 2026-07-10, from Tarig reviewing a live digest (the first unattended-cron email). **Status:** ✅ **SHIPPED — `v0.10.0`, 2026-07-10** ([ADR-0030](../adr/0030-reachable-full-list-from-digest.md)). Squad-built (Investigator → Surgeon → Examiner CLEAN PASS → auto-merge PR #30 → live deploy), rung 2 = self-contained HTML page + presigned S3 link, non-fatal; live-validated (`get_all_scored` over the Data API = 286 rows, report page rendered + uploaded).
 
 **What.** The daily digest surfaces the new matches + the top-5 "still open" jobs, then trails off into two lines of **plain, non-clickable text**:
 - *"…and 55 more — see your export"* — the still-open overflow (`core/notifier.py`, `_STILL_OPEN_TOP_N = 5`).
