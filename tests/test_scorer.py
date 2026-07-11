@@ -560,3 +560,113 @@ def test_score_gold_lineage_differs_when_inputs_differ():
         "model-v1", "ph-before", "r1")
     assert (second["scoring_model"], second["profile_hash"], second["run_id"]) == (
         "model-v2", "ph-after", "r2")
+
+
+# --------------------------------------------------------------------------- boundary resample
+def test_median_sample_odd_is_exact_and_even_is_lower_median():
+    """`_median_sample` returns a REAL sample (never averaged): odd N → the exact middle by
+    score; even N → the lower-median, so the choice is deterministic and coherent."""
+    from jobfetcher.core.ingest import _median_sample
+
+    def _r(s):
+        return ScoreResult.model_validate(json.loads(_score_json(s)))
+
+    assert _median_sample([_r(70), _r(58), _r(62)]).score == 62          # odd → exact median
+    assert _median_sample([_r(50), _r(80), _r(60), _r(70)]).score == 60  # even → lower-median
+
+
+def test_score_with_resample_keeps_the_median_sample_narrative():
+    """The helper resamples a boundary score and returns the sample whose SCORE is the median —
+    a COHERENT ScoreResult (its strengths are the median sample's, not a frankenscore) — after
+    exactly N calls. Scores 62/58/70 near threshold 60 → median 62 with the 62-reply's narrative."""
+    from jobfetcher.core.ingest import _score_with_resample
+
+    llm = FakeLlm(
+        _score_json(62, strengths=["mid-sample"]),
+        _score_json(58, strengths=["low-sample"]),
+        _score_json(70, strengths=["high-sample"]),
+    )
+    out = _score_with_resample(Scorer(llm), _dissected(), _profile(),
+                               threshold=60, trigger_margin=16, resample_n=3)
+    assert out.score == 62
+    assert out.strengths == ["mid-sample"]  # the MEDIAN sample's own narrative, never averaged
+    assert len(llm.calls) == 3
+
+
+def test_score_with_resample_far_score_scores_once():
+    """The cost guard: a clearly-in first score (90, |90-60|=30 > margin 16) is NOT resampled —
+    exactly ONE LLM call, the first result returned untouched."""
+    from jobfetcher.core.ingest import _score_with_resample
+
+    llm = FakeLlm(_score_json(90), _score_json(58), _score_json(58))
+    out = _score_with_resample(Scorer(llm), _dissected(), _profile(),
+                               threshold=60, trigger_margin=16, resample_n=3)
+    assert out.score == 90
+    assert len(llm.calls) == 1  # never entered the resample loop
+
+
+def test_score_with_resample_disabled_scores_once():
+    """resample_n <= 1 disables resampling entirely — one call even for a boundary score
+    (identical to the pre-boundary-resample behavior)."""
+    from jobfetcher.core.ingest import _score_with_resample
+
+    llm = FakeLlm(_score_json(62), _score_json(58), _score_json(70))
+    out = _score_with_resample(Scorer(llm), _dissected(), _profile(),
+                               threshold=60, trigger_margin=16, resample_n=1)
+    assert out.score == 62
+    assert len(llm.calls) == 1
+
+
+def test_score_with_resample_stops_resampling_at_the_deadline():
+    """H-2 'never times out': the FIRST sample always runs, but once the deadline has passed no
+    EXTRA sample is STARTED — the helper returns the median of what it has (here just the first).
+    A boundary score with an expired deadline → one call; the same with time left → the full
+    N-sample median (the extra samples are gated ONLY by the wall)."""
+    from jobfetcher.core.ingest import Deadline, _score_with_resample
+
+    # expired deadline: the first sample runs, the 2nd/3rd are never started
+    llm = FakeLlm(_score_json(62), _score_json(58), _score_json(70))
+    out = _score_with_resample(Scorer(llm), _dissected(), _profile(),
+                               threshold=60, trigger_margin=16, resample_n=3,
+                               deadline=Deadline(0))
+    assert out.score == 62  # the first (and only) sample — never averaged
+    assert len(llm.calls) == 1  # no further scorer.score calls past the wall
+
+    # a deadline with time left → normal N-sample median, unchanged
+    llm2 = FakeLlm(_score_json(62), _score_json(58), _score_json(70))
+    out2 = _score_with_resample(Scorer(llm2), _dissected(), _profile(),
+                                threshold=60, trigger_margin=16, resample_n=3,
+                                deadline=Deadline(60))
+    assert out2.score == 62 and len(llm2.calls) == 3  # 62/58/70 → median 62, all three sampled
+
+
+def test_score_gold_resamples_boundary_and_persists_median():
+    """Through the orchestrator: a boundary candidate (first score 62 within margin of 60) is
+    resampled to N=3 and the MEDIAN (62 of 62/58/70) is what `save_score` persists; the LLM is
+    called 3× for the one candidate."""
+    repo = _FakeScoreRepo(_profile_row(60), _candidates()[:1], None)
+    llm = FakeLlm(_score_json(62), _score_json(58), _score_json(70))
+    score_gold(run_id="r", repo=repo, profile_hash="ph", scorer=Scorer(llm), max_workers=1)
+    assert repo.saved["c-low"]["score"] == 62  # the median, not the first sample
+    assert len(llm.calls) == 3
+
+
+def test_score_gold_clear_score_scores_once_cost_guard():
+    """The cost-guard negative through the orchestrator: a clearly-in score (90) is scored
+    EXACTLY once — resampling never fires away from the boundary."""
+    repo = _FakeScoreRepo(_profile_row(60), _candidates()[:1], None)
+    llm = FakeLlm(_score_json(90))
+    score_gold(run_id="r", repo=repo, profile_hash="ph", scorer=Scorer(llm), max_workers=1)
+    assert repo.saved["c-low"]["score"] == 90
+    assert len(llm.calls) == 1
+
+
+def test_score_gold_resample_disabled_matches_today():
+    """resample_n=1 → identical to before: a boundary score is persisted after ONE call (no
+    regression / opt-out path)."""
+    repo = _FakeScoreRepo(_profile_row(60), _candidates()[:1], None)
+    llm = FakeLlm(_score_json(62))
+    score_gold(run_id="r", repo=repo, profile_hash="ph", scorer=Scorer(llm), max_workers=1,
+               resample_n=1)
+    assert repo.saved["c-low"]["score"] == 62
+    assert len(llm.calls) == 1

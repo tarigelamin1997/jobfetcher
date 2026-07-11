@@ -101,6 +101,18 @@ def _seed_scored(repo, posting_id: str, title: str, score: int, *, company: str,
     repo.mark_scored(posting_id)
 
 
+def _rescore(repo, posting_id: str, *, profile_hash: str, previous_score: int | None = None,
+             score: int = 72) -> None:
+    """Append a SECOND scoring event under `profile_hash` (the reassess shape) — so the cluster's
+    two most-recent `score_event` rows can carry different (or identical) profile_hashes, which is
+    what `get_scored_shortlist` compares for `prior_profile_changed`."""
+    repo.save_score(cluster_id=posting_id, score=score, fit_category="strong_fit",
+                    strengths=[f"re {posting_id}"], gaps=["no Spark"],
+                    strategic_assessment="play it well", poster_type="direct employer",
+                    legitimacy_verified=True, scoring_model="test-model",
+                    profile_hash=profile_hash, run_id="reassess", previous_score=previous_score)
+
+
 def _set_bronze_fetched_at(repo, posting_id: str, when: datetime) -> None:
     """Backdate the bronze landing time — the LIVE age source: `posting.fetched_at` stays NULL
     on every real row (`save_posting` never writes it), so `COALESCE` falls to bronze."""
@@ -313,6 +325,34 @@ def test_shortlist_carries_previous_score_fingerprint_and_age(repo):
     assert item.fingerprint == "fp-abc"
     assert item.fetched_at is not None  # the bronze landing time via the LEFT JOIN
     assert item.scored_at is not None   # save_score stamps it — the new/still-open signal
+
+
+def test_shortlist_prior_profile_changed_reflects_a_real_profile_change(repo):
+    """Honest graduations over real SQL: `get_scored_shortlist` sets `prior_profile_changed` True
+    iff the two most-recent `score_event` profile_hashes for the cluster differ — the profile that
+    produced `previous_score` vs the one that produced `score`. A re-score under a NEW profile →
+    True (a real change drove the crossing); a re-score under the SAME profile → False (LLM noise);
+    a first-only scoring → False (no prior event). This is the DB half of the graduation-badge fix
+    (the render-side gate `_is_graduation` reads the flag)."""
+    _truncate_pipeline(repo)
+    tag = uuid4().hex[:8]
+    changed, noise, first = f"chg-{tag}", f"noise-{tag}", f"first-{tag}"
+    # each seeded once (event #1 = ph-seed); all surface (score 72 >= 60); the two graduating
+    # ones carry previous_score=55 so the crossing condition also holds.
+    _seed_scored(repo, changed, "DE Changed", 72, company="A",
+                 apply_url="https://jobs.test/a", previous_score=55)
+    _seed_scored(repo, noise, "DE Noise", 72, company="B",
+                 apply_url="https://jobs.test/b", previous_score=55)
+    _seed_scored(repo, first, "DE First", 72, company="C", apply_url="https://jobs.test/c")
+    # event #2: `changed` re-scored under a DIFFERENT profile; `noise` under the SAME one.
+    _rescore(repo, changed, profile_hash="ph-NEW", previous_score=55)
+    _rescore(repo, noise, profile_hash="ph-seed", previous_score=55)
+
+    items, _ = repo.get_scored_shortlist(threshold=60)
+    by_id = {i.posting_id: i for i in items}
+    assert by_id[changed].prior_profile_changed is True   # ph-NEW != ph-seed → honest graduation
+    assert by_id[noise].prior_profile_changed is False    # ph-seed == ph-seed → LLM noise, no badge
+    assert by_id[first].prior_profile_changed is False    # only one event → no prior → no badge
 
 
 def test_get_last_digest_sent_at_none_then_max_and_user_scoped(repo):

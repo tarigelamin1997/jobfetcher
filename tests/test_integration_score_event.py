@@ -316,3 +316,16 @@ def test_age_filter_zero_and_none_are_unbounded(repo):
     ids_zero = {t[0] for t in repo.get_scored_for_reassess(max_age_days=0)}
     assert old in ids_none and old in ids_zero
     assert ids_none == ids_zero
+
+
+# --------------------------------------------------------------------------- honest graduations
+def test_get_scored_for_reassess_carries_prior_profile_hash(repo):
+    """The reassess honesty input over real SQL: the 6th tuple element is the profile_hash the
+    CURRENT score came from (the LATEST score_event for the cluster) — so reassess() can compare
+    it to the run's profile_hash and tell a real profile change from LLM sampling noise. After a
+    re-score under `ph-2`, the prior hash the reassess set reports is `ph-2` (not the seed hash)."""
+    pid = _seed_scored(repo, f"phash-{uuid4().hex[:8]}", score=55)  # event #1 → ph-seed
+    _save(repo, pid, 58, profile_hash="ph-2", run_id="r2", previous_score=55)  # event #2 → ph-2
+
+    by_id = {t[0]: t for t in repo.get_scored_for_reassess()}
+    assert by_id[pid][5] == "ph-2"  # the latest event's profile_hash = the current score's profile

@@ -69,12 +69,13 @@ _SAMPLE = [
         strengths=["Strong Python/SQL + dbt"], gaps=[], city="Dubai", country="ae",
         fingerprint="fp-qode-de-dxb", scored_at=_FRESH,
     ),
-    ShortlistItem(  # a graduation: 55 → 72 crossed the threshold (60) → green ↑ badge
-        posting_id="3", title="Analytics Engineer", company="Tamara",
+    ShortlistItem(  # a graduation: 55 → 72 crossed the threshold (60) under a CHANGED profile
+        posting_id="3", title="Analytics Engineer", company="Tamara",  # → green ↑ badge
         apply_url="https://jobs.example.com/apply/3", normalized_title="Analytics Engineer",
         score=72, fit_category="strong_fit",
         strengths=["dbt + warehouse modeling"], gaps=["Looker experience"],
         city="Riyadh", country="sa", previous_score=55, scored_at=_FRESH,
+        prior_profile_changed=True,  # a real skill gain drove the crossing (not LLM noise)
     ),
     ShortlistItem(
         posting_id="4", title="Data Architect", company="Alfanar",

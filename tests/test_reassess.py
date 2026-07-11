@@ -50,12 +50,15 @@ def _profile_row(threshold=60):
             "hard_floor": 50, "near_miss_band": 10}
 
 
-def _targets():
-    # (posting_id, cluster_id, dissected, current_score, current_fit_category)
+def _targets(prior_hash="ph-old"):
+    # (posting_id, cluster_id, dissected, current_score, current_fit_category, prior_profile_hash)
+    # `prior_hash` is the profile the CURRENT score came from; default "ph-old" DIFFERS from the
+    # "ph-unit"/"ph-*" the tests score against, so a crossing is an HONEST graduation. Pass the
+    # SAME hash as the run's profile_hash to model a same-profile (noise) crossing (no graduation).
     return [
-        ("p-grad", "c-grad", _dissected("A"), 45, "misaligned"),   # was below 60
-        ("p-drop", "c-drop", _dissected("B"), 80, "strong_fit"),   # was above 60
-        ("p-same", "c-same", _dissected("C"), 90, "strong_fit"),   # stays above
+        ("p-grad", "c-grad", _dissected("A"), 45, "misaligned", prior_hash),  # was below 60
+        ("p-drop", "c-drop", _dissected("B"), 80, "strong_fit", prior_hash),  # was above 60
+        ("p-same", "c-same", _dissected("C"), 90, "strong_fit", prior_hash),  # stays above
     ]
 
 
@@ -69,8 +72,10 @@ def test_reassess_graduates_downgrades_and_tracks_previous_score():
     previous_score. max_workers=1 so the scripted FakeLlm maps to targets in order."""
     repo = _FakeReassessRepo(_profile_row(60), _targets())
     # new scores in target order: p-grad 45->75 (graduate), p-drop 80->40 (downgrade), p-same 90->92
+    # resample_n=1: this test scripts one reply PER target, so boundary resampling is disabled to
+    # keep the FakeLlm call→target mapping 1:1 (resampling is covered by its own tests below).
     report = reassess(run_id="r", repo=repo, profile_hash="ph-unit",
-                      scorer=_scorer_for([75, 40, 92]), max_workers=1)
+                      scorer=_scorer_for([75, 40, 92]), max_workers=1, resample_n=1)
 
     assert report["reassessed"] == 3
     assert report["graduated"] == 1
@@ -183,7 +188,7 @@ def test_score_then_reassess_appends_two_events():
     repo = _FakeFullRepo(
         _profile_row(60),
         candidates=[("p-1", "c-1", _dissected("A"))],
-        targets=[("p-1", "c-1", _dissected("A"), 55, "near_miss")],
+        targets=[("p-1", "c-1", _dissected("A"), 55, "near_miss", "ph-before")],
     )
     score_gold(run_id="r1", repo=repo, profile_hash="ph-before",
                scorer=_scorer_for([55]), max_workers=1)
@@ -206,15 +211,16 @@ def test_reassess_delta_distribution_bucket_edges_and_mean():
     0-5 / 6-10 / 6-10 / 11-20 / 11-20 / 21+ respectively (inclusive upper bounds); max=21;
     mean=(5+6+10+11+20+21)/6=12.1666… → 12.2 (1 decimal)."""
     targets = [
-        (f"p-{i}", f"c-{i}", _dissected(chr(65 + i)), old, "near_miss")
+        (f"p-{i}", f"c-{i}", _dissected(chr(65 + i)), old, "near_miss", "ph-old")
         for i, old in enumerate([50, 50, 50, 50, 50, 50])
     ]
     # new scores craft |new − old| = 5, 6, 10, 11, 20, 21 (mixing up- and down-moves to
-    # prove the distribution is over ABSOLUTE deltas)
+    # prove the distribution is over ABSOLUTE deltas). resample_n=1: one scripted reply per
+    # target, so boundary resampling is disabled to keep the call→target mapping exact.
     new_scores = [55, 44, 60, 39, 70, 29]
     repo = _FakeReassessRepo(_profile_row(60), targets)
     report = reassess(run_id="r", repo=repo, profile_hash="ph-unit",
-                      scorer=_scorer_for(new_scores), max_workers=1)
+                      scorer=_scorer_for(new_scores), max_workers=1, resample_n=1)
     assert report["reassessed"] == 6
     assert report["delta_buckets"] == {"0-5": 1, "6-10": 2, "11-20": 2, "21+": 1}
     assert report["max_delta"] == 21
@@ -238,10 +244,11 @@ def test_reassess_delta_distribution_excludes_failures():
                 raise ScorerError("boom")
             return ScoreResult.model_validate(json.loads(_score_json(48)))
 
-    # olds 45/80/90; successes score 48 → deltas |48-45|=3 and |48-90|=42 (the failed 80 absent)
+    # olds 45/80/90; successes score 48 → deltas |48-45|=3 and |48-90|=42 (the failed 80 absent).
+    # resample_n=1 so _MiddleBoom's 2nd call maps to the 2nd TARGET (not a resample of the 1st).
     repo = _FakeReassessRepo(_profile_row(60), _targets())
     report = reassess(run_id="r", repo=repo, profile_hash="ph-unit",
-                      scorer=_MiddleBoom(), max_workers=1)
+                      scorer=_MiddleBoom(), max_workers=1, resample_n=1)
     assert report["failed"] == 1 and report["reassessed"] == 2
     assert report["delta_buckets"] == {"0-5": 1, "6-10": 0, "11-20": 0, "21+": 1}
     assert report["max_delta"] == 42
@@ -256,7 +263,10 @@ def test_reassess_threads_subscores_into_save_score():
     subs = {name: 70 for name in FACTOR_WEIGHTS}
     repo = _FakeReassessRepo(_profile_row(60), _targets()[:2])
     scorer = Scorer(FakeLlm(_score_json(75, **subs), _score_json(80)))
-    reassess(run_id="r", repo=repo, profile_hash="ph-unit", scorer=scorer, max_workers=1)
+    # resample_n=1: one scripted reply per target — disable resampling so each target's blob is
+    # its own reply (resampling would mix the two replies and pick a median of a different one).
+    reassess(run_id="r", repo=repo, profile_hash="ph-unit", scorer=scorer, max_workers=1,
+             resample_n=1)
     with_subs = repo.saved["c-grad"]["subscores"]
     assert with_subs == {**subs, "code_total": 70, "llm_total": 75}
     assert repo.saved["c-drop"]["subscores"] is None  # omitted → NULL, never partial
@@ -282,3 +292,42 @@ def test_reassess_passes_max_age_days_through():
     reassess(run_id="r", repo=repo3, profile_hash="ph-unit",
              scorer=_scorer_for([70]), max_workers=1, max_age_days=0)
     assert repo3.max_age_days_seen == 0
+
+
+# --------------------------------------------------------------------------- honest graduations
+def test_reassess_graduation_requires_a_profile_change():
+    """Positive: the prior score came from a DIFFERENT profile ('ph-old' != 'ph-new') and the
+    re-score crosses the bar (45 -> 75) → a REAL graduation is counted + listed."""
+    repo = _FakeReassessRepo(_profile_row(60), _targets(prior_hash="ph-old")[:1])  # p-grad, old 45
+    report = reassess(run_id="r", repo=repo, profile_hash="ph-new",
+                      scorer=_scorer_for([75]), max_workers=1, resample_n=1)
+    assert report["graduated"] == 1
+    assert report["unchanged"] == 0
+    assert [g["posting_id"] for g in report["graduations"]] == ["p-grad"]
+
+
+def test_reassess_same_profile_crossing_is_not_a_graduation():
+    """The exact scan-bug negative: previous_score < threshold <= new_score BUT the prior score
+    came from the SAME profile ('ph-same' == 'ph-same') → the crossing is LLM sampling noise, not
+    a skill gain: NO graduation counted, an EMPTY graduations list, folded into `unchanged`. The
+    posting is still reassessed + saved (only the graduation JUDGMENT changes)."""
+    repo = _FakeReassessRepo(_profile_row(60), _targets(prior_hash="ph-same")[:1])  # p-grad, old 45
+    report = reassess(run_id="r", repo=repo, profile_hash="ph-same",
+                      scorer=_scorer_for([75]), max_workers=1, resample_n=1)
+    assert report["graduated"] == 0
+    assert report["graduations"] == []
+    assert report["unchanged"] == 1  # the crossing folds into unchanged, never announced
+    assert report["reassessed"] == 1
+    assert repo.saved["c-grad"]["score"] == 75  # the score itself still updates
+
+
+# --------------------------------------------------------------------------- boundary resample
+def test_reassess_resamples_boundary_and_keeps_median():
+    """Boundary self-consistency in the replay path: a first re-score near the threshold (62,
+    within the 16-pt margin of 60) is resampled to N=3 total and the MEDIAN sample is persisted
+    (median of 62/58/70 = 62) — the LLM is called exactly 3× for the one boundary posting."""
+    repo = _FakeReassessRepo(_profile_row(60), _targets()[:1])  # p-grad, old 45
+    llm = FakeLlm(_score_json(62), _score_json(58), _score_json(70))
+    reassess(run_id="r", repo=repo, profile_hash="ph-unit", scorer=Scorer(llm), max_workers=1)
+    assert repo.saved["c-grad"]["score"] == 62  # the median of the three boundary samples
+    assert len(llm.calls) == 3  # resampled to N total for the boundary posting

@@ -43,6 +43,11 @@ class ShortlistItem:
     fingerprint: str | None = None
     fetched_at: "datetime | None" = None
     scored_at: "datetime | None" = None
+    # Honest graduations: True only when the profile that produced `previous_score` differs from
+    # the one that produced the current `score` (the two most-recent `score_event` profile_hashes)
+    # — so `_is_graduation` badges a crossing ONLY when a real profile change drove it, never LLM
+    # sampling noise. Defaults False (the report path + any caller that doesn't set it → no badge).
+    prior_profile_changed: bool = False
     # B-1 (the full-list report — `get_all_scored` only): the human `score_override` and the
     # latest application-outcome status. The daily-digest path (`get_scored_shortlist`) never
     # sets these, so they stay None there and the digest renderer reads neither.
@@ -230,12 +235,18 @@ class Repository(Protocol):
         self,
         *,
         max_age_days: int | None = None,
-    ) -> "list[tuple[str, str, DissectedPosting, int, str]]":
+    ) -> "list[tuple[str, str, DissectedPosting, int, str, str | None]]":
         """Read the reassess set (ADR-0023): every `status='scored'` posting + its CURRENT
         score and fit_category as `(posting_id, cluster_id, dissected, current_score,
-        current_fit_category)` — the replay's input, so `reassess()` can re-score against the
-        updated profile and report the old→new delta. **Ordered by `posting_id`** so a run is
-        deterministic.
+        current_fit_category, prior_profile_hash)` — the replay's input, so `reassess()` can
+        re-score against the updated profile and report the old→new delta. **Ordered by
+        `posting_id`** so a run is deterministic.
+
+        `prior_profile_hash` is the `profile_hash` the CURRENT score was produced under (the
+        latest `score_event` for the cluster) — `reassess()` compares it to the profile it is
+        about to score against, so a threshold crossing under an UNCHANGED profile is honestly
+        NOT a graduation (it is LLM sampling noise, not a skill gain). `None` when no lineage
+        event exists yet (a pre-0004 row).
 
         `max_age_days` bounds the replay by posting age (LLM-token thrift): when set and > 0,
         only postings fetched within the last N days are returned — a posting whose age is
@@ -329,13 +340,16 @@ class Repository(Protocol):
         surfaced/below split uses the one config knob — this method does not re-derive it.
 
         Digest truthfulness: each item also carries `previous_score`, `scored_at` (when the
-        current judgment was written), `fingerprint`, and the effective age `fetched_at`
+        current judgment was written), `fingerprint`, the effective age `fetched_at`
         (`COALESCE(posting.fetched_at, bronze.fetched_at)` — the reassess age source;
-        `posting.fetched_at` is NULL on live rows). The new/still-open split (`scored_at` vs
-        the last digest time, with `previous_score` for the graduation call) and the dup
-        grouping are computed RENDER-SIDE (pure functions in `core/notifier.py`), never here —
-        `since` (the last digest send time) is accepted on the port for that caller but does
-        not filter this query in v0.
+        `posting.fetched_at` is NULL on live rows), and `prior_profile_changed` (True iff the
+        two most-recent `score_event` profile_hashes for the cluster differ — the profile that
+        produced `previous_score` vs the one that produced `score`; a graduation badge fires
+        only when it does, so LLM sampling noise never earns one). The new/still-open split
+        (`scored_at` vs the last digest time, with `previous_score` + `prior_profile_changed`
+        for the graduation call) and the dup grouping are computed RENDER-SIDE (pure functions
+        in `core/notifier.py`), never here — `since` (the last digest send time) is accepted on
+        the port for that caller but does not filter this query in v0.
 
         `max_age_days` bounds the digest by posting age: when set and > 0, a row whose
         effective fetched-at is older than N days is DROPPED (from both the surfaced list and
