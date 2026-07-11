@@ -45,9 +45,9 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 ---
 
-## B-3 · Scoring boundary noise — the shortlist cutoff is a coin-flip ✅ **GRADUATED → merged (PR #31, 2026-07-11)**
+## B-3 · Scoring boundary noise — the shortlist cutoff is a coin-flip ✅ **SHIPPED v0.11.0 (2026-07-11)**
 
-**Logged + graduated:** 2026-07-11, by a fresh P2 data-quality scan (read-only on the live stack). **Status:** **the P2-scan winner** — built by the agentic squad, merged, pending live-validation + release tag.
+**Logged + graduated + shipped:** 2026-07-11, by a fresh P2 data-quality scan (read-only on the live stack). **Status:** **the P2-scan winner** — built by the agentic squad, merged (PR #31), deployed + **live-validated** (reassess `graduated: 0` under the unchanged profile; `mean_delta` 8.4 vs the ~16 baseline), tagged **v0.11.0**.
 
 **What.** The scorer's holistic number is a **non-deterministic LLM at temp 0**; with the profile held static (pure noise) it drifts **avg 15.95 pts, max 60**, and **62 of 286 scores sat within ±16 of threshold 60** — roughly the entire ~61-job shortlist boundary flipping in/out at random. Reassess **"graduation" badges fired on that noise** (15 measured false positives under an unchanged `profile_hash`).
 
@@ -58,6 +58,20 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 **Still-parked companions (named, not built):** the **silent-`500` alarm gap** (a returned `statusCode:500` alerts nobody — a CloudWatch log-metric-filter on the v0.9.0 INFO logs → the existing SNS topic is the small unblocked fix); the **dark human-judge loop** (0 outcomes logged — the reason calibration has no target; a one-click feedback affordance in the digest/report is the later unit).
 
 **Connections:** [ADR-0028](../adr/0028-scorer-subscores-shadow.md) (the shadow instrument the scan re-read) · [ADR-0023](../adr/0023-reassess-replay.md) (the reassess/graduation feature made honest) · M7 (parked, evidence above).
+
+---
+
+## B-4 · Full-backlog reassess is deadline-partial (resample throughput) — observed 2026-07-11
+
+**Logged:** 2026-07-11, from the v0.11.0 live-validation. **Status:** observation (P2 input), **not** built. Not urgent — the daily path is unaffected.
+
+**What.** The v0.11.0 boundary resample ([ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md)) re-scores ~1/5 of jobs at 3× LLM calls, cutting per-run throughput. A full-backlog `{"mode":"reassess"}` over the ~286-scored set now hits the **deadline guard** (worked as designed — returned `partial`: **163 reassessed / 123 deferred**). Because reassess is **ordered by `posting_id` and deadline-bounded**, successive runs re-do the *head* — the deferred **tail (highest `posting_id`s) is never reached** in this pattern, so a profile improvement wouldn't lift the newest matches on reassess.
+
+**Why it matters (mild).** Only the *manual, occasional full-backlog reassess* is affected; the daily incremental scoring (~10–30 new gold jobs) pays trivial extra time and is fine. The gap is coverage of the reassess tail after the set grew past what fits one 15-min window.
+
+**So-what (candidate fixes, right-sized — pick when it earns it).** (a) **Rotate/paginate** the reassess order so successive runs advance the tail (cheapest — a cursor / `ORDER BY least-recently-reassessed`); (b) raise per-run throughput (more workers / only-resample-when-needed); (c) **async invoke + read logs** for long reassess runs (the sync CLI times out at ~14.5 min though the Lambda completes) — a procedure note, not code. This is the natural pull toward **M3** (chunking / Step Functions) if the backlog keeps growing.
+
+**Connections:** [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md) (introduced the throughput cost) · [ADR-0023](../adr/0023-reassess-replay.md) (reassess) · the H-2 deadline guard · **M3** (chunking, the documented scale path).
 
 ---
 
