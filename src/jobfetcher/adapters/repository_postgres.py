@@ -621,7 +621,10 @@ class PostgresRepository:
         # `score` (latest) vs the one that produced `previous_score` (the immediately-prior event,
         # since save_score dual-writes score + score_event together). Different ⇒ the crossing was
         # profile-driven; same (or no prior event) ⇒ noise / first scoring ⇒ NO badge. Two scalar
-        # correlated subqueries; the boolean is formed in Python below.
+        # correlated subqueries; the boolean is formed in Python below. (Edge, accepted: a
+        # `human-override` event landing between two scorings can shift the "2nd-latest" — but an
+        # override changes `score_override`, not `score`/`previous_score`, so the badge condition
+        # is unaffected in practice; not worth filtering the subqueries for a cosmetic case.)
         latest_ph = (
             select(se.c.profile_hash)
             .where(se.c.cluster_id == s.c.cluster_id)

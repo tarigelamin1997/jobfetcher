@@ -435,6 +435,7 @@ def _score_with_resample(
     threshold: int,
     trigger_margin: int,
     resample_n: int,
+    deadline: Deadline | None = None,
 ) -> "ScoreResult":
     """Score one posting once; resample near the boundary for self-consistency.
 
@@ -446,14 +447,20 @@ def _score_with_resample(
 
     Purity + isolation are preserved: the `Scorer` is untouched, and a `ScorerError`/`LlmError`
     from ANY sample propagates to the caller's per-item try/except (the posting is skipped, the
-    run continues) exactly as a single-score failure does today. The `deadline` is checked by the
-    caller BEFORE this runs (task-start granularity, unchanged); a boundary posting that has begun
-    runs its resample to completion inside the H-2 margin."""
+    run continues) exactly as a single-score failure does today.
+
+    **Deadline-aware (H-2 "never times out"):** the FIRST sample always runs — an in-flight task
+    completing its first score is the existing task-start contract — but each EXTRA sample is
+    gated: once `deadline` has passed we STOP and return the median of the samples collected so
+    far (`_median_sample` handles an even/short count), never STARTING a new score past the wall.
+    So resampling can never push a full-set reassess past the Lambda timeout."""
     first = scorer.score(dissected, profile)
     if resample_n <= 1 or abs(first.score - threshold) > trigger_margin:
         return first
     samples = [first]
     for _ in range(resample_n - 1):
+        if deadline is not None and deadline.expired:
+            break  # out of budget — median of what we have; never START a sample past the wall
         samples.append(scorer.score(dissected, profile))
     return _median_sample(samples)
 
@@ -521,6 +528,7 @@ def score_gold(
                 threshold=threshold,
                 trigger_margin=resample_margin,
                 resample_n=resample_n,
+                deadline=deadline,
             )
         except (ScorerError, LlmError) as exc:
             log.warning("scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)
@@ -650,6 +658,7 @@ def reassess(
                 threshold=threshold,
                 trigger_margin=resample_margin,
                 resample_n=resample_n,
+                deadline=deadline,
             )
         except (ScorerError, LlmError) as exc:
             log.warning("reassess scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)

@@ -617,6 +617,29 @@ def test_score_with_resample_disabled_scores_once():
     assert len(llm.calls) == 1
 
 
+def test_score_with_resample_stops_resampling_at_the_deadline():
+    """H-2 'never times out': the FIRST sample always runs, but once the deadline has passed no
+    EXTRA sample is STARTED — the helper returns the median of what it has (here just the first).
+    A boundary score with an expired deadline → one call; the same with time left → the full
+    N-sample median (the extra samples are gated ONLY by the wall)."""
+    from jobfetcher.core.ingest import Deadline, _score_with_resample
+
+    # expired deadline: the first sample runs, the 2nd/3rd are never started
+    llm = FakeLlm(_score_json(62), _score_json(58), _score_json(70))
+    out = _score_with_resample(Scorer(llm), _dissected(), _profile(),
+                               threshold=60, trigger_margin=16, resample_n=3,
+                               deadline=Deadline(0))
+    assert out.score == 62  # the first (and only) sample — never averaged
+    assert len(llm.calls) == 1  # no further scorer.score calls past the wall
+
+    # a deadline with time left → normal N-sample median, unchanged
+    llm2 = FakeLlm(_score_json(62), _score_json(58), _score_json(70))
+    out2 = _score_with_resample(Scorer(llm2), _dissected(), _profile(),
+                                threshold=60, trigger_margin=16, resample_n=3,
+                                deadline=Deadline(60))
+    assert out2.score == 62 and len(llm2.calls) == 3  # 62/58/70 → median 62, all three sampled
+
+
 def test_score_gold_resamples_boundary_and_persists_median():
     """Through the orchestrator: a boundary candidate (first score 62 within margin of 60) is
     resampled to N=3 and the MEDIAN (62 of 62/58/70) is what `save_score` persists; the LLM is
