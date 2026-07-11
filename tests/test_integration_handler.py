@@ -155,7 +155,9 @@ class _FakeLlm:
 
 
 # --------------------------------------------------------------------------- env / config
-def _write_config(tmp_path: Path, *, threshold: int = 60) -> tuple[str, str]:
+def _write_config(
+    tmp_path: Path, *, threshold: int = 60, extra_skill: str | None = None
+) -> tuple[str, str]:
     search = tmp_path / "search.yml"
     search.write_text(
         "source: jsearch\n"
@@ -180,12 +182,17 @@ def _write_config(tmp_path: Path, *, threshold: int = 60) -> tuple[str, str]:
         "  request_budget_per_run: 5\n",
         encoding="utf-8",
     )
+    # An added skill shifts compute_profile_hash → the reassess test uses it to model a real
+    # skill gain (a DIFFERENT profile_hash), so a threshold crossing is an HONEST graduation
+    # rather than same-profile LLM noise (ADR-0026 / the honest-graduation gate).
+    skills = "  - name: Python\n  - name: SQL\n"
+    if extra_skill:
+        skills += f"  - name: {extra_skill}\n"
     profile = tmp_path / "profile.yml"
     profile.write_text(
         "name: Tester\n"
         "skills:\n"
-        "  - name: Python\n"
-        "  - name: SQL\n"
+        f"{skills}"
         "preferences:\n"
         "  target_titles: ['Data Engineer']\n"
         "  target_locations: ['Riyadh']\n"
@@ -377,8 +384,11 @@ def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, mo
     assert out1["statusCode"] == 200
     assert out1["score"]["scored"] == 2 and out1["score"]["surfaced"] == 0  # 60 < 80
 
-    # --- reassess: the re-score now returns 90 (profile "improved"); the source EXPLODES if
-    # fetched, proving replay never re-fetches ---
+    # --- reassess: the user gains a skill (the profile genuinely changes → a NEW profile_hash)
+    # and the re-score now returns 90. Both 60→90 crossings are HONEST graduations — a crossing
+    # is only badged when the profile actually changed, never on same-profile LLM noise (the
+    # negative is covered by test_reassess_same_profile_crossing_is_not_a_graduation). The
+    # source EXPLODES if fetched, proving replay never re-fetches. ---
     monkeypatch.setattr(pipe, "OpenAICompatLlmClient", lambda cfg=None, **kw: _LlmScoring(cfg.model, 90))
 
     class _ExplodingSource:
@@ -388,7 +398,8 @@ def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, mo
 
     monkeypatch.setattr(pipe, "JSearchSourceAdapter", lambda: _ExplodingSource())
 
-    search_path, profile_path = _write_config(tmp_path, threshold=80)
+    # add a skill → a DIFFERENT profile_hash than run 1, so the crossing is a real skill gain
+    search_path, profile_path = _write_config(tmp_path, threshold=80, extra_skill="Spark")
     os.environ["SEARCH_CONFIG_PATH"] = search_path
     os.environ["PROFILE_PATH"] = profile_path
     os.environ["RECIPIENT_EMAIL"] = "to@jobfetcher.test"
@@ -397,7 +408,7 @@ def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, mo
     assert out2["statusCode"] == 200 and out2["mode"] == "reassess"
     r = out2["reassess"]
     assert r["reassessed"] == 2
-    assert r["graduated"] == 2 and r["downgraded"] == 0  # both 60 → 90 crossed 80
+    assert r["graduated"] == 2 and r["downgraded"] == 0  # both 60 → 90 crossed 80, profile changed
     assert len(r["graduations"]) == 2
     assert {g["old_score"] for g in r["graduations"]} == {60}
     assert {g["new_score"] for g in r["graduations"]} == {90}
@@ -421,6 +432,12 @@ def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, mo
     assert all(e.previous_score == 60 for e in events[2:])    # reassess carries the old
     assert all(e.run_id == "reassess1" for e in events[2:])
     assert all(e.profile_hash and e.scoring_model for e in events)
+    # honest-graduation driver: the profile genuinely changed between the two runs (a skill was
+    # added), so the reassess events carry a DIFFERENT profile_hash than the first scorings —
+    # precisely what makes the crossings graduations rather than same-profile noise.
+    assert events[0].profile_hash == events[1].profile_hash  # run 1 — profile P
+    assert events[2].profile_hash == events[3].profile_hash  # reassess — profile P' (P + Spark)
+    assert events[0].profile_hash != events[2].profile_hash  # P != P' → a real skill gain
     # the synced profile row carries the same hash the events were stamped with
     with repo.engine.connect() as conn:
         row_hash = conn.execute(_text("SELECT profile_hash FROM profile")).scalar_one()
