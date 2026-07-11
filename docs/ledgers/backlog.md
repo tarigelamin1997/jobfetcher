@@ -45,4 +45,20 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 ---
 
+## B-3 · Scoring boundary noise — the shortlist cutoff is a coin-flip ✅ **GRADUATED → merged (PR #31, 2026-07-11)**
+
+**Logged + graduated:** 2026-07-11, by a fresh P2 data-quality scan (read-only on the live stack). **Status:** **the P2-scan winner** — built by the agentic squad, merged, pending live-validation + release tag.
+
+**What.** The scorer's holistic number is a **non-deterministic LLM at temp 0**; with the profile held static (pure noise) it drifts **avg 15.95 pts, max 60**, and **62 of 286 scores sat within ±16 of threshold 60** — roughly the entire ~61-job shortlist boundary flipping in/out at random. Reassess **"graduation" badges fired on that noise** (15 measured false positives under an unchanged `profile_hash`).
+
+**So-what (the fix, shipped).** **Boundary resample** (median-of-N=3, boundary-only, cost-guarded, deadline-aware) collapses the coin-flip exactly where membership is decided; **honest graduations** badge a crossing only when the profile actually changed. No migration / infra / dep ([ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md)).
+
+**Overturned with evidence:** the pre-committed **M7 shadow-`code_total` cut-over** was the roadmap agent's initial pick; the data-quality agent killed it — the code-total inherits the LLM subscore noise (max spread **71** > the holistic's 60), and there's zero ground truth to calibrate toward (`application_event` = 0 rows). M7 stays parked.
+
+**Still-parked companions (named, not built):** the **silent-`500` alarm gap** (a returned `statusCode:500` alerts nobody — a CloudWatch log-metric-filter on the v0.9.0 INFO logs → the existing SNS topic is the small unblocked fix); the **dark human-judge loop** (0 outcomes logged — the reason calibration has no target; a one-click feedback affordance in the digest/report is the later unit).
+
+**Connections:** [ADR-0028](../adr/0028-scorer-subscores-shadow.md) (the shadow instrument the scan re-read) · [ADR-0023](../adr/0023-reassess-replay.md) (the reassess/graduation feature made honest) · M7 (parked, evidence above).
+
+---
+
 > **How this feeds the roadmap:** when the current program closes and P2 reopens, these entries are ranked (leverage = capability ÷ complexity) alongside the [roadmap](../03-roadmap.md) candidates (M2 dedup, M3 Step Functions, near-miss M4, CV tailoring). A graduated entry becomes a labeled release; a rejected one stays here with the reasoning.
