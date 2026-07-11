@@ -205,7 +205,8 @@ def test_split_scored_at_vs_since_semantics():
     b = _item(75, "b", previous_score=None, scored_at=_FRESH)  # (b) fresh first scoring → NEW
     c = _item(88, "c", previous_score=88, scored_at=_FRESH)    # (c) fresh reassess, NOT a
     #     graduation → STILL OPEN even though the judgment is fresh (being re-judged isn't news)
-    d = _item(72, "d", previous_score=55, scored_at=_FRESH)    # (d) fresh graduation → NEW
+    d = _item(72, "d", previous_score=55, scored_at=_FRESH,     # (d) fresh HONEST graduation
+              prior_profile_changed=True)                       #     (profile changed) → NEW
     e = _item(70, "e", previous_score=50, scored_at=_STALE)    # (e) graduation that happened
     #     BEFORE the last digest → STILL OPEN (already announced, never re-announced)
     items = [a, b, c, d, e]
@@ -275,13 +276,26 @@ def test_collapse_missing_fingerprint_never_merges():
 
 # --------------------------------------------------------------------------- graduation badge
 def test_graduation_badge_renders_in_html_and_text():
-    # B1: a FRESH graduation (scored after the last digest, previous < threshold <= score) →
-    # the green ↑ old→new badge in BOTH bodies.
-    item = _item(72, previous_score=55, scored_at=_FRESH)
+    # B1: a FRESH, HONEST graduation (scored after the last digest, previous < threshold <= score,
+    # AND under a changed profile) → the green ↑ old→new badge in BOTH bodies.
+    item = _item(72, previous_score=55, scored_at=_FRESH, prior_profile_changed=True)
     _, html, text = render_digest([item], below_count=0, threshold=60,
                                   date=date(2026, 6, 27), since=_SINCE)
     assert "55&rarr;72" in html and "#137333" in html  # green text badge, old→new
     assert "↑ 55→72" in text
+
+
+def test_no_badge_when_profile_unchanged_even_though_score_crossed():
+    # THE honest-graduation negative (the exact scan bug): previous < threshold <= score AND a
+    # fresh judgment, BUT prior_profile_changed is False — the crossing is LLM sampling noise, not
+    # a skill gain. NO badge anywhere, and it lands STILL-OPEN (not announced as new).
+    item = _item(72, previous_score=55, scored_at=_FRESH, prior_profile_changed=False)
+    subject, html, text = render_digest([item], below_count=0, threshold=60,
+                                        date=date(2026, 6, 27), since=_SINCE)
+    assert "&#8593;" not in html and "55&rarr;72" not in html  # no green badge
+    assert "↑" not in text
+    assert "no new matches since" in subject.lower()  # folded to still-open, never announced
+    assert "1 earlier match still open" in html
 
 
 def test_no_badge_when_previous_already_above_threshold():

@@ -339,9 +339,24 @@ class PostgresRepository:
 
         **`max_age_days=None` or `0` = UNBOUNDED** (the pre-0004 behavior: every scored
         posting is reassessed, no age cut)."""
-        s, p = tables.score, tables.posting
+        s, p, se = tables.score, tables.posting, tables.score_event
+        # The profile_hash the CURRENT score was produced under = the latest lineage event for
+        # the cluster (save_score dual-writes score + score_event in one txn, so the newest event
+        # matches the current `score`). reassess() compares it to the profile it is about to
+        # score against, so a threshold crossing under an UNCHANGED profile is honestly NOT a
+        # graduation (it is LLM sampling noise). A scalar correlated subquery — the get_all_scored
+        # latest_status pattern; NULL for a pre-0004 row with no event yet.
+        prior_profile_hash = (
+            select(se.c.profile_hash)
+            .where(se.c.cluster_id == s.c.cluster_id)
+            .order_by(se.c.event_id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
         joined = p.join(s, p.c.cluster_id == s.c.cluster_id)
-        stmt = select(p, s.c.score, s.c.fit_category)
+        stmt = select(
+            p, s.c.score, s.c.fit_category, prior_profile_hash.label("prior_profile_hash")
+        )
         if max_age_days is not None and max_age_days > 0:
             b = tables.bronze_posting
             cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
@@ -363,6 +378,7 @@ class PostgresRepository:
                 _dissected_from_row(row),
                 row["score"],
                 row["fit_category"],
+                row["prior_profile_hash"],
             )
             for row in rows
         ]
@@ -595,8 +611,32 @@ class PostgresRepository:
         # `max_age_days` > 0 drops rows older than the bound-parameter cutoff — from the
         # surfaced list AND the below count (an aged-out job vanishes from the digest
         # entirely); an unknown-age row (COALESCE'd NULL) is INCLUDED, same rule as reassess.
-        s, p, b = tables.score, tables.posting, tables.bronze_posting
+        s, p, b, se = (
+            tables.score, tables.posting, tables.bronze_posting, tables.score_event
+        )
         age_source = func.coalesce(p.c.fetched_at, b.c.fetched_at)
+        # Honest graduations (belt-and-suspenders to the boundary resample): a graduation badge
+        # must reflect a real profile change, not LLM sampling noise. Compare the profile_hash of
+        # the two most-recent lineage events for the cluster — the one that produced the current
+        # `score` (latest) vs the one that produced `previous_score` (the immediately-prior event,
+        # since save_score dual-writes score + score_event together). Different ⇒ the crossing was
+        # profile-driven; same (or no prior event) ⇒ noise / first scoring ⇒ NO badge. Two scalar
+        # correlated subqueries; the boolean is formed in Python below.
+        latest_ph = (
+            select(se.c.profile_hash)
+            .where(se.c.cluster_id == s.c.cluster_id)
+            .order_by(se.c.event_id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        prior_ph = (
+            select(se.c.profile_hash)
+            .where(se.c.cluster_id == s.c.cluster_id)
+            .order_by(se.c.event_id.desc())
+            .limit(1)
+            .offset(1)
+            .scalar_subquery()
+        )
         joined = (
             select(
                 p.c.posting_id,
@@ -615,6 +655,8 @@ class PostgresRepository:
                 s.c.previous_score,
                 s.c.scored_at,
                 age_source.label("effective_fetched_at"),
+                latest_ph.label("latest_profile_hash"),
+                prior_ph.label("prior_profile_hash"),
             )
             .select_from(
                 s.join(p, s.c.cluster_id == p.c.cluster_id).outerjoin(
@@ -642,6 +684,12 @@ class PostgresRepository:
             if score is None:
                 continue  # an un-scored join artifact never surfaces or counts as below
             if score >= threshold:
+                # Honest-graduation signal: the two most-recent events differ ⇒ the profile that
+                # produced `previous_score` differs from the one that produced `score` (a real
+                # profile change drove the crossing, not noise). A missing prior event (first
+                # scoring) ⇒ False ⇒ no badge.
+                prior = row["prior_profile_hash"]
+                prior_profile_changed = prior is not None and prior != row["latest_profile_hash"]
                 surfaced.append(
                     ShortlistItem(
                         posting_id=row["posting_id"],
@@ -660,6 +708,7 @@ class PostgresRepository:
                         fingerprint=row["fingerprint"],
                         fetched_at=row["effective_fetched_at"],
                         scored_at=row["scored_at"],
+                        prior_profile_changed=prior_profile_changed,
                     )
                 )
             else:

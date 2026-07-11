@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from ..adapters.s3_raw import RawStore
     from ..adapters.s3_reports import ReportStore
     from .dissector import Dissector
+    from .models import DissectedPosting, ScoreResult
     from .ports import FilterStrategy, Notifier, Repository, SourceAdapter
     from .scorer import Scorer
     from .search_spec import SearchSpec
@@ -42,6 +43,25 @@ DEFAULT_USER_ID = "default"
 _DEFAULT_THRESHOLD = 60
 _DEFAULT_HARD_FLOOR = 50
 _DEFAULT_NEAR_MISS_BAND = 10
+
+# Boundary self-consistency (ADR-0028 lineage): the LLM score is non-deterministic — same input,
+# ~16pt average spread measured live (max 60) — so a single score near the shortlist cut is a
+# coin-flip on membership. When a posting's first score lands within RESAMPLE_TRIGGER_MARGIN of
+# the runtime threshold (the ambiguous zone, on BOTH sides of the cut), it is re-scored to
+# RESAMPLE_N total samples and the MEDIAN sample is kept — a coherent `ScoreResult` (its
+# narrative/subscores are the ones that produced its number), never an averaged frankenscore. A
+# clearly-in / clearly-out first score is kept after ONE call (the cost guard: resampling pays N×
+# ONLY on the ~1/5 of scores that sit at the boundary). `RESAMPLE_N <= 1` disables resampling
+# entirely (byte-for-byte the pre-boundary-resample behavior — one call, whatever it returns).
+#
+# The trigger margin defaults to 16 — the measured average spread, deliberately WIDER than the
+# default near_miss_band (10, which spans only BELOW the threshold), because sampling noise can
+# push a first score across the cut from EITHER side. It is an INDEPENDENT technical knob, never
+# coupled to the user's near_miss_band strictness (setting near_miss_band=0 must not disable the
+# noise guard). N defaults ODD (3) so the median is an exact single sample. Both are module knobs
+# with safe defaults + orchestrator params (never a required SearchSpec field — no config break).
+DEFAULT_RESAMPLE_N = 3
+DEFAULT_RESAMPLE_TRIGGER_MARGIN = 16
 
 log = logging.getLogger(__name__)
 
@@ -398,6 +418,46 @@ def _load_profile_and_knobs(
     return profile, threshold, hard_floor, near_miss_band
 
 
+def _median_sample(samples: "list[ScoreResult]") -> "ScoreResult":
+    """The sample carrying the median score — a COHERENT `ScoreResult` (its strengths/gaps/
+    assessment/subscores are the ones that produced its number), never an averaged frankenscore.
+    Samples are sorted by score and the lower-median index is returned, so an even N still yields
+    a real sample deterministically; an odd N (the default 3) is the exact median."""
+    ordered = sorted(samples, key=lambda r: r.score)
+    return ordered[(len(ordered) - 1) // 2]
+
+
+def _score_with_resample(
+    scorer: "Scorer",
+    dissected: "DissectedPosting",
+    profile: Profile,
+    *,
+    threshold: int,
+    trigger_margin: int,
+    resample_n: int,
+) -> "ScoreResult":
+    """Score one posting once; resample near the boundary for self-consistency.
+
+    The LLM score is non-deterministic, so a single score within `trigger_margin` of `threshold`
+    is a coin-flip on shortlist membership. In that ambiguous zone (checked on BOTH sides of the
+    cut) the posting is re-scored to `resample_n` TOTAL samples and the MEDIAN sample is returned
+    (`_median_sample` — a coherent judgment, never averaged). A clearly-in / clearly-out first
+    score, or `resample_n <= 1` (disabled), returns after EXACTLY ONE call — the cost guard.
+
+    Purity + isolation are preserved: the `Scorer` is untouched, and a `ScorerError`/`LlmError`
+    from ANY sample propagates to the caller's per-item try/except (the posting is skipped, the
+    run continues) exactly as a single-score failure does today. The `deadline` is checked by the
+    caller BEFORE this runs (task-start granularity, unchanged); a boundary posting that has begun
+    runs its resample to completion inside the H-2 margin."""
+    first = scorer.score(dissected, profile)
+    if resample_n <= 1 or abs(first.score - threshold) > trigger_margin:
+        return first
+    samples = [first]
+    for _ in range(resample_n - 1):
+        samples.append(scorer.score(dissected, profile))
+    return _median_sample(samples)
+
+
 def score_gold(
     *,
     run_id: str,
@@ -407,10 +467,18 @@ def score_gold(
     user_id: str = DEFAULT_USER_ID,
     max_workers: int = DEFAULT_MAX_WORKERS,
     deadline: Deadline | None = None,
+    resample_n: int = DEFAULT_RESAMPLE_N,
+    resample_margin: int = DEFAULT_RESAMPLE_TRIGGER_MARGIN,
 ) -> dict[str, int]:
     """Step-5 scoring: load the candidate profile + its **runtime** threshold knobs, then for
-    each gold candidate -> score it (LLM) -> derive its `fit_category` from the config bands
-    (VG8) -> upsert the `score` row (keyed on `cluster_id`) -> mark the posting `scored`.
+    each gold candidate -> score it (LLM, boundary-resampled) -> derive its `fit_category` from
+    the config bands (VG8) -> upsert the `score` row (keyed on `cluster_id`) -> mark it `scored`.
+
+    **Boundary self-consistency:** a candidate whose first score lands within `resample_margin`
+    of `threshold` is re-scored to `resample_n` samples and the MEDIAN sample is persisted, so a
+    non-deterministic score near the cut stops being a coin-flip on the shortlist (`_score_with_
+    resample`). `resample_n <= 1` disables it (identical to before). Cost falls only on the
+    boundary set; a clearly-in/out score is scored exactly once.
 
     `profile_hash` (required — the caller computes it from the profile+knobs it synced) is
     stamped, with `scorer.model_id` and `run_id`, on the `score_event` lineage row that
@@ -446,7 +514,14 @@ def score_gold(
         if deadline is not None and deadline.expired:
             return _DEFERRED  # out of time budget — leave for the next run
         try:
-            return scorer.score(dissected, profile)
+            return _score_with_resample(
+                scorer,
+                dissected,
+                profile,
+                threshold=threshold,
+                trigger_margin=resample_margin,
+                resample_n=resample_n,
+            )
         except (ScorerError, LlmError) as exc:
             log.warning("scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)
             return None
@@ -515,6 +590,8 @@ def reassess(
     user_id: str = DEFAULT_USER_ID,
     max_workers: int = DEFAULT_MAX_WORKERS,
     deadline: Deadline | None = None,
+    resample_n: int = DEFAULT_RESAMPLE_N,
+    resample_margin: int = DEFAULT_RESAMPLE_TRIGGER_MARGIN,
     max_age_days: int | None = None,
 ) -> dict[str, Any]:
     """Replay scoring over the already-scored postings against the **current** profile — no
@@ -532,10 +609,18 @@ def reassess(
     `COALESCE(posting.fetched_at, bronze.fetched_at)` and still INCLUDES a posting whose age
     is unknown even when the bound is set (see its docstring).
 
+    Same boundary self-consistency as `score_gold` (`_score_with_resample`): a re-score that
+    lands within `resample_margin` of `threshold` is resampled to `resample_n` and the MEDIAN
+    sample is kept, so a genuine profile change is what moves a score, not sampling noise.
+    `resample_n <= 1` disables it (identical to before).
+
     Returns `{reassessed, graduated, downgraded, unchanged, failed, deferred}` plus a
     `graduations` list (`posting_id/title/company/old_score→new_score/old_cat→new_cat`) — a
     **graduation** = a posting that newly reached at/above the threshold (`old < threshold <=
-    new`). The digest of these rides the email-UX unit; here they are reported + persisted.
+    new`) **AND whose prior score came from a DIFFERENT profile** (`prior_profile_hash !=
+    profile_hash`). A crossing under an unchanged profile is LLM noise, not a skill gain, so it
+    is counted `unchanged`, never announced. The digest of graduations rides the email-UX unit;
+    here they are reported + persisted.
 
     The report also carries the |new − old| **delta distribution** over the successfully
     reassessed postings (scoring-stability observability, an M7 input): `delta_buckets`
@@ -558,7 +643,14 @@ def reassess(
         if deadline is not None and deadline.expired:
             return _DEFERRED
         try:
-            return scorer.score(target[2], profile)  # target[2] = dissected
+            return _score_with_resample(  # target[2] = dissected
+                scorer,
+                target[2],
+                profile,
+                threshold=threshold,
+                trigger_margin=resample_margin,
+                resample_n=resample_n,
+            )
         except (ScorerError, LlmError) as exc:
             log.warning("reassess scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)
             return None
@@ -574,7 +666,9 @@ def reassess(
                 if result is None:
                     failed += 1
                     continue
-                posting_id, cluster_id, dissected, old_score, old_cat = futures[fut]
+                posting_id, cluster_id, dissected, old_score, old_cat, prior_profile_hash = (
+                    futures[fut]
+                )
                 new_cat = derive_fit_category(
                     result.score,
                     threshold=threshold,
@@ -600,7 +694,18 @@ def reassess(
                 )
                 reassessed += 1
                 deltas.append(abs(result.score - old_score))
-                if old_score < threshold <= result.score:  # crossed UP → graduated
+                # A graduation is a crossing UP *caused by a profile change* — the prior score
+                # came from a DIFFERENT profile than this run's. A crossing under the SAME
+                # profile is LLM sampling noise (the boundary resample already suppresses most),
+                # so it is folded into `unchanged`, never announced or badged.
+                crossed_up = old_score < threshold <= result.score
+                # An unknown prior hash (None — a pathological pre-0004 row with no lineage
+                # event) can't PROVE a profile change, so it is NOT a graduation — consistent
+                # with the digest side (`prior is not None and prior != latest`).
+                profile_changed = (
+                    prior_profile_hash is not None and prior_profile_hash != profile_hash
+                )
+                if crossed_up and profile_changed:  # honest graduation
                     graduated += 1
                     graduations.append(
                         {
@@ -614,7 +719,7 @@ def reassess(
                     )
                 elif old_score >= threshold > result.score:  # crossed DOWN → downgraded
                     downgraded += 1
-                else:  # both above or both below the threshold
+                else:  # both sides equal, or a same-profile (noise) crossing
                     unchanged += 1
     if deferred:
         log.warning(

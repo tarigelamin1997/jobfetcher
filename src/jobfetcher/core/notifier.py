@@ -4,8 +4,9 @@ email — an HTML body **and** a plaintext fallback — for morning triage in 60
 
 The digest is TRUTHFUL about what changed: a **"New since last digest"** section leads with
 full cards — an item is new only when its judgment is FRESH (`scored_at > since`, the last
-digest send time) and that fresh judgment is news (a first scoring, or a graduation —
-`previous_score < threshold <= score` — badged green **↑ old→new**). Everything else above
+digest send time) and that fresh judgment is news (a first scoring, or an honest graduation —
+it crossed `threshold` AND under a *changed* profile, not LLM noise — badged green **↑ old→new**).
+Everything else above
 threshold lands in a compact **"still open"** section (count + the top 5 one-liners), so a
 repeat job never masquerades as news. Same-role repeats are **collapsed render-time by
 `fingerprint`** — one card per group, footnoted `seen n× — scores lo–hi`; a group straddling
@@ -76,9 +77,9 @@ def split_new_and_still_open(
 
     An item is NEW iff `since is None` (the first-ever digest — everything is new) OR its
     judgment is FRESH (`scored_at > since` — written after the last digest went out) AND that
-    fresh judgment is actually news: `previous_score is None` (a first scoring) or a
-    graduation (`previous_score < threshold <= score` — it just crossed the bar). Everything
-    else above threshold is STILL OPEN. Daily runs score a posting exactly ONCE, so a repeat's
+    fresh judgment is actually news: `previous_score is None` (a first scoring) or an HONEST
+    graduation (`_is_graduation` — it crossed the bar AND under a changed profile, not LLM
+    noise). Everything else above threshold is STILL OPEN. Daily runs score a posting exactly ONCE, so a repeat's
     `scored_at` predates the last digest and it lands still-open — `previous_score` alone
     cannot carry the split (it stays NULL forever in daily operation). A fresh NON-graduated
     re-score (reassess, `previous_score >= threshold`) is still-open too — being re-judged is
@@ -96,8 +97,7 @@ def split_new_and_still_open(
         if item.scored_at is None:
             new.append(item)  # unknown judgment time — defensively NEW, never hidden
         elif item.scored_at > since and (
-            item.previous_score is None
-            or item.previous_score < threshold <= item.score
+            item.previous_score is None or _is_graduation(item, threshold=threshold)
         ):
             new.append(item)
         else:
@@ -136,10 +136,18 @@ def collapse_duplicates(items: "list[ShortlistItem]") -> list[DigestCard]:
 
 
 def _is_graduation(item: "ShortlistItem", *, threshold: int) -> bool:
-    """True when this item just crossed the bar upward: `previous_score < threshold <= score`
-    (the ADR-0023 reassess graduation). `previous_score is None` = a first scoring — new, but
-    NOT a graduation (there is nothing to compare against), so it never gets a badge."""
-    return item.previous_score is not None and item.previous_score < threshold <= item.score
+    """True when this item just crossed the bar upward BECAUSE THE PROFILE CHANGED:
+    `previous_score < threshold <= score` AND the current score came from a different profile
+    than `previous_score` (`item.prior_profile_changed`). The profile gate is the honesty fix:
+    the LLM score is non-deterministic, so a crossing under the SAME profile (a re-score that
+    drifted up on noise) is NOT a graduation and never earns a badge — only a real skill/profile
+    gain does. `previous_score is None` = a first scoring — new, but not a graduation (nothing to
+    compare against)."""
+    return (
+        item.prior_profile_changed
+        and item.previous_score is not None
+        and item.previous_score < threshold <= item.score
+    )
 
 
 def _safe_apply_url(apply_url: str | None) -> str | None:
