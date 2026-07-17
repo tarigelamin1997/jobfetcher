@@ -6,6 +6,9 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
+### Added — v0.12.0 (in progress): full S3 audit persistence (U1) — the control panel (U2) follows
+
+- **[ADR-0032] Every pipeline stage's procedures + results now also land in S3** (U1, merged PR #32, deployed 2026-07-17). Before: only the bronze raw JSON + the rendered HTML report reached S3; the silver dissections, gold decisions, and scores lived only in Aurora, and the per-run summary lived only in the logs. New **`adapters/s3_audit.py` → `S3AuditStore`** writes batched JSONL per stage per run — `silver/`, `gold/`, `scores/{run_date}/{run_id}.jsonl` (scores from both `score_gold` and `reassess`) + `runs/{run_date}/{run_id}.json` (the run summary). **Non-fatal by contract:** serialize + put run inside a single `_guarded_put` — an audit write can never fail a run (even construction is guarded). Additive (four `audit_store=None` hooks, byte-for-byte today when unset); main-thread accumulation (H-2 preserved); smoke mode writes nothing. **No migration, no IAM/Terraform change, no new dependency.** Examiner **CLEAN PASS**; live-validated (`runs/` + `gold/` objects confirmed on the deployed stack). *(U2 — the local Streamlit control panel — is the next unit; v0.12.0 tags when both land.)*
 - **Backlog / P2 input:** observed-from-use bottlenecks are tracked in [ledgers/backlog.md](docs/ledgers/backlog.md) — **B-2** (digest deliverability / Gmail spam) remains open, blocked on a sender domain; a new observation (B-4) notes the full-backlog reassess is now deadline-partial (resample throughput). The next migration is re-derived via the [P2 protocol](docs/03-roadmap.md#the-migration-decision-protocol-how-the-next-step-is-actually-chosen).
 
 ## [v0.11.0] — 2026-07-11 — scorer: boundary self-consistency + honest graduations
