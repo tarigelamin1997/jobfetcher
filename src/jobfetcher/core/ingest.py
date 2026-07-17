@@ -26,6 +26,7 @@ from .report import render_full_list
 from .scorer import ScorerError, subscores_payload
 
 if TYPE_CHECKING:
+    from ..adapters.s3_audit import S3AuditStore
     from ..adapters.s3_raw import RawStore
     from ..adapters.s3_reports import ReportStore
     from .dissector import Dissector
@@ -243,6 +244,7 @@ def ingest(
     pipeline_version: str = "v0",
     max_workers: int = DEFAULT_MAX_WORKERS,
     deadline: Deadline | None = None,
+    audit_store: "S3AuditStore | None" = None,
 ) -> dict[str, int]:
     """End-to-end Step-4 run: fetch→bronze, then derive silver for each *distinct, new*
     posting. Returns a small summary of counts. `bronzed` == distinct ids landed this run;
@@ -294,6 +296,9 @@ def ingest(
             pipeline_version=pipeline_version,
         )
 
+    # S3 audit (v0.12.0): accumulate each landed silver record on the MAIN thread (next to the
+    # repo write — never on a worker), then write ONE batched JSONL after the join. Non-fatal.
+    silver_records: list[dict[str, Any]] = []
     if work:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(_dissect_task, item) for item in work]
@@ -307,6 +312,14 @@ def ingest(
                     dissected, kwargs = outcome
                     repo.save_posting(dissected, **kwargs)  # main thread — the only writer
                     silvered += 1
+                    if audit_store is not None:
+                        silver_records.append({
+                            **dissected.model_dump(mode="json"),
+                            "posting_id": kwargs["posting_id"],
+                            "bronze_id": kwargs["bronze_id"],
+                        })
+    if audit_store is not None:
+        audit_store.put_silver(silver_records)
     if deferred:
         log.warning(
             "ingest deadline reached (run_id=%s): %d dissection(s) deferred to the next run",
@@ -331,6 +344,7 @@ def apply_gold_filter(
     strategy: "FilterStrategy",
     repo: "Repository",
     source: str = "jsearch",  # noqa: ARG001 — accepted for symmetry/future multi-source; unused in v0
+    audit_store: "S3AuditStore | None" = None,
 ) -> dict[str, int]:
     """Step-4b gold filter: load every silver posting → ask the `strategy` if it is a likely
     fit → for each fit, create its trivial **1:1 cluster** (cluster_id == posting_id), attach
@@ -349,6 +363,8 @@ def apply_gold_filter(
     gold = 0
     dropped = 0
     failed_open = 0
+    # S3 audit (v0.12.0): one decision record per candidate examined (fit or not). Non-fatal.
+    gold_records: list[dict[str, Any]] = []
     for posting_id, posting in candidates:
         try:
             likely_fit = strategy.filter(spec, profile, posting)
@@ -356,6 +372,18 @@ def apply_gold_filter(
             log.warning("gold filter failed open (include) for %s: %s", posting_id, exc)
             likely_fit = True
             failed_open += 1
+
+        if audit_store is not None:
+            # `likely_fit` = the strategy's verdict; `promoted` = whether it actually reached gold.
+            # They coincide in v0 (a fit is always promoted) but are distinct concepts recorded
+            # separately so the audit stays honest when they diverge (e.g. clustering at M2).
+            # cluster_id == posting_id for a promoted candidate (v0 1:1 cluster); None if dropped.
+            gold_records.append({
+                "posting_id": posting_id,
+                "cluster_id": posting_id if likely_fit else None,
+                "likely_fit": likely_fit,
+                "promoted": likely_fit,
+            })
 
         if not likely_fit:
             dropped += 1
@@ -366,6 +394,9 @@ def apply_gold_filter(
         repo.set_posting_cluster(posting_id, posting_id)
         repo.mark_gold_candidate(posting_id)
         gold += 1
+
+    if audit_store is not None:
+        audit_store.put_gold(gold_records)
 
     summary = {"silver": len(candidates), "gold": gold, "dropped": dropped}
     if failed_open:
@@ -476,6 +507,7 @@ def score_gold(
     deadline: Deadline | None = None,
     resample_n: int = DEFAULT_RESAMPLE_N,
     resample_margin: int = DEFAULT_RESAMPLE_TRIGGER_MARGIN,
+    audit_store: "S3AuditStore | None" = None,
 ) -> dict[str, int]:
     """Step-5 scoring: load the candidate profile + its **runtime** threshold knobs, then for
     each gold candidate -> score it (LLM, boundary-resampled) -> derive its `fit_category` from
@@ -515,6 +547,8 @@ def score_gold(
     surfaced = 0
     failed = 0
     deferred = 0
+    # S3 audit (v0.12.0): one record per persisted score (main thread), batched after the join.
+    score_records: list[dict[str, Any]] = []
 
     def _score_task(candidate: tuple) -> Any:
         posting_id, _cluster_id, dissected = candidate
@@ -573,6 +607,15 @@ def score_gold(
                 scored += 1
                 if result.score >= threshold:
                     surfaced += 1
+                if audit_store is not None:
+                    score_records.append({
+                        "posting_id": posting_id,
+                        "cluster_id": cluster_id,
+                        "fit_category": fit_category,
+                        **result.model_dump(mode="json"),
+                    })
+    if audit_store is not None:
+        audit_store.put_scores(score_records)
     if deferred:
         log.warning(
             "scoring deadline reached (run_id=%s): %d candidate(s) deferred to the next run",
@@ -601,6 +644,7 @@ def reassess(
     resample_n: int = DEFAULT_RESAMPLE_N,
     resample_margin: int = DEFAULT_RESAMPLE_TRIGGER_MARGIN,
     max_age_days: int | None = None,
+    audit_store: "S3AuditStore | None" = None,
 ) -> dict[str, Any]:
     """Replay scoring over the already-scored postings against the **current** profile — no
     fetch, no gold (ADR-0023). The medallion's immutable-bronze → replay property: when the
@@ -645,6 +689,8 @@ def reassess(
     deferred = 0
     graduations: list[dict[str, Any]] = []
     deltas: list[int] = []  # |new − old| per successful reassess — the distribution input
+    # S3 audit (v0.12.0): one record per re-scored posting (main thread), batched after the join.
+    score_records: list[dict[str, Any]] = []
 
     def _rescore_task(target: tuple) -> Any:
         posting_id = target[0]
@@ -703,6 +749,14 @@ def reassess(
                 )
                 reassessed += 1
                 deltas.append(abs(result.score - old_score))
+                if audit_store is not None:
+                    score_records.append({
+                        "posting_id": posting_id,
+                        "cluster_id": cluster_id,
+                        "fit_category": new_cat,
+                        "previous_score": old_score,
+                        **result.model_dump(mode="json"),
+                    })
                 # A graduation is a crossing UP *caused by a profile change* — the prior score
                 # came from a DIFFERENT profile than this run's. A crossing under the SAME
                 # profile is LLM sampling noise (the boundary resample already suppresses most),
@@ -730,6 +784,8 @@ def reassess(
                     downgraded += 1
                 else:  # both sides equal, or a same-profile (noise) crossing
                     unchanged += 1
+    if audit_store is not None:
+        audit_store.put_scores(score_records)
     if deferred:
         log.warning(
             "reassess deadline reached (run_id=%s): %d posting(s) deferred to the next run",

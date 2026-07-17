@@ -222,6 +222,7 @@ def patched(monkeypatch, repo, db_url):
         ses = boto3.client("ses", region_name="us-east-1")
         ses.verify_email_identity(EmailAddress="from@jobfetcher.test")
 
+        from jobfetcher.adapters.s3_audit import S3AuditStore
         from jobfetcher.adapters.s3_raw import S3RawStore
         from jobfetcher.adapters.s3_reports import S3ReportStore
         from jobfetcher.adapters.ses_notifier import SesNotifier
@@ -232,6 +233,12 @@ def patched(monkeypatch, repo, db_url):
         monkeypatch.setattr(
             pipe, "S3ReportStore",
             lambda: S3ReportStore(bucket="jobfetcher-test-bucket", client=s3),
+        )
+        monkeypatch.setattr(
+            pipe, "S3AuditStore",
+            lambda *, run_id, run_date: S3AuditStore(
+                run_id=run_id, run_date=run_date, bucket="jobfetcher-test-bucket", client=s3
+            ),
         )
         monkeypatch.setattr(
             pipe, "SesNotifier", lambda: SesNotifier(sender="from@jobfetcher.test", client=ses)
@@ -292,6 +299,93 @@ def test_handler_end_to_end_then_idempotent(repo, patched, tmp_path):
     assert _count(repo, "score") == score1
     assert _count(repo, "run_log") == 1
     assert len(_sent_messages()) == 1  # STILL exactly one email — no duplicate
+
+
+def test_handler_persists_audit_medallion_to_s3(repo, patched, tmp_path):
+    """v0.12.0: every stage's structured results + the per-run summary also land in S3 — the
+    full audit medallion alongside Aurora. One batched object per stage per run."""
+    import boto3
+
+    _truncate(repo)
+    out = _invoke(tmp_path)
+    assert out["statusCode"] == 200 and out["score"]["scored"] == 2
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+
+    def keys(prefix: str) -> list[str]:
+        resp = s3.list_objects_v2(Bucket="jobfetcher-test-bucket", Prefix=prefix)
+        return [o["Key"] for o in resp.get("Contents", [])]
+
+    def body(key: str) -> bytes:
+        return s3.get_object(Bucket="jobfetcher-test-bucket", Key=key)["Body"].read()
+
+    # each stage wrote its batched object + the run summary (mirrors the medallion in S3)
+    assert keys("silver/") and keys("gold/") and keys("scores/") and keys("runs/")
+
+    # the run summary IS the handler's returned procedure record (which lived only in logs before)
+    run_summary = json.loads(body(keys("runs/")[0]))
+    assert run_summary["statusCode"] == 200
+    assert run_summary["score"]["scored"] == 2 and run_summary["notify"]["sent"] == 1
+
+    # the scores object is JSONL — one line per scored posting, carrying the ScoreResult
+    score_lines = body(keys("scores/")[0]).decode("utf-8").splitlines()
+    assert len(score_lines) == 2
+    assert all(json.loads(line)["score"] == 90 for line in score_lines)
+    assert all(json.loads(line)["fit_category"] == "strong_fit" for line in score_lines)
+
+    # the gold object records a decision per candidate (both promoted here)
+    gold_lines = body(keys("gold/")[0]).decode("utf-8").splitlines()
+    assert len(gold_lines) == 2 and all(json.loads(line)["promoted"] for line in gold_lines)
+
+    # the silver object carries the dissected skills (the structured result, not just raw)
+    silver_lines = body(keys("silver/")[0]).decode("utf-8").splitlines()
+    assert len(silver_lines) == 2 and all("skills" in json.loads(line) for line in silver_lines)
+
+
+def test_handler_audit_failure_does_not_fail_run(repo, patched, tmp_path, monkeypatch):
+    """The audit trail is an enhancement — a totally broken S3 audit path must NEVER fail the
+    run: the pipeline still returns 200 and the digest still sends (the non-fatal guarantee,
+    end-to-end through the handler)."""
+    import jobfetcher.handlers.pipeline as pipe
+
+    from jobfetcher.adapters.s3_audit import S3AuditStore
+
+    class _BoomS3:
+        def put_object(self, **kw):  # noqa: ANN003, ANN201
+            raise RuntimeError("s3 audit is down")
+
+    monkeypatch.setattr(
+        pipe, "S3AuditStore",
+        lambda *, run_id, run_date: S3AuditStore(
+            run_id=run_id, run_date=run_date, bucket="b", client=_BoomS3()
+        ),
+    )
+
+    _truncate(repo)
+    out = _invoke(tmp_path)
+    assert out["statusCode"] == 200  # audit failures never fail the run
+    assert out["score"]["scored"] == 2
+    assert out["notify"]["sent"] == 1  # the digest still goes out
+    # and the real work still landed in Aurora despite the dead audit path
+    assert _count(repo, "score") == 2
+
+
+def test_handler_survives_audit_store_construction_failure(repo, patched, tmp_path, monkeypatch):
+    """Even the audit store's CONSTRUCTION is guarded — if the ctor raises (e.g. a missing bucket
+    in a misconfigured env), the run continues with no audit trail and still returns 200 + sends
+    the digest (belt-and-suspenders: the audit path can never fail the run, not even at setup)."""
+    import jobfetcher.handlers.pipeline as pipe
+
+    def _boom_ctor(*, run_id, run_date):  # noqa: ARG001
+        raise RuntimeError("audit store cannot initialize")
+
+    monkeypatch.setattr(pipe, "S3AuditStore", _boom_ctor)
+
+    _truncate(repo)
+    out = _invoke(tmp_path)
+    assert out["statusCode"] == 200
+    assert out["score"]["scored"] == 2
+    assert out["notify"]["sent"] == 1
 
 
 def test_handler_reads_config_from_s3(repo, patched, tmp_path):
@@ -445,6 +539,29 @@ def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, mo
 
     # no NEW bronze/posting rows were created (replay only re-scores; no fetch)
     assert _count(repo, "bronze_posting") == 2 and _count(repo, "posting") == 2
+
+    # v0.12.0 audit: the reassess re-scores also land in S3 (scores/ + the run summary), carrying
+    # previous_score — so the replay's procedures are auditable, not only the resulting DB state.
+    import boto3
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    score_keys = [
+        o["Key"] for o in
+        s3.list_objects_v2(Bucket="jobfetcher-test-bucket", Prefix="scores/").get("Contents", [])
+    ]
+    reassess_key = next(k for k in score_keys if "reassess1" in k)  # KeyError-safe: raises if absent
+    lines = (
+        s3.get_object(Bucket="jobfetcher-test-bucket", Key=reassess_key)["Body"]
+        .read().decode("utf-8").splitlines()
+    )
+    assert len(lines) == 2
+    assert all(json.loads(ln)["score"] == 90 and json.loads(ln)["previous_score"] == 60
+               for ln in lines)
+    run_keys = [
+        o["Key"] for o in
+        s3.list_objects_v2(Bucket="jobfetcher-test-bucket", Prefix="runs/").get("Contents", [])
+    ]
+    assert any("reassess1" in k for k in run_keys)  # the reassess run summary is persisted too
 
 
 def test_export_snapshot_from_db(repo, patched, tmp_path):
