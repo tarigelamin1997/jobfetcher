@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 # Repo root + the src/ package (so this runs without an editable install).
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,28 @@ def _resolve_bucket(explicit: str | None) -> str:
     )
 
 
+# --------------------------------------------------------------------------- reusable core
+# Extracted so the control panel's config form (scripts/panel.py) shares the EXACT validate +
+# upload path — a bad edit can never reach S3 from either surface (one validation, one writer).
+def validate_config_text(text: str, model: type) -> None:
+    """Validate config YAML `text` against its Pydantic contract (`SearchSpec`/`Profile`).
+    Raises the model's `ValidationError` (or a YAML error) on anything invalid — the caller
+    surfaces it. This is THE gate: never upload config that fails to load."""
+    model.from_yaml_text(text)
+
+
+def push_config_text(*, bucket: str, key: str, text: str, client: Any = None) -> None:
+    """Upload config `text` to `s3://bucket/key` (the caller validates first). `client` is
+    injectable for tests (a moto/fake S3); else a real boto3 client is built lazily."""
+    if client is None:
+        import boto3
+
+        client = boto3.client("s3")
+    client.put_object(
+        Bucket=bucket, Key=key, Body=text.encode("utf-8"), ContentType="application/x-yaml"
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Push local config YAMLs to S3 (no redeploy).")
     ap.add_argument("--bucket", help="S3 data bucket (else $JOBFETCHER_DATA_BUCKET / terraform).")
@@ -66,22 +89,15 @@ def main() -> None:
         if not path.exists():
             sys.exit(f"missing {path} — seed it from {path.name.replace('.local.', '.sample.')}")
         try:
-            model.from_yaml_text(path.read_text(encoding="utf-8"))
+            validate_config_text(path.read_text(encoding="utf-8"), model)
         except Exception as exc:  # noqa: BLE001 — surface the validation error as a clean exit
             sys.exit(f"INVALID {path.name}: {exc}")
     print("[1/2] validated: search_config.local.yml + profile.local.yml")
 
-    # 2) upload.
+    # 2) upload (the shared writer).
     bucket = _resolve_bucket(args.bucket)
-    import boto3
-
-    s3 = boto3.client("s3")
     for path, key, _model in _UPLOADS:
-        s3.put_object(
-            Bucket=bucket, Key=key,
-            Body=path.read_text(encoding="utf-8").encode("utf-8"),
-            ContentType="application/x-yaml",
-        )
+        push_config_text(bucket=bucket, key=key, text=path.read_text(encoding="utf-8"))
         print(f"[2/2] uploaded {path.name} -> s3://{bucket}/{key}")
     print("done — the next pipeline run will use these settings (no redeploy needed).")
 

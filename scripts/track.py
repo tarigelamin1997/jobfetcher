@@ -198,17 +198,27 @@ def cmd_events(engine, *, posting_id: str) -> None:
         print(f"  {ev['noted_at']}  {ev['status']}{note}")
 
 
-def cmd_override(engine, repo, *, posting_id: str, score: int) -> None:
+def apply_override(engine, repo, *, posting_id: str, score: int) -> dict[str, Any]:
+    """The pure override path — reused by the `override` CLI command AND the control panel
+    (scripts/panel.py). Looks up the posting → its cluster + current score → the profile's
+    scoring context → derives `fit_category` from the runtime knobs (VG8) → `set_score_override`
+    (updates `score.score_override` + appends a `human-override` `score_event`, ADR-0026).
+
+    Raises `RepositoryError` on any precondition failure (no posting / no cluster / no score /
+    no profile row) — the caller decides how to surface it (the CLI `main()` turns it into a
+    stderr message + exit 1; the panel shows it in the UI). Returns a small result dict to render."""
     row = _posting_row(engine, posting_id)
     if row is None:
-        _fail(f"no posting {posting_id!r} — nothing written")
+        raise RepositoryError(f"no posting {posting_id!r} — nothing written")
     if row["cluster_id"] is None:
-        _fail(f"posting {posting_id!r} has no cluster yet — only scored postings can be overridden")
+        raise RepositoryError(
+            f"posting {posting_id!r} has no cluster yet — only scored postings can be overridden"
+        )
     score_rows = _fetch(
         engine, "SELECT score FROM score WHERE cluster_id = :c", {"c": row["cluster_id"]}
     )
     if not score_rows:
-        _fail(f"posting {posting_id!r} has no score row yet — nothing to override")
+        raise RepositoryError(f"posting {posting_id!r} has no score row yet — nothing to override")
     previous_score = score_rows[0]["score"]
     prof_rows = _fetch(
         engine,
@@ -230,9 +240,21 @@ def cmd_override(engine, repo, *, posting_id: str, score: int) -> None:
         profile_hash=profile_hash,
         previous_score=previous_score,
     )
+    return {
+        "posting_id": posting_id,
+        "label": _label(row),
+        "score": score,
+        "fit_category": fit_category,
+        "previous_score": previous_score,
+    }
+
+
+def cmd_override(engine, repo, *, posting_id: str, score: int) -> None:
+    # RepositoryError (a precondition failure or a DB error) propagates to main()'s handler.
+    r = apply_override(engine, repo, posting_id=posting_id, score=score)
     print(
-        f"  override {score} ({fit_category}) recorded for {posting_id}: {_label(row)}"
-        f"  (was {previous_score})"
+        f"  override {r['score']} ({r['fit_category']}) recorded for {r['posting_id']}: "
+        f"{r['label']}  (was {r['previous_score']})"
     )
 
 

@@ -139,3 +139,62 @@ def test_profile_context_missing_row_is_loud():
     # negative: no profile row → RepositoryError (main() turns it into stderr + exit 1).
     with pytest.raises(RepositoryError, match="no profile row"):
         track._profile_context(None)
+
+
+# --------------------------------------------------------------------------- apply_override (U2)
+# The pure override path extracted for the control panel to reuse (scripts/panel.py). It carries
+# the correctness (the CLI + the panel are thin callers), so it is unit-tested here.
+class _CaptureRepo:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def set_score_override(self, **kw) -> None:
+        self.calls.append(kw)
+
+
+def _override_fetch(*, with_score: bool = True, with_profile: bool = True):
+    """A scripted `_fetch` returning the posting row, then the score row, then the profile row."""
+    def _f(engine, sql, params=None):  # noqa: ARG001
+        if "FROM posting" in sql:
+            return [{
+                "posting_id": "p1", "cluster_id": "c1",
+                "title": "Data Engineer", "normalized_title": "Data Engineer", "company": "Acme",
+            }]
+        if "FROM score" in sql:
+            return [{"score": 55}] if with_score else []
+        if "FROM profile" in sql:
+            return [{"profile_hash": "ph", "threshold": 60, "hard_floor": 50,
+                     "near_miss_band": 10}] if with_profile else []
+        return []
+    return _f
+
+
+def test_apply_override_reuses_the_lineage_write_path(monkeypatch):
+    # a valid override → set_score_override called once with the derived fit_category + old score
+    monkeypatch.setattr(track, "_fetch", _override_fetch())
+    repo = _CaptureRepo()
+    r = track.apply_override(object(), repo, posting_id="p1", score=82)
+    assert (r["score"], r["previous_score"], r["fit_category"]) == (82, 55, "strong_fit")
+    assert "Data Engineer — Acme" in r["label"]
+    assert len(repo.calls) == 1
+    call = repo.calls[0]
+    assert call["cluster_id"] == "c1" and call["score_override"] == 82
+    assert call["fit_category"] == "strong_fit" and call["previous_score"] == 55
+
+
+def test_apply_override_unknown_posting_raises(monkeypatch):
+    # negative: no posting → RepositoryError (the panel shows it; the CLI exits 1) — nothing written
+    monkeypatch.setattr(track, "_fetch", lambda *a, **k: [])
+    repo = _CaptureRepo()
+    with pytest.raises(RepositoryError, match="no posting"):
+        track.apply_override(object(), repo, posting_id="nope", score=50)
+    assert repo.calls == []
+
+
+def test_apply_override_unscored_posting_raises(monkeypatch):
+    # negative: the posting has a cluster but no score row yet → nothing to override
+    monkeypatch.setattr(track, "_fetch", _override_fetch(with_score=False))
+    repo = _CaptureRepo()
+    with pytest.raises(RepositoryError, match="no score row"):
+        track.apply_override(object(), repo, posting_id="p1", score=50)
+    assert repo.calls == []
