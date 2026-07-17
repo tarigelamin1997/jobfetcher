@@ -37,6 +37,7 @@ from ..adapters.filter_deterministic import DeterministicFilterStrategy
 from ..adapters.jsearch_source import JSearchSourceAdapter
 from ..adapters.llm_openai import OpenAICompatLlmClient
 from ..adapters.repository_postgres import PostgresRepository
+from ..adapters.s3_audit import S3AuditStore
 from ..adapters.s3_config import read_config_text
 from ..adapters.s3_raw import S3RawStore
 from ..adapters.s3_reports import S3ReportStore
@@ -268,6 +269,9 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
 
     try:
         env = dict(os.environ)
+        # Bound up-front (constructed below) so the outer `except` can persist the run summary
+        # even when a stage fails before the store is built. Stays None through smoke mode.
+        audit_store: S3AuditStore | None = None
 
         # --- smoke mode (deploy gate): prove the Lambda reaches the DB AND the schema is at
         # the head this code expects — with ZERO side effects. Runs BEFORE any config read or
@@ -349,6 +353,14 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         source_adapter = JSearchSourceAdapter()
         raw_store = S3RawStore()
         report_store = S3ReportStore()  # B-1: same data bucket; the full-list report + presign
+        # v0.12.0: the full-audit store (silver/gold/scores/runs → S3). Even CONSTRUCTION is
+        # guarded — the whole audit trail is an enhancement that must NEVER fail the run (its
+        # methods are internally non-fatal too; $JOBFETCHER_DATA_BUCKET is set, same as above).
+        try:
+            audit_store = S3AuditStore(run_id=run_id, run_date=run_date)
+        except Exception as exc:  # noqa: BLE001 — audit is best-effort; never a run-fatal path
+            rlog.warning("S3 audit store unavailable — run continues without audit: %s", exc)
+            audit_store = None
         dissector = Dissector(
             OpenAICompatLlmClient(LlmConfig(model=_DISSECT_MODEL)), model_id=_DISSECT_MODEL
         )
@@ -373,15 +385,19 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 max_workers=max_workers,
                 deadline=deadline,
                 max_age_days=spec.reassess_max_age_days,
+                audit_store=audit_store,
             )
             rlog.info("mode=reassess done %s", reassess_report)
-            return {
+            reassess_summary = {
                 "statusCode": 200,
                 "run_id": run_id,
                 "run_date": run_date.isoformat(),
                 "mode": "reassess",
                 "reassess": reassess_report,
             }
+            if audit_store is not None:
+                audit_store.put_run_summary(reassess_summary)  # non-fatal
+            return reassess_summary
 
         # --- the pipeline, in sequence (each stage is idempotent via its own upserts) ---
         rlog.info("stage=ingest start run_date=%s", run_date.isoformat())
@@ -395,13 +411,15 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             source=spec.source,
             max_workers=max_workers,
             deadline=deadline,
+            audit_store=audit_store,
         )
         rlog.info("stage=ingest done %s", ingest_counts)
 
         rlog.info("stage=gold start")
         db_profile = Profile.from_jsonb(repo.get_profile(user_id)["profile"])
         gold_counts = apply_gold_filter(
-            spec, db_profile, strategy=strategy, repo=repo, source=spec.source
+            spec, db_profile, strategy=strategy, repo=repo, source=spec.source,
+            audit_store=audit_store,
         )
         rlog.info("stage=gold done %s", gold_counts)
 
@@ -414,6 +432,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             user_id=user_id,
             max_workers=max_workers,
             deadline=deadline,
+            audit_store=audit_store,
         )
         rlog.info("stage=score done %s", score_counts)
 
@@ -455,12 +474,15 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
 
     except Exception as exc:  # noqa: BLE001 — surface ANY stage failure as a retryable 500
         rlog.exception("pipeline failed: %s", exc)
-        return {
+        error_summary = {
             "statusCode": 500,
             "run_id": run_id,
             "run_date": run_date.isoformat(),
             "error": f"{type(exc).__name__}: {exc}",
         }
+        if audit_store is not None:
+            audit_store.put_run_summary(error_summary)  # non-fatal — the failed run's record
+        return error_summary
 
     summary = {
         "statusCode": 200,
@@ -472,5 +494,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         "score": score_counts,
         "notify": notify_counts,
     }
+    if audit_store is not None:
+        audit_store.put_run_summary(summary)  # v0.12.0 — the per-run procedure record (non-fatal)
     rlog.info("pipeline done %s", summary)
     return summary
