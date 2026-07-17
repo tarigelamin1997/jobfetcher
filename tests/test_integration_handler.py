@@ -370,6 +370,24 @@ def test_handler_audit_failure_does_not_fail_run(repo, patched, tmp_path, monkey
     assert _count(repo, "score") == 2
 
 
+def test_handler_survives_audit_store_construction_failure(repo, patched, tmp_path, monkeypatch):
+    """Even the audit store's CONSTRUCTION is guarded — if the ctor raises (e.g. a missing bucket
+    in a misconfigured env), the run continues with no audit trail and still returns 200 + sends
+    the digest (belt-and-suspenders: the audit path can never fail the run, not even at setup)."""
+    import jobfetcher.handlers.pipeline as pipe
+
+    def _boom_ctor(*, run_id, run_date):  # noqa: ARG001
+        raise RuntimeError("audit store cannot initialize")
+
+    monkeypatch.setattr(pipe, "S3AuditStore", _boom_ctor)
+
+    _truncate(repo)
+    out = _invoke(tmp_path)
+    assert out["statusCode"] == 200
+    assert out["score"]["scored"] == 2
+    assert out["notify"]["sent"] == 1
+
+
 def test_handler_reads_config_from_s3(repo, patched, tmp_path):
     """ADR-0022: config is read from S3 at RUNTIME (not bundled). Put the two YAMLs in the
     (moto) bucket, point the env at `s3://` URIs, and the pipeline runs from S3 — the seam that
@@ -521,6 +539,29 @@ def test_handler_reassess_mode_replays_and_graduates(repo, patched, tmp_path, mo
 
     # no NEW bronze/posting rows were created (replay only re-scores; no fetch)
     assert _count(repo, "bronze_posting") == 2 and _count(repo, "posting") == 2
+
+    # v0.12.0 audit: the reassess re-scores also land in S3 (scores/ + the run summary), carrying
+    # previous_score — so the replay's procedures are auditable, not only the resulting DB state.
+    import boto3
+
+    s3 = boto3.client("s3", region_name="us-east-1")
+    score_keys = [
+        o["Key"] for o in
+        s3.list_objects_v2(Bucket="jobfetcher-test-bucket", Prefix="scores/").get("Contents", [])
+    ]
+    reassess_key = next(k for k in score_keys if "reassess1" in k)  # KeyError-safe: raises if absent
+    lines = (
+        s3.get_object(Bucket="jobfetcher-test-bucket", Key=reassess_key)["Body"]
+        .read().decode("utf-8").splitlines()
+    )
+    assert len(lines) == 2
+    assert all(json.loads(ln)["score"] == 90 and json.loads(ln)["previous_score"] == 60
+               for ln in lines)
+    run_keys = [
+        o["Key"] for o in
+        s3.list_objects_v2(Bucket="jobfetcher-test-bucket", Prefix="runs/").get("Contents", [])
+    ]
+    assert any("reassess1" in k for k in run_keys)  # the reassess run summary is persisted too
 
 
 def test_export_snapshot_from_db(repo, patched, tmp_path):

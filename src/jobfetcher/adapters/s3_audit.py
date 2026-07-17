@@ -10,10 +10,13 @@ moto/mock client. The run context (`run_id`, `run_date`) is bound at constructio
 sites pass only records. No IAM/Terraform change: the Lambda role already grants `s3:PutObject`
 on the whole data bucket, so these new prefixes are already covered.
 
-**Non-fatal by contract:** every write goes through `_safe_put`, which logs a warning and returns
-`None` on ANY failure — an audit write can NEVER fail a pipeline run (the run's DB writes + email
-are independent). This mirrors the `notify` full-list-report guard, but at the store boundary, so
-every call site is inherently non-fatal.
+**Non-fatal by contract:** every write goes through `_guarded_put`, which wraps BOTH serialization
+and the S3 put and logs a warning + returns `None` on ANY failure — an audit write can NEVER fail
+a pipeline run (the run's DB writes + email are independent). This mirrors the `notify`
+full-list-report guard, but at the store boundary, so every call site is inherently non-fatal.
+(The callers build each record from an already-validated pydantic model via `model_dump(mode=
+"json")` — which cannot raise — so accumulation outside the guard is safe; the guard covers the
+batch serialize + write, where the realistic failures live.)
 
 **Batched:** one object per stage per run (JSONL — one record per line), so the audit costs a
 handful of PutObjects per run, not one per posting. Overwrite semantics — a re-run for the same

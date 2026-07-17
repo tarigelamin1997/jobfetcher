@@ -268,10 +268,11 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
     rlog = logging.LoggerAdapter(log, {"run_id": run_id})
 
     try:
-        env = dict(os.environ)
-        # Bound up-front (constructed below) so the outer `except` can persist the run summary
-        # even when a stage fails before the store is built. Stays None through smoke mode.
+        # Bound as the FIRST statement (constructed for real below) so the outer `except` can
+        # persist the run summary even when a stage fails before the store is built — and can
+        # never hit UnboundLocalError. Stays None through smoke mode (no audit side effects).
         audit_store: S3AuditStore | None = None
+        env = dict(os.environ)
 
         # --- smoke mode (deploy gate): prove the Lambda reaches the DB AND the schema is at
         # the head this code expects — with ZERO side effects. Runs BEFORE any config read or

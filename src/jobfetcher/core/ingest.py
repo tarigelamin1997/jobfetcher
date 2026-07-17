@@ -374,6 +374,9 @@ def apply_gold_filter(
             failed_open += 1
 
         if audit_store is not None:
+            # `likely_fit` = the strategy's verdict; `promoted` = whether it actually reached gold.
+            # They coincide in v0 (a fit is always promoted) but are distinct concepts recorded
+            # separately so the audit stays honest when they diverge (e.g. clustering at M2).
             # cluster_id == posting_id for a promoted candidate (v0 1:1 cluster); None if dropped.
             gold_records.append({
                 "posting_id": posting_id,
