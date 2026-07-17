@@ -198,3 +198,26 @@ def test_apply_override_unscored_posting_raises(monkeypatch):
     with pytest.raises(RepositoryError, match="no score row"):
         track.apply_override(object(), repo, posting_id="p1", score=50)
     assert repo.calls == []
+
+
+def test_apply_override_uncluster_posting_raises(monkeypatch):
+    # negative: a silver-only posting (no cluster yet) can't be overridden — only scored ones
+    def _f(engine, sql, params=None):  # noqa: ARG001
+        if "FROM posting" in sql:
+            return [{"posting_id": "p1", "cluster_id": None,
+                     "title": "t", "normalized_title": "t", "company": "c"}]
+        return []
+    monkeypatch.setattr(track, "_fetch", _f)
+    repo = _CaptureRepo()
+    with pytest.raises(RepositoryError, match="no cluster"):
+        track.apply_override(object(), repo, posting_id="p1", score=50)
+    assert repo.calls == []
+
+
+def test_cmd_override_wrapper_prints_the_success_line(monkeypatch, capsys):
+    # the thin CLI wrapper still prints the identical success line (byte-for-byte with the old
+    # cmd_override — the double space before "(was …)" is intentional and preserved).
+    monkeypatch.setattr(track, "_fetch", _override_fetch())
+    track.cmd_override(object(), _CaptureRepo(), posting_id="p1", score=82)
+    out = capsys.readouterr().out
+    assert "override 82 (strong_fit) recorded for p1: Data Engineer — Acme  (was 55)" in out

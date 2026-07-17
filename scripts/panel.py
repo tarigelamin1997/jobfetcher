@@ -30,7 +30,6 @@ import export  # noqa: E402 — read_data(): the flat jobs table + supporting ta
 import push_config  # noqa: E402 — validate_config_text + push_config_text + _resolve_bucket
 import track  # noqa: E402 — apply_override + the DB-URL resolver, reused verbatim
 from jobfetcher.core.models import APPLICATION_STATUSES  # noqa: E402
-from jobfetcher.core.ports import RepositoryError  # noqa: E402
 from jobfetcher.core.search_spec import (  # noqa: E402
     DatePosted,
     EmploymentType,
@@ -115,7 +114,7 @@ with tab_curate:
                     f"(was {r['previous_score']})"
                 )
                 _load_jobs.clear()  # refresh the browse grid on the next render
-            except RepositoryError as exc:
+            except Exception as exc:  # noqa: BLE001 — show any error in the UI, never a stack trace
                 st.error(str(exc))
 
     st.divider()
@@ -134,7 +133,7 @@ with tab_curate:
                 )
                 st.success(f"'{out_status}' recorded for {out_pid.strip()}")
                 _load_jobs.clear()
-            except RepositoryError as exc:
+            except Exception as exc:  # noqa: BLE001 — show any error in the UI, never a stack trace
                 st.error(str(exc))
 
 # --------------------------------------------------------------------------- Config
