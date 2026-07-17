@@ -22,6 +22,9 @@ dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.4", "testcontainers[postgres]>=4",
 # Not a runtime dep — the recommended viewer for the `scripts/export.py` snapshot (ADR-0024):
 #   pip install -e '.[query]' && datasette export/jobs.sqlite
 query = ["datasette>=1"]
+# Not a runtime dep — the local operator control panel (ADR-0033), NEVER bundled in the Lambda:
+#   pip install -e '.[panel]' && streamlit run scripts/panel.py
+panel = ["streamlit>=1.36"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
