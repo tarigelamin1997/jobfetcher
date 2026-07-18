@@ -4,6 +4,8 @@ Your job history lives in the operational DB (Aurora). To **filter / search / so
 export a portable snapshot and open it in a tool built for exactly that ([ADR-0024](adr/0024-query-via-export.md)) —
 no custom UI, full "basic operations" for free, offline.
 *(As of `v0.10.0` the daily digest's still-open overflow + below-threshold footer carry a **presigned link to a one-click full-list report page** — the primary path ([ADR-0030](adr/0030-reachable-full-list-from-digest.md)); the *"…see your export"* text is now the **degraded fallback** shown only when that report can't be built. This export is the **richer, self-service** surface — full history, lineage, SQL — for digging past the report; [ADR-0027](adr/0027-digest-truthfulness.md).)*
+>
+> **Live surface (`v0.12.0`):** for a live view — *and* to curate — use the **local control panel** `scripts/panel.py` (`pip install -e '.[panel]'` → `streamlit run scripts/panel.py`): browse/filter every scored job, override a score / record an outcome, and edit your search config → push to S3 — all against the live DB, no snapshot. This `export.py` path stays the **portable, offline** snapshot; the panel is the live view ([ADR-0033](adr/0033-local-control-panel.md)).
 
 ## 1. Export a snapshot
 

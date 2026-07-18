@@ -17,7 +17,7 @@
 - A **DeepSeek** account for the LLM — sign up at [platform.deepseek.com](https://platform.deepseek.com), create an API key. *(Free signup tokens may not apply; a ~$2 balance covers a lot of runs.)*
 - A **JSearch** subscription (job data) via RapidAPI — subscribe to **JSearch Basic (free, 200 req/mo)** and copy your key. *(Detail: [build-plan Step 0](04-v0-build-plan.md) · [ADR-0010](adr/0010-job-source-jsearch.md).)*
 
-**Local tools:** **Python 3.11**, **Terraform ≥ 1.10**, **AWS CLI v2** (configured — see step 2), **git**. *(Docker is optional — only for the integration tests in [`tests/README.md`](../tests/README.md).)*
+**Local tools:** **Python 3.11**, **Terraform ≥ 1.10**, **AWS CLI v2** (configured — see step 2), **git**. *(Docker is optional — only for the integration tests in [`tests/README.md`](../tests/README.md). Two optional local extras: `[panel]` = the Streamlit control panel, `[query]` = the Datasette viewer — neither ships in the Lambda; see [§12](#12--day-to-day-no-redeploy).)*
 
 ---
 
@@ -157,6 +157,8 @@ Once it's up, the routine loop is config + invokes — the Lambda zip stays put.
 - **Re-score on a better profile** → add a skill, push config, invoke `{"mode":"reassess"}` → `stretch` roles graduate to `strong_fit` ([ADR-0023](adr/0023-reassess-replay.md)).
 - **Record outcomes / override a score** → `python scripts/track.py applied <posting_id>` · `track.py override <posting_id> <score>` ([ADR-0026](adr/0026-outcome-tracking-override-lineage.md)).
 - **Preview the email** → `python scripts/preview_digest.py`.
+- **Browse + curate live (control panel)** → `pip install -e '.[panel]'` → `streamlit run scripts/panel.py`: a **local Streamlit app** to browse/filter every scored job, override a score / record an outcome, and edit your search config → push to S3 — all against the live DB, no redeploy ([ADR-0033](adr/0033-local-control-panel.md)).
+- **Query a portable snapshot** → `pip install -e '.[query]'` → `python scripts/export.py` → open `export/jobs.sqlite` in Datasette ([ADR-0024](adr/0024-query-via-export.md)).
 
 ---
 

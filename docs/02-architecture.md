@@ -15,11 +15,13 @@ flowchart TB
     DEDUP --> SCORE[score\nLLM via DeepSeek, explainable]
     SCORE --> CV[cv_tailor\nDOCX+PDF, draft→review]
     CV --> NOTIFY[notify\nemail + Notion]
-    FETCH -. raw json .-> S3[(S3\nraw / gold-cv)]
+    FETCH -. raw json .-> S3[(S3\nraw · audit · reports · CVs)]
     DEDUP <--> PG[(Postgres\noperational state)]
     SCORE <--> PG
     CV <--> PG
     NOTIFY <--> PG
+    DEDUP & SCORE -. audit jsonl v0.12\nsilver/gold/scores .-> S3
+    NOTIFY -. report + run summary .-> S3
   end
   subgraph AN["ANALYTICAL PLANE — DE depth"]
     direction LR
@@ -229,13 +231,17 @@ erDiagram
 
 ### S3 layout
 ```
-s3://jobfetcher-<env>/raw/{source}/{date}/{source_job_id}.json   # raw API payloads (lake landing)
-s3://jobfetcher-<env>/gold/cvs/{cluster_id}/tailored_cv.docx     # editable draft
-s3://jobfetcher-<env>/gold/cvs/{cluster_id}/tailored_cv.pdf      # submission-ready
+s3://jobfetcher-<env>/raw/{source}/{date}/{source_job_id}.json   # raw API payloads (immutable bronze, lake landing)
+s3://jobfetcher-<env>/config/{search_config,profile}.yml         # runtime config, read each run (v0.3.0, ADR-0022)
+s3://jobfetcher-<env>/silver/{run_date}/{run_id}.jsonl           # audit: dissected postings, one JSON/line (v0.12.0, ADR-0032)
+s3://jobfetcher-<env>/gold/{run_date}/{run_id}.jsonl             # audit: gold filter decisions (v0.12.0, ADR-0032)
+s3://jobfetcher-<env>/scores/{run_date}/{run_id}.jsonl           # audit: score results — score_gold + reassess (v0.12.0)
+s3://jobfetcher-<env>/runs/{run_date}/{run_id}.json              # audit: the run summary (statusCode + stage counts) (v0.12.0)
 s3://jobfetcher-<env>/reports/{run_date}/jobs-{run_id}.html      # full-list report, presigned into the digest (v0.10.0, ADR-0030)
+s3://jobfetcher-<env>/gold/cvs/{cluster_id}/tailored_cv.{docx,pdf}  # editable + submission-ready CV (future M1)
 s3://jobfetcher-<env>/analytics/...                              # dbt/export artifacts (later migration)
 ```
-Config (`search_config`, sanitized sample profile) ships in-repo; **real profile/CV** is gitignored, uploaded to a private S3 prefix at setup.
+The **`silver/`/`gold/`/`scores/`/`runs/` audit trail** (v0.12.0, [ADR-0032](adr/0032-full-s3-audit-persistence.md)) persists every stage's structured procedures + results to S3 alongside Aurora — durable + replayable, batched (one JSONL object per stage per run), non-fatal (an audit write can never fail a run). **The two `gold/` uses are distinct:** `gold/{run_date}/{run_id}.jsonl` is the v0.12.0 audit object; `gold/cvs/…` is the future-M1 CV artifact. Config (`search_config`, sanitized sample profile) ships in-repo; **real profile/CV** is gitignored, uploaded to a private S3 prefix at setup.
 
 ---
 
@@ -294,7 +300,7 @@ Config (`search_config`, sanitized sample profile) ships in-repo; **real profile
 
 - **Consumers:** Skill-Demand tracker (Roles-Blocked, You-Have-It, ROI priority) + weekly **Sector Intelligence** (Bedrock summaries *grounded in mart data*) → written back to Notion (a small, named **reverse-ETL** step + a light metrics layer — *not* a heavy semantic-layer framework).
 - **Snowflake is conditional** — the documented scale-path if Postgres analytics ever becomes a real bottleneck. **Debezium CDC** is the documented scale-path for batch→streaming. Both deferred; both have a home in the roadmap.
-- **Interim read surface (v0.5.0, [ADR-0024](adr/0024-query-via-export.md)).** Until the marts (and, later, a hosted dashboard) land, `scripts/export.py` snapshots the operational DB to a **portable SQLite + CSV** (a flat `jobs` table + `bronze`/`runs`/`profile`) for ad-hoc filter/search in **Datasette or Excel** — a read surface over the records, deliberately *not* a custom UI.
+- **Read + curate surfaces.** `scripts/export.py` (v0.5.0, [ADR-0024](adr/0024-query-via-export.md)) snapshots the operational DB to a **portable SQLite + CSV** (a flat `jobs` table + `bronze`/`runs`/`profile`) for ad-hoc filter/search in **Datasette or Excel** — a portable snapshot. The **local control panel** `scripts/panel.py` (v0.12.0, [ADR-0033](adr/0033-local-control-panel.md)) is the **live** view over the same records — Browse (filter every scored job) + Curate (override a score / record an outcome) + a Config form — a local Streamlit app (optional `[panel]` extra, never in the Lambda). A hosted dashboard over the marts stays the deferred end-state (M5+).
 
 ---
 
@@ -363,10 +369,17 @@ The digest's two dead-text sinks become a real link. Same one-Lambda shape, **no
 - **Non-fatal by design.** The report build/upload/presign is wrapped in a guard — any failure degrades the digest to plain text and **never blocks the send**. Presigned links are capped at the Lambda role's session-token TTL (hours) — accepted for a *daily* email; tomorrow's run regenerates the link.
 - **Live-validated (2026-07-10):** `get_all_scored` returned **286 rows** over the Aurora Data API; the ~**242 KB** page rendered → written to S3 → presigned. **B-1 is now CLOSED**; only B-2 (Gmail-spam deliverability, blocked on a sender domain) stays open in the backlog. Since v0.10.0 the pipeline runs **fully unattended** (daily 06:00 UTC cron; first solo flight 2026-07-10).
 
-### scorer — boundary self-consistency + honest graduations ([ADR-0031](adr/0031-boundary-self-consistency-honest-graduations.md), merged PR #31; pending live-validation + tag)
+### v0.11.0 — scorer: boundary self-consistency + honest graduations ([ADR-0031](adr/0031-boundary-self-consistency-honest-graduations.md), shipped 2026-07-11)
 
 The shortlist boundary stops being a coin-flip. A P2-scan measured the LLM scorer's same-input drift (**avg spread 15.95, max 60**; **62/286** scores within ±16 of the cut). Same one-Lambda shape, **no migration / no infra / no new dependency**:
 
 - **Boundary resample** (`core/ingest.py::_score_with_resample`, in **both** `score_gold` and `reassess`). A first score within `RESAMPLE_TRIGGER_MARGIN` (16, module knob) of the runtime threshold is re-scored to `RESAMPLE_N` (3) **total** and the **median SAMPLE** is kept — a coherent `ScoreResult`, never an averaged frankenscore. Clearly-in / clearly-out or `N ≤ 1` → **exactly one call** (the cost guard: only ~1/5 boundary jobs pay N×). **Deadline-aware** — an extra sample is never started past the H-2 wall (the run stays "never times out"). `N`/margin are defaulted orchestrator params, **never a required `SearchSpec` field**; the `Scorer` class stays pure.
 - **Honest graduations.** A threshold crossing is badged/counted a graduation **only when the profile actually changed** — the prior `score_event.profile_hash` ≠ the current run's. Reassess: `get_scored_for_reassess` returns each posting's `prior_profile_hash`; the gate is `prior is not None and prior != profile_hash`. Digest: `get_scored_shortlist` computes `prior_profile_changed`, carried by `ShortlistItem` into `_is_graduation`. A same-profile crossing folds into `unchanged` — LLM noise, never announced.
 - **The M7 code-total cut-over was overturned with evidence** (it inherits the LLM subscore noise — max spread 71 > the holistic's 60 — so a deterministic re-weight can't fix it). M7 stays parked; v0.8.0's shadow `code_total` remains the instrument.
+
+### v0.12.0 — full S3 audit persistence + a local control panel ([ADR-0032](adr/0032-full-s3-audit-persistence.md) · [ADR-0033](adr/0033-local-control-panel.md), shipped 2026-07-17)
+
+Two agentic-squad units. **No DB migration, no IAM/Terraform change, no new runtime dependency.**
+
+- **U1 — full S3 audit persistence.** Before, only the bronze raw JSON + the rendered HTML report reached S3; the silver dissections, gold decisions, and scores lived only in Aurora, and the per-run summary lived only in the logs. New **`adapters/s3_audit.py` → `S3AuditStore`** writes each stage's structured results to S3 as **batched JSONL, one object per stage per run** — `silver/`, `gold/`, `scores/{run_date}/{run_id}.jsonl` (scores from both `score_gold` and `reassess`) + `runs/{run_date}/{run_id}.json` (the run summary). **Non-fatal by contract:** serialize + put run inside a single `_guarded_put` — an audit write can never fail a run (even construction is guarded). Additive (four `audit_store=None` hooks on ingest/gold/score/reassess, byte-for-byte today when unset); main-thread accumulation (H-2 preserved); smoke mode writes nothing. See the [S3 layout](#s3-layout). This audit trail is a **durable, replayable read source the analytical plane (M5) can consume without touching the operational DB** (an ADR-0032 consequence) — plus a forensic "what did run X do" record. Live-validated: `runs/` + `gold/` objects on the deployed stack.
+- **U2 — local operator control panel.** `scripts/panel.py` — a **local** Streamlit app (`streamlit run scripts/panel.py`, nothing hosted, no auth, no deploy) with three tabs against the live Aurora + S3: **Browse** (filter every scored job — reuses `export.read_data` + `wait_for_db_resume`), **Curate** (override a score / record an outcome — reuses the extracted `track.apply_override` + `repo.track_application_event`, the same append-only lineage), and **Config** (edit the search params → `push_config.validate_config_text` → push to S3, so a bad edit can never reach S3). `streamlit` is an optional **`[panel]`** extra — never in the Lambda zip. It's the deliberately-deferred "hosted dashboard" end-state realized **locally + minimally** (B-1 rung-3, self-hosted) — the live view over the same records `export.py` snapshots (see the **Read + curate surfaces** bullet in the analytical plane).

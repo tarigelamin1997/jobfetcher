@@ -8,7 +8,7 @@
 
 ## 1 · Full-stack architecture (target)
 
-The complete two-plane design (high-level). **What's live today is a subset — `v0.10.0`, running fully unattended** (daily 06:00 UTC EventBridge cron → one Lambda → fetch → dissect → gold → 7-factor score (+ shadow subscores/`code_total`) → SES card-digest + a presigned S3 full-list report, on Aurora SLv2 via the RDS Data API + S3; **concurrent** dissect/score with a deadline guard; **config read from S3 at runtime**; a **`{"mode":"reassess"}` replay** path and a **`{"mode":"smoke"}` deploy gate**; **`score_event` + `application_event` lineage**; **2 CloudWatch alarms → SNS → email**; Terraform state in an S3 backend; deployed + live-validated); the analytical plane + the other operational boxes arrive by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
+The complete two-plane design (high-level). **What's live today is a subset — `v0.12.0`, running fully unattended** (daily 06:00 UTC EventBridge cron → one Lambda → fetch → dissect → gold → 7-factor score (+ shadow subscores/`code_total`, **boundary-resampled** near the cutoff, v0.11) → SES card-digest + a presigned S3 full-list report, on Aurora SLv2 via the RDS Data API + S3; **concurrent** dissect/score with a deadline guard; **config read from S3 at runtime**; a **`{"mode":"reassess"}` replay** path and a **`{"mode":"smoke"}` deploy gate**; **`score_event` + `application_event` lineage**; **2 CloudWatch alarms → SNS → email**; Terraform state in an S3 backend; **full S3 audit persistence** (every stage's results → S3 JSONL: `silver/`/`gold/`/`scores/`/`runs/`, v0.12); a **local Streamlit control panel** (browse/curate/config, v0.12); deployed + live-validated); the analytical plane + the other operational boxes arrive by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
 
 ```mermaid
 flowchart TB
@@ -34,10 +34,11 @@ flowchart TB
     SC -.->|"reassess (v0.4)<br/>{mode:reassess} · re-score existing · no fetch"| SC
     EB -.->|"{mode:smoke} deploy gate (v0.9)<br/>Data-API connect + alembic_version check"| ORC
     PG[("Postgres — Aurora SLv2<br/>via RDS Data API · + pgvector")]
-    S3[("S3<br/>raw + config (v0.3) + CVs + reports (v0.10)")]
+    S3[("S3<br/>raw + config (v0.3) + CVs + reports (v0.10)<br/>+ audit silver/gold/scores/runs (v0.12)")]
     SM["Secrets Manager"]
     CF["Profile / Config<br/>in S3, read at runtime (v0.3)<br/>edit + push_config.py · no redeploy"]
     EXP["export (v0.5)<br/>SQLite/CSV → Datasette/Excel"]
+    PANEL["control panel (v0.12)<br/>panel.py · browse/curate/config<br/>(local Streamlit)"]
     subgraph OBS["Observability (v0.9)"]
       AL["2 CloudWatch alarms<br/>dead-man on daily rule + Lambda Errors"]
       SNS["SNS topic"]
@@ -65,6 +66,10 @@ flowchart TB
   RPT --> S3
   BR --> S3
   CV --> S3
+  SI & GO & SC -.->|"audit jsonl (v0.12)"| S3
+  ORC -.->|"run summary → runs/ (v0.12)"| S3
+  PG --> PANEL
+  PANEL -.->|"config push"| S3
   NT --> NO
   NT --> US
   PG --> EXP
@@ -112,6 +117,7 @@ flowchart TB
   SC["⑤ Score — LLM · DeepSeek<br/>runs on GOLD only"]
   CL[("cluster<br/>score + CV attach once per real job")]
   AN["analytics marts (M5/M6)"]
+  AUD[("S3 audit (v0.12)<br/>silver/gold/scores jsonl<br/>+ runs/ run summary")]
   DDM["⤷ M2 — multi-source + clustering:<br/>fingerprint → pgvector blocking → apply-URL / canonical-id<br/>→ company-canon → time-window → confidence bands<br/>→ LLM adjudication → human merge"]
 
   PAGE -->|"all raw, untouched"| S3R
@@ -122,6 +128,9 @@ flowchart TB
   DD --> CL
   SC --> CL
   PF -.->|"below-bar rows kept for analytics"| AN
+  TP -.->|"silver jsonl (v0.12)"| AUD
+  PF -.->|"gold jsonl (v0.12)"| AUD
+  SC -.->|"scores jsonl (v0.12)"| AUD
   DD -.->|"lineage: bronze_id + pipeline_version"| BP
   BP ==>|"immutable ⇒ replay · zero new API calls"| SLV
   DD -.->|"grows at M2"| DDM
@@ -144,7 +153,7 @@ flowchart TB
 
 The directional roadmap — a **living hypothesis**, not a contract. Live status is the source of truth in [ledgers/phase-index](ledgers/phase-index.md); this is the *shape*. Discussed in [03-roadmap](03-roadmap.md).
 
-**v0 shipped, then a P2-driven capability burst.** v0 (`v0.1.0`, 2026-06-29) deployed + live-validated + torn down to ~$0. Since then the **bottleneck protocol re-ranked the roadmap from real usage** — the pre-drawn M1–M8 was hypothesis, not contract. Shipped so far (all live-validated on the deployed stack): `v0.2.0` **M1 pipeline hardening** (the P2 protocol overruled the pre-drawn *M1 = CV tailoring*), `v0.3.0` **user-customizable settings + runtime config in S3** (change settings via `push_config.py`, no redeploy), `v0.3.1` employment_types enum, `v0.4.0` **reassess/replay** (re-score on an updated profile, no re-fetch — the graduation half of the old M4, early), `v0.5.0` **query/filter access** (export → SQLite/CSV), `v0.6.0` **email UX** (card digest + prominent Apply button), `v0.7.0` **score lineage + outcome tracking** (`score_event`/`application_event` + truthful digest), `v0.8.0` **scorer integrity** (7 bounded subscores + weighted `code_total` in shadow mode), `v0.9.0` **ops hardening** (Terraform S3 backend + 2 CloudWatch alarms → SNS + `{mode:smoke}` deploy gate), `v0.10.0` **reachable full-list** (presigned S3 report page of all scored jobs) — the pipeline now runs **fully unattended** (daily 06:00 UTC cron; first solo flight 2026-07-10). **Next = the bottleneck protocol picks from real use** (the ⬜ below are re-derived hypotheses, not committed).
+**v0 shipped, then a P2-driven capability burst.** v0 (`v0.1.0`, 2026-06-29) deployed + live-validated + torn down to ~$0. Since then the **bottleneck protocol re-ranked the roadmap from real usage** — the pre-drawn M1–M8 was hypothesis, not contract. Shipped so far (all live-validated on the deployed stack): `v0.2.0` **M1 pipeline hardening** (the P2 protocol overruled the pre-drawn *M1 = CV tailoring*), `v0.3.0` **user-customizable settings + runtime config in S3** (change settings via `push_config.py`, no redeploy), `v0.3.1` employment_types enum, `v0.4.0` **reassess/replay** (re-score on an updated profile, no re-fetch — the graduation half of the old M4, early), `v0.5.0` **query/filter access** (export → SQLite/CSV), `v0.6.0` **email UX** (card digest + prominent Apply button), `v0.7.0` **score lineage + outcome tracking** (`score_event`/`application_event` + truthful digest), `v0.8.0` **scorer integrity** (7 bounded subscores + weighted `code_total` in shadow mode), `v0.9.0` **ops hardening** (Terraform S3 backend + 2 CloudWatch alarms → SNS + `{mode:smoke}` deploy gate), `v0.10.0` **reachable full-list** (presigned S3 report page of all scored jobs), `v0.11.0` **scorer boundary self-consistency** (median-of-N re-score near the cutoff + honest graduations), `v0.12.0` **full S3 audit persistence + a local control panel** (every stage's results → S3 JSONL; `panel.py` browse/curate/config) — the pipeline now runs **fully unattended** (daily 06:00 UTC cron; first solo flight 2026-07-10). **Next = the bottleneck protocol picks from real use** (the ⬜ below are re-derived hypotheses, not committed).
 
 ```mermaid
 flowchart LR
@@ -157,7 +166,9 @@ flowchart LR
   LN --> SI2["✅ (v0.8.0)<br/>scorer integrity<br/>7 subscores · shadow code_total"]
   SI2 --> OP["✅ (v0.9.0)<br/>ops hardening · S3 state<br/>alarms → SNS · smoke gate"]
   OP --> FL["✅ (v0.10.0)<br/>reachable full-list<br/>presigned S3 report · unattended"]
-  FL --> NX{{"next = P2 protocol<br/>picks from real use"}}
+  FL --> BR2["✅ (v0.11.0)<br/>scorer boundary self-consistency<br/>median-of-N · honest graduations"]
+  BR2 --> AU["✅ (v0.12.0)<br/>S3 audit persistence<br/>+ local control panel"]
+  AU --> NX{{"next = P2 protocol<br/>picks from real use"}}
   NX -.-> HYP["⬜ hypotheses:<br/>CV tailoring · multi-source+dedup (M2)<br/>Step Functions (M3) · Notion+near-miss (M4)<br/>dbt marts + analytics (M5–M6)<br/>observability+calibration (M7) · v1.0 polish (M8)"]
 ```
 
@@ -248,13 +259,13 @@ flowchart TB
   end
 ```
 
-> The same seam powers the reassess loop (§5) and is the clean foundation for a future settings UI, which would write the same S3 object.
+> The same seam powers the reassess loop (§5) and is the foundation for a settings UI — now **realized by the v0.12.0 control panel's Config tab** (`scripts/panel.py`), which validates the edit then writes the same S3 object ([ADR-0033](adr/0033-local-control-panel.md)).
 
 ---
 
-## 7 · Query / filter — the read surface (`v0.5.0`)
+## 7 · Read + curate surfaces (`v0.5.0` export · `v0.12.0` control panel)
 
-Filter/search/organize your records without a custom UI: **export a snapshot** and open it in a purpose-built tool. Discussed in [ADR-0024](adr/0024-query-via-export.md) · [querying.md](querying.md).
+Two surfaces over your records: **`export.py`** snapshots to a portable file for a purpose-built viewer (no custom UI), and the **`v0.12.0` local control panel** is the live browse/curate/config view. Discussed in [ADR-0024](adr/0024-query-via-export.md) · [ADR-0033](adr/0033-local-control-panel.md) · [querying.md](querying.md).
 
 ```mermaid
 flowchart LR
@@ -264,6 +275,7 @@ flowchart LR
   SQ --> DS["Datasette<br/>faceted filter · full-text search"]
   SQ --> DB2["DB Browser / sqlite3"]
   CSV --> XL["Excel / Sheets"]
+  PG <-->|"live browse + curate"| PN["scripts/panel.py (v0.12)<br/>Streamlit · browse/filter · override/outcome · config form<br/>(local, optional panel extra)"]
 ```
 
 ---
