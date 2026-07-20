@@ -8,12 +8,15 @@ repo + fake notifier (counts; zero-matches still sends; send failure RAISES; sin
 threading). Each carries a negative."""
 from __future__ import annotations
 
+import re
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
 from jobfetcher.adapters.ses_notifier import _SENDER_ENV, SesNotifier
+from jobfetcher.core.capture_token import sign, verify
 from jobfetcher.core.ingest import notify
 from jobfetcher.core.notifier import (
     collapse_duplicates,
@@ -21,6 +24,16 @@ from jobfetcher.core.notifier import (
     split_new_and_still_open,
 )
 from jobfetcher.core.ports import NotifierError, ShortlistItem
+
+_CAPTURE_KEY = b"digest-capture-key"
+
+
+def _capture_link(pid: str, status: str) -> str:
+    """A real signing capture_link for the render tests — the token must verify back."""
+    return (
+        "https://cap.example.com/c?t="
+        + sign(posting_id=pid, status=status, expires_at=int(time.time()) + 3600, key=_CAPTURE_KEY)
+    )
 
 # A canned "last digest went out" time for the truthfulness tests (since != None), plus a
 # judgment written AFTER it (fresh — can be news) and one BEFORE it (stale — a daily repeat).
@@ -66,6 +79,33 @@ def test_render_digest_matches_carry_core_fields():
     assert "+3 more scored below your threshold of 60" in html
     # html has a clickable apply link
     assert 'href="https://jobs.example.com/apply/123"' in html
+
+
+def test_render_digest_renders_capture_link_that_verifies_back():
+    # INV-001: each new card carries a "Mark as applied" capture link whose token verifies back
+    # to exactly {posting_id, 'applied'} — in BOTH the html and the plaintext.
+    _, html, text = render_digest(
+        [_item(90, "p1")], below_count=0, threshold=60, date=date(2026, 6, 27),
+        capture_link=_capture_link,
+    )
+    assert "Mark as applied" in html
+    assert "mark applied" in text.lower()
+    now = int(time.time())
+    for body in (html, text):
+        m = re.search(r"\?t=([A-Za-z0-9_\-.]+)", body)
+        assert m is not None
+        claim = verify(m.group(1), key=_CAPTURE_KEY, now=now)
+        assert claim.posting_id == "p1" and claim.status == "applied"
+
+
+def test_render_digest_no_capture_link_when_unconfigured():
+    # negative: with no capture_link injected, NO "Mark applied" affordance renders (graceful)
+    _, html, text = render_digest(
+        [_item(90, "p1")], below_count=0, threshold=60, date=date(2026, 6, 27)
+    )
+    assert "Mark as applied" not in html
+    assert "mark applied" not in text.lower()
+    assert "?t=" not in html and "?t=" not in text
 
 
 def test_render_digest_prominent_apply_button_and_card_fields():

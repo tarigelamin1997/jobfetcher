@@ -49,3 +49,8 @@ output "alarms_topic_arn" {
   description = "SNS alarms topic ARN — used to verify the email subscription is confirmed (deploy runbook §4)."
   value       = aws_sns_topic.alarms.arn
 }
+
+output "capture_function_url" {
+  description = "Public capture endpoint (INV-001) the digest/report 'Mark applied' links hit. Auth is the signed HMAC token, not IAM."
+  value       = aws_lambda_function_url.capture.function_url
+}

@@ -454,6 +454,14 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             notify_counts = {"surfaced": 0, "below_threshold": 0, "sent": 0}
         else:
             rlog.info("stage=notify start recipient=%s", recipient)
+            # INV-001: the "Mark applied" capture links. `build_capture_link` reads the base URL
+            # (env) + signing key (Secrets Manager) ONCE and returns a signer closure, or None
+            # when capture isn't configured — fully guarded, never a run-fatal path. Imported
+            # lazily so the pipeline↔capture reuse (capture reads resolve_db_url from here) has no
+            # module-load import cycle.
+            from .capture import build_capture_link
+
+            capture_link = build_capture_link(env)
             notify_counts = notify(
                 run_id=run_id,
                 repo=repo,
@@ -467,6 +475,8 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 # B-1: the full-list report + presigned link (best-effort inside notify —
                 # a report failure degrades the digest to plain text, never fails the run).
                 report_store=report_store,
+                # INV-001: the capture-link signer (None → no "Mark applied" links; graceful).
+                capture_link=capture_link,
             )
             # Mark sent ONLY after a successful send (notify raises on a failed send, so we never
             # get here on failure — the guard is not written, the next run re-sends).

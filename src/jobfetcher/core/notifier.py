@@ -30,9 +30,15 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import datetime
 
     from .ports import ShortlistItem
+
+    # A pure sink injected by the handler/ingest layer (where the base URL + signing key live):
+    # `capture_link(posting_id, status) -> url | None` (INV-001). `None`, or a `None` return,
+    # renders NO capture link — so the digest degrades gracefully when capture isn't configured.
+    CaptureLink = Callable[[str, str], "str | None"]
 
 # Only these URL schemes may become a clickable link. `apply_url` is untrusted JSearch input;
 # `html.escape` stops attribute-breakout but NOT a hostile scheme (`javascript:`/`data:`/
@@ -50,6 +56,7 @@ _BADGE_COLORS = {
 _BADGE_DEFAULT = "#5f6368"
 _APPLY_BG = "#1a73e8"  # the Apply button — a solid, obvious call to action
 _GRAD_GREEN = "#137333"  # the graduation badge — green text, email-client-safe (no images)
+_MARK_GREEN = "#137333"  # the "Mark as applied" capture action — green, next to Apply
 
 # The still-open section shows at most this many compact one-liners; the rest is a count
 # pointing at the export (ADR-0024) — the email stays scannable, the data stays reachable.
@@ -209,6 +216,7 @@ def render_digest(
     date: "date",
     since: "datetime | None" = None,
     full_list_url: str | None = None,
+    capture_link: "CaptureLink | None" = None,
 ) -> tuple[str, str, str]:
     """Render `(subject, html_body, text_body)` for the daily digest.
 
@@ -222,6 +230,11 @@ def render_digest(
     and the still-open "…and N more" overflow — so the compressed tail is reachable from the
     email. It is scheme-allowlisted via `_safe_apply_url`; a hostile scheme (or `None`) degrades
     gracefully to today's plain text (no link), never emitting an unsafe href.
+
+    `capture_link` (INV-001) is an injected `(posting_id, status) -> url | None` callable that
+    mints an HMAC-signed "Mark as applied" link. Each NEW card gets ONE prominent `applied`
+    action next to Apply (HTML + plaintext); the still-open one-liners stay uncluttered. `None`,
+    or a `None` return, renders no capture link — capture degrades off exactly like the report.
 
     Digest truthfulness: the items are split into **"New since last digest"** (full cards,
     first; a graduation gets the green `↑ old→new` badge) and **"still open"** (a count + the
@@ -290,7 +303,9 @@ def render_digest(
             f"JobFetcher digest — {day} — {n} new match{'es' if n != 1 else ''}", ""
         ]
     for card in new_cards:
-        text_lines.extend(_card_text_lines(card, threshold=threshold))
+        text_lines.extend(
+            _card_text_lines(card, threshold=threshold, capture_link=capture_link)
+        )
     if open_cards:
         text_lines.extend(_still_open_text_lines(open_cards, safe_full_url))
     if footer:
@@ -319,7 +334,10 @@ def render_digest(
                 '<h3 style="color:#202124;font-size:15px;margin:16px 0 8px;">'
                 "New since last digest</h3>"
             )
-        new_html += "".join(_card_html(card, threshold=threshold) for card in new_cards)
+        new_html += "".join(
+            _card_html(card, threshold=threshold, capture_link=capture_link)
+            for card in new_cards
+        )
     open_html = _still_open_html(open_cards, safe_full_url) if open_cards else ""
     if not footer:
         footer_html = ""
@@ -336,9 +354,12 @@ def render_digest(
     return subject, html_body, text_body
 
 
-def _card_text_lines(card: DigestCard, *, threshold: int) -> list[str]:
+def _card_text_lines(
+    card: DigestCard, *, threshold: int, capture_link: "CaptureLink | None" = None
+) -> list[str]:
     """One card's plaintext block: head (+ the `↑ old→new` graduation marker) · why · gap ·
-    apply · the dup footnote (`seen n× — scores lo–hi` + the collapsed member ids)."""
+    apply · (optional) the "mark applied" capture link · the dup footnote (`seen n× — scores
+    lo–hi` + the collapsed member ids)."""
     item = card.item
     loc = _location(item)
     head = f"[{item.score}] {_display_title(item)} — {(item.company or 'Unknown company').strip()}"
@@ -351,6 +372,9 @@ def _card_text_lines(card: DigestCard, *, threshold: int) -> list[str]:
     if gap:
         lines.append(f"    gap: {gap}")
     lines.append(f"    apply: {_safe_apply_url(item.apply_url) or '(no link)'}")
+    mark_url = capture_link(item.posting_id, "applied") if capture_link is not None else None
+    if mark_url:
+        lines.append(f"    mark applied: {mark_url}")
     if card.seen_count > 1:
         lines.append(
             f"    seen {card.seen_count}× — scores {card.score_lo}–{card.score_hi} "
@@ -383,9 +407,12 @@ def _still_open_text_lines(
     return lines
 
 
-def _card_html(card: DigestCard, *, threshold: int) -> str:
+def _card_html(
+    card: DigestCard, *, threshold: int, capture_link: "CaptureLink | None" = None
+) -> str:
     """One group = one bordered card: score badge (+ green `↑ old→new` graduation badge) ·
-    title · fit · Company·Location · why · gap · the `seen n×` dup footnote · Apply."""
+    title · fit · Company·Location · why · gap · the `seen n×` dup footnote · Apply (+ the
+    green "✓ Mark as applied" capture action when a `capture_link` is supplied)."""
     item = card.item
     title = escape(_display_title(item))
     company = escape((item.company or "Unknown company").strip())
@@ -433,6 +460,18 @@ def _card_html(card: DigestCard, *, threshold: int) -> str:
             "No apply link available</div>"
         )
 
+    # INV-001: the "Mark as applied" capture action — one HMAC-signed link next to Apply. The
+    # URL is our own (operator-configured base + signed token), escaped for the href; a `None`
+    # link (capture unconfigured) renders nothing.
+    mark_html = ""
+    mark_url = capture_link(item.posting_id, "applied") if capture_link is not None else None
+    if mark_url:
+        mark_html = (
+            f'<a href="{escape(mark_url, quote=True)}" '
+            f'style="display:inline-block;margin-left:12px;color:{_MARK_GREEN};'
+            'text-decoration:none;font-weight:bold;font-size:14px;">&#10003; Mark as applied</a>'
+        )
+
     fit_label = (
         f'<span style="color:#5f6368;font-size:12px;margin-left:8px;">{fit}</span>' if fit else ""
     )
@@ -449,7 +488,7 @@ def _card_html(card: DigestCard, *, threshold: int) -> str:
         f'<div style="color:#3c4043;font-size:14px;margin:8px 0 0;">&#10003; {why}</div>'
         f"{gap_html}"
         f"{seen_html}"
-        f"<div>{apply_html}</div>"
+        f"<div>{apply_html}{mark_html}</div>"
         "</td></tr></table>"
     )
 

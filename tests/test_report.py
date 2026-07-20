@@ -4,13 +4,25 @@ asset, all user/LLM text escaped, the apply link scheme-allowlisted, and `render
 a valid "no jobs" page (never a crash/blank). Each carries a negative."""
 from __future__ import annotations
 
+import re
+import time
 from datetime import date, datetime, timezone
 from typing import Any
 
+from jobfetcher.core.capture_token import sign, verify
+from jobfetcher.core.models import APPLICATION_STATUSES
 from jobfetcher.core.ports import ShortlistItem
 from jobfetcher.core.report import render_full_list
 
 _GEN = datetime(2026, 7, 10, 6, 0, tzinfo=timezone.utc)
+_CAPTURE_KEY = b"report-capture-key"
+
+
+def _capture_link(pid: str, status: str) -> str:
+    return (
+        "https://cap.example.com/c?t="
+        + sign(posting_id=pid, status=status, expires_at=int(time.time()) + 3600, key=_CAPTURE_KEY)
+    )
 
 
 def _item(score: int, pid: str = "p", **over: Any) -> ShortlistItem:
@@ -50,6 +62,31 @@ def test_render_full_list_is_self_contained_valid_page():
     assert "Acme Corp" in html and "Beta Ltd" in html
     assert "90" in html and "72" in html
     assert "2026-07-10" in html  # the run-date header
+
+
+def test_render_full_list_renders_capture_links_that_verify():
+    # INV-001: with a capture_link, each row gains a "Mark" column with a signed link per
+    # application status; every token verifies back to (posting_id, that status).
+    html = render_full_list(
+        [_item(90, "a")], threshold=60, run_date=date(2026, 7, 10), capture_link=_capture_link
+    )
+    assert "<th>Mark</th>" in html
+    assert ">applied</a>" in html  # the 'applied' hint (Rung 1) is present, prominently
+    now = int(time.time())
+    tokens = re.findall(r"\?t=([A-Za-z0-9_\-.]+)", html)
+    claims = [verify(t, key=_CAPTURE_KEY, now=now) for t in tokens]
+    # the full outcome vocabulary is wired, all for posting 'a'
+    assert {c.status for c in claims} == set(APPLICATION_STATUSES)
+    assert all(c.posting_id == "a" for c in claims)
+    # one of them is exactly the {a, applied} link the digest also emits
+    assert ("a", "applied") in {(c.posting_id, c.status) for c in claims}
+
+
+def test_render_full_list_no_mark_column_without_capture():
+    # negative: no capture_link → no Mark column, no capture tokens (graceful, unchanged page)
+    html = render_full_list([_item(90, "a")], threshold=60, run_date=date(2026, 7, 10))
+    assert "<th>Mark</th>" not in html
+    assert "?t=" not in html
 
 
 def test_render_full_list_includes_below_threshold_rows_tagged():

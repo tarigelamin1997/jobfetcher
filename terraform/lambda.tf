@@ -64,6 +64,11 @@ resource "aws_lambda_function" "pipeline" {
       # Telemetry verbosity for the `jobfetcher` package logger (ERR-009 rider) — the code
       # defaults to INFO when unset; this entry just makes the knob IaC-visible.
       LOG_LEVEL = "INFO"
+      # INV-001: the capture endpoint the "Mark applied" links point at + the signing-key secret
+      # name. The pipeline signs the links (build_capture_link); the capture Lambda verifies them.
+      # An empty CAPTURE_BASE_URL would just disable the links (graceful) — here it is always set.
+      CAPTURE_BASE_URL        = aws_lambda_function_url.capture.function_url
+      CAPTURE_KEY_SECRET_NAME = aws_secretsmanager_secret.capture_key.name
     }
   }
 }

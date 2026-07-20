@@ -37,6 +37,11 @@ terraform {
       source  = "hashicorp/archive"
       version = ">= 2.4"
     }
+    # random: generates the self-owned HMAC capture-token signing key (INV-001, capture.tf).
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.5"
+    }
   }
 }
 
