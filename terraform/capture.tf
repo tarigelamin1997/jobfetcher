@@ -97,11 +97,11 @@ resource "aws_lambda_function" "capture" {
   timeout     = 30  # one token verify + one small Data-API write (+ Aurora cold-resume headroom)
   memory_size = 256 # tiny work; no LLM, no S3, no concurrency
 
-  # Cap the public endpoint's concurrency: real use is a human clicking a few links/day, so 5 is
-  # generous. Reserving it also (a) bounds the cost/blast-radius of token-spam against the public
-  # URL, and (b) walls the capture Lambda off from the account concurrency pool so it can never
-  # starve the pipeline Lambda. The DB is already protected (verify fails before any DB touch).
-  reserved_concurrent_executions = 5
+  # NOTE: a reserved-concurrency cap (to bound token-spam abuse on the public URL) was intended,
+  # but this account's TOTAL concurrency limit is 10 and AWS requires >=10 UNRESERVED, so any
+  # reservation is rejected (PutFunctionConcurrency → 400). Deferred until a concurrency-limit
+  # increase; until then the account's own 10-execution ceiling is the de-facto cap, and the DB
+  # stays protected regardless (verify fails before any DB touch, so spam never reaches Aurora).
 
   environment {
     variables = {

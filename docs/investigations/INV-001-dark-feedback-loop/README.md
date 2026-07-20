@@ -1,7 +1,7 @@
 ---
 id: INV-001
 title: Dark feedback loop — the tool has no ground truth
-status: in-progress
+status: fixed
 severity: crucial          # the recommended fix (a capture endpoint) touches live infra + a public surface + auth; a rung-1 interim is non-crucial
 logged: 2026-07-20
 updated: 2026-07-20
@@ -10,7 +10,7 @@ source: B-3 companion (backlog) + the 2026-07-11 P2 scan; re-verified live 2026-
 
 # INV-001 · Dark feedback loop — the tool has no ground truth
 
-**Status:** `in-progress` · **Severity:** `crucial` · **Owner of the fix:** the agentic squad (Surgeon) — **Rung 2 approved** (checkpoint A, 2026-07-20)
+**Status:** `fixed` (shipped + live-validated 2026-07-20) · **Severity:** `crucial` · **Owner of the fix:** the agentic squad (Surgeon) — **Rung 2**
 
 > ✅ **Checkpoint A (brief approved, 2026-07-20):** build **Rung 2** — a public **Lambda Function URL** capture endpoint that the digest/report "Mark applied" links hit → `track_application_event`; auth = a **short-lived HMAC-signed token** scoped to `{posting_id, status}` (TTL, signing key in Secrets Manager), mirroring the v0.10.0 presigned-report pattern. Ship the **Rung-1 report hint alongside**. Build in progress via the squad; the PR (checkpoint B) and the live deploy remain human checkpoints.
 
@@ -78,10 +78,10 @@ The single high-leverage move is **capture at the moment of action**. Reuse the 
 - **On fix:** the **Resolution** section below is filled at close → set `status: fixed`.
 
 ## Resolution — as-built _(filled at close)_
-> 🟡 **Code merged (PR #34, 2026-07-20); live deploy pending** (a separate human checkpoint — the public Function URL + signing key don't exist until `terraform apply`). `status` flips to `fixed` after the deploy + live validation below passes.
+> ✅ **Shipped + live-validated 2026-07-20.** Merged PR #34 → `terraform apply` (8 add / 2 change / 0 destroy) → the public capture endpoint is live at a `*.lambda-url.us-east-1.on.aws` URL. Pipeline smoke `200` @ `alembic 0006_subscores`. **Capture flow validated live (non-polluting):** no-token → **400**, forged signature → **400**, expired token (real key) → **400**, and a **valid token signed with the real Secrets-Manager key for an unknown posting → 404 with zero rows** (proves the key→verify→`track_application_event` wiring end-to-end without writing a spurious outcome). The positive row-write is covered by the 17 unit tests + the first real digest click.
 
 - **What shipped:** Rung 2 — a **public AWS Lambda Function URL** the digest/report "✓ Mark applied" links hit → verifies a short-lived HMAC token → records ONE outcome via the existing `Repository.track_application_event` (append-only `application_event`). One click from the inbox now lands a row where before the only path was `scripts/track.py`. Auth is the **token, not the network**: `verify` runs before any DB touch, so a forged/expired token returns 400 with **zero rows**. Per-job links are injected into the digest + full-list report; unconfigured → no link (graceful).
 - **Rung taken · divergence from the Fix plan:** **Rung 2** as recommended, **plus** Rung 1's report-side surface (a per-status "Mark" column on the full-list page). No divergence from the plan; the open auth question was resolved to the **HMAC-signed-token** approach (30-day TTL, scoped to `{posting_id, status}`, key **Terraform-generated** in Secrets Manager). GET-prefetch handled by **human decision at Checkpoint B**: ship one-click GET as-is; a **confirmation-interstitial fast-follow** is the documented mitigation if spurious rows ever appear.
-- **Key files + decisions:** `core/capture_token.py` (pure HMAC sign/verify — constant-time, empty-key-safe, status-vocab-checked) · `handlers/capture.py` (the Function URL handler — same zip, different entry point; module-cached signing key; correlation-ID logging; verify-before-DB) · `core/notifier.py`/`core/report.py`/`core/ingest.py` (pure injected `capture_link` callable) · `handlers/pipeline.py` (`build_capture_link` threaded into `notify`, lazy-imported to break a cycle) · `terraform/capture.tf` (public Function URL `auth=NONE`, least-priv IAM, `reserved_concurrent_executions=5`, `random_password` signing key). Decision record: [ADR-0035](../../adr/0035-outcome-capture-endpoint.md).
+- **Key files + decisions:** `core/capture_token.py` (pure HMAC sign/verify — constant-time, empty-key-safe, status-vocab-checked) · `handlers/capture.py` (the Function URL handler — same zip, different entry point; module-cached signing key; correlation-ID logging; verify-before-DB) · `core/notifier.py`/`core/report.py`/`core/ingest.py` (pure injected `capture_link` callable) · `handlers/pipeline.py` (`build_capture_link` threaded into `notify`, lazy-imported to break a cycle) · `terraform/capture.tf` (public Function URL `auth=NONE`, least-priv IAM, `random_password` signing key). Decision record: [ADR-0035](../../adr/0035-outcome-capture-endpoint.md). **Deploy note:** the intended `reserved_concurrent_executions=5` cap was **removed at apply time** — this account's total concurrency limit is 10 and AWS requires ≥10 *unreserved*, so any reservation is rejected; the account's 10-execution ceiling is the de-facto cap, and the DB stays protected (verify-before-DB) regardless.
 - **Links:** PR #34 · [ADR-0035](../../adr/0035-outcome-capture-endpoint.md) · CHANGELOG `[Unreleased]` (batches into the next `v0.12.x`) · merge commit `f7a121a`.
 - **Extending / editing later:** the **capture endpoint accepts any `APPLICATION_STATUSES` value** — richer per-status actions (interview/offer/rejected) in the digest are a pure render change (the endpoint already supports them). The **confirmation-interstitial fast-follow** (defeat GET-prefetch): render an HTML "Confirm" page on the GET and only write on a POST — the `verify → track_application_event` core stays; add a POST branch in `handlers/capture.py`. The **hosted-dashboard end-state** (B-1 rung 3) would reuse this same write path. **Gotcha:** the pipeline Lambda (signer) and the capture Lambda (verifier) must share the *same* signing-key secret; a Terraform key rotation invalidates in-flight email links until the next digest re-signs.
