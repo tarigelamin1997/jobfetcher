@@ -23,8 +23,9 @@ resource "aws_iam_role" "lambda" {
 }
 
 data "aws_iam_policy_document" "lambda_policy" {
-  # ── Secrets: read ONLY the three secrets this pipeline uses ────────────────
-  # deepseek + jsearch (app keys) and the Aurora-managed master-password secret.
+  # ── Secrets: read ONLY the secrets this pipeline uses ──────────────────────
+  # deepseek + jsearch (app keys), the Aurora-managed master-password secret, and the capture
+  # signing key (INV-001 — the pipeline SIGNS the "Mark applied" links with it).
   statement {
     sid     = "ReadAppSecrets"
     actions = ["secretsmanager:GetSecretValue"]
@@ -32,6 +33,7 @@ data "aws_iam_policy_document" "lambda_policy" {
       data.aws_secretsmanager_secret.deepseek.arn,
       data.aws_secretsmanager_secret.jsearch.arn,
       aws_rds_cluster.main.master_user_secret[0].secret_arn,
+      aws_secretsmanager_secret.capture_key.arn,
     ]
   }
 

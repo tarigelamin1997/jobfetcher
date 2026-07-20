@@ -17,6 +17,7 @@ from __future__ import annotations
 from html import escape
 from typing import TYPE_CHECKING, Any
 
+from .models import APPLICATION_STATUSES
 from .notifier import (
     _APPLY_BG,
     _badge_color,
@@ -26,9 +27,14 @@ from .notifier import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from datetime import date, datetime
 
     from .ports import ShortlistItem
+
+    # Injected `(posting_id, status) -> url | None` (INV-001): mints an HMAC-signed capture link
+    # per outcome. `None` (capture unconfigured) omits the Mark column entirely — graceful.
+    CaptureLink = Callable[[str, str], "str | None"]
 
 
 def _join(values: list[Any]) -> str:
@@ -46,10 +52,27 @@ def _fmt_date(value: "datetime | date | None") -> str:
     return d.isoformat()
 
 
-def _row_html(item: "ShortlistItem", *, threshold: int) -> str:
+def _capture_cell(item: "ShortlistItem", capture_link: "CaptureLink") -> str:
+    """The "Mark" cell: one signed capture link per application status (INV-001) — the full
+    `APPLICATION_STATUSES` set, since a full page (unlike the email) can carry the whole outcome
+    vocabulary. A status whose link comes back `None` is skipped; an empty cell shows a dash. The
+    URL is our own signed link, escaped for the href; the status label is escaped too."""
+    links = [
+        f'<a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
+        f"{escape(status)}</a>"
+        for status in APPLICATION_STATUSES
+        if (url := capture_link(item.posting_id, status))
+    ]
+    return " &middot; ".join(links) if links else '<span class="muted">&mdash;</span>'
+
+
+def _row_html(
+    item: "ShortlistItem", *, threshold: int, capture_link: "CaptureLink | None" = None
+) -> str:
     """One `<tr>` for the jobs table. `data-below` drives the below-threshold filter; the score
     cell carries `data-sort` so the numeric sort is by value, not lexical text. Every user/LLM
-    field is escaped; the apply link is scheme-allowlisted."""
+    field is escaped; the apply link is scheme-allowlisted. When `capture_link` is supplied, a
+    trailing "Mark" cell carries the per-status capture links; otherwise no cell is emitted."""
     score = item.score
     below = "1" if score < threshold else "0"
     override = "" if item.score_override is None else str(item.score_override)
@@ -70,6 +93,11 @@ def _row_html(item: "ShortlistItem", *, threshold: int) -> str:
         if safe_url
         else '<span class="muted">no link</span>'
     )
+    mark_cell = (
+        f'<td class="mark">{_capture_cell(item, capture_link)}</td>'
+        if capture_link is not None
+        else ""
+    )
     return (
         f'<tr data-below="{below}">'
         f'<td class="num" data-sort="{score}">'
@@ -85,6 +113,7 @@ def _row_html(item: "ShortlistItem", *, threshold: int) -> str:
         f"<td>{apply_cell}</td>"
         f'<td class="date">{scored}</td>'
         f'<td class="date">{fetched}</td>'
+        f"{mark_cell}"
         "</tr>"
     )
 
@@ -95,6 +124,7 @@ def render_full_list(
     threshold: int,
     run_date: "date",
     generated_at: "datetime | None" = None,
+    capture_link: "CaptureLink | None" = None,
 ) -> str:
     """Render the full-list HTML page over ALL scored `items` (surfaced + below-threshold, score
     DESC). Returns a complete, self-contained `<!doctype html>` document (inline CSS + JS, no
@@ -102,16 +132,25 @@ def render_full_list(
 
     `threshold` classifies each row (a below-threshold row is tagged for the "show below" filter);
     `run_date`/`generated_at` label the header. `render_full_list([])` returns a valid
-    "no scored jobs yet" page — never a crash or a blank body (the digest's zero-scored path)."""
+    "no scored jobs yet" page — never a crash or a blank body (the digest's zero-scored path).
+
+    `capture_link` (INV-001) is the injected `(posting_id, status) -> url | None` callable. When
+    supplied, each row gains a trailing "Mark" column with a signed capture link per application
+    status (the full page can carry the whole vocabulary); `None` omits the column entirely —
+    graceful degrade, identical to the digest, when capture isn't configured."""
     day = escape(run_date.isoformat())
     gen = escape(generated_at.strftime("%Y-%m-%d %H:%M UTC")) if generated_at is not None else ""
     total = len(items)
     surfaced = sum(1 for i in items if i.score >= threshold)
+    # INV-001: the Mark column exists only when capture is configured (a callable was injected).
+    mark_th = "<th>Mark</th>" if capture_link is not None else ""
 
     if not items:
         body = '<p class="empty">No scored jobs yet.</p>'
     else:
-        rows = "".join(_row_html(i, threshold=threshold) for i in items)
+        rows = "".join(
+            _row_html(i, threshold=threshold, capture_link=capture_link) for i in items
+        )
         body = f"""<div class="controls">
   <input id="q" type="search" placeholder="Filter by title, company, location…" oninput="filterRows()" />
   <label><input id="below" type="checkbox" checked onchange="filterRows()" /> show below-threshold</label>
@@ -132,6 +171,7 @@ def render_full_list(
   <th>Apply</th>
   <th onclick="sortBy(10,false)">Scored</th>
   <th onclick="sortBy(11,false)">Fetched</th>
+  {mark_th}
 </tr></thead>
 <tbody>{rows}</tbody>
 </table>
@@ -164,6 +204,7 @@ def render_full_list(
   td.title {{ font-weight:bold; }}
   td.why, td.gaps {{ max-width:280px; }}
   td.gaps {{ color:#a8641b; }}
+  td.mark {{ white-space:nowrap; font-size:12px; }}
   .badge {{ display:inline-block; color:#fff; font-weight:bold; padding:2px 8px; border-radius:12px; }}
   .muted {{ color:#9aa0a6; font-style:italic; }}
   a {{ color:{_APPLY_BG}; font-weight:bold; text-decoration:none; }}

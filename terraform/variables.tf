@@ -60,6 +60,14 @@ variable "jsearch_secret_name" {
   default     = "jobfetcher/jsearch"
 }
 
+# The capture-token HMAC signing key secret (INV-001). Unlike deepseek/jsearch this secret is
+# CREATED + owned by Terraform (capture.tf) — a self-owned key, not a third-party credential.
+variable "capture_key_secret_name" {
+  description = "Secrets Manager id for the Terraform-generated capture-token HMAC signing key."
+  type        = string
+  default     = "jobfetcher/capture-token"
+}
+
 # S3 object KEYS for the two config YAMLs (ADR-0022). The handler reads them from S3 at runtime
 # (env vars below become s3://<data-bucket>/<key>), so a settings change = edit the YAML +
 # `scripts/push_config.py` — no Lambda rebuild/redeploy.

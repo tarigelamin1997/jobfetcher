@@ -26,6 +26,8 @@ from .report import render_full_list
 from .scorer import ScorerError, subscores_payload
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ..adapters.s3_audit import S3AuditStore
     from ..adapters.s3_raw import RawStore
     from ..adapters.s3_reports import ReportStore
@@ -34,6 +36,10 @@ if TYPE_CHECKING:
     from .ports import FilterStrategy, Notifier, Repository, SourceAdapter
     from .scorer import Scorer
     from .search_spec import SearchSpec
+
+    # The injected capture-link sink (INV-001): `(posting_id, status) -> url | None`, built by
+    # the handler where the base URL + signing key live. Threaded to the digest + full-list report.
+    CaptureLink = Callable[[str, str], "str | None"]
 
 # The single-user profile key (v0): one row in `profile`, the multi-user seam (db/tables.py).
 DEFAULT_USER_ID = "default"
@@ -845,6 +851,7 @@ def notify(
     run_date: date | None = None,
     max_age_days: int | None = None,
     report_store: "ReportStore | None" = None,
+    capture_link: "CaptureLink | None" = None,
 ) -> dict[str, int]:
     """Step-6 notification: load the profile (its **runtime** threshold) → read the scored
     shortlist (surfaced + below count) → render the daily digest → send it.
@@ -870,6 +877,11 @@ def notify(
     `report_store` is supplied, the whole build→upload→presign is best-effort inside a guard —
     any failure is logged and the digest STILL sends, degraded to today's plain text (no link).
     The email send itself stays loud, unchanged.
+
+    **The capture links are the same kind of enhancement (INV-001):** `capture_link` (built by
+    the handler where the base URL + signing key live) is threaded into both the digest and the
+    full-list report so each surfaced job carries a signed "Mark applied" link. `None` (capture
+    unconfigured) renders no capture link — never a reason the run fails.
 
     Returns `{surfaced, below_threshold, sent}` (`sent` is 1 — a send failure raises before
     we get here)."""
@@ -902,6 +914,7 @@ def notify(
                 threshold=threshold,
                 run_date=the_date,
                 generated_at=datetime.now(timezone.utc),
+                capture_link=capture_link,
             )
             report_key = f"reports/{the_date.isoformat()}/jobs-{run_id}.html"
             report_store.put_report(html=report_html, key=report_key)
@@ -919,7 +932,7 @@ def notify(
 
     subject, html_body, text_body = render_digest(
         items, below, threshold=threshold, date=the_date, since=since,
-        full_list_url=full_list_url,
+        full_list_url=full_list_url, capture_link=capture_link,
     )
     # A send failure propagates (NotifierError) — the v0 surface is the email; a failed send is
     # a failed run, not a swallowed warning (mirrors the loud DB-failure stance in score_gold).
