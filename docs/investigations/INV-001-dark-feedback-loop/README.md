@@ -39,7 +39,7 @@ The *capability* to record outcomes exists — `scripts/track.py` (`applied|inte
 - **Unaffected:** fetch → silver → gold → score → notify (the capture is a *return* path, orthogonal to the forward pipeline).
 
 ## Fix plan (the handoff guideline)
-The single high-leverage move is **capture at the moment of action**. Reuse the existing write path — `Repository.track_application_event(posting_id, status, note)` — which already validates the posting + the status and writes zero rows on error. Rungs:
+The single high-leverage move is **capture at the moment of action**. Reuse the existing write path — `Repository.track_application_event(*, posting_id, status, note=None)` (keyword-only args; [`repository_postgres.py:481`](../../../src/jobfetcher/adapters/repository_postgres.py)) — which already validates both the **status** (rejects anything outside `APPLICATION_STATUSES` before touching the DB) and that the **posting exists** (rolls back → zero rows written), raising `RepositoryError` on either. Rungs:
 
 1. **Rung 0 (already shipped) — the v0.12.0 panel Curate tab** cut the friction vs the raw CLI, but it's still a *separate local app*. Not sufficient alone (the log is still empty).
 2. **Rung 1 (minimal, non-crucial) — reduce the residual friction:** make the panel the obvious path (surface it in the digest footer + docs) and/or have the full-list report emit a ready-to-paste `track.py applied <id>` per row. Cheap, no infra — but it doesn't fully close the "one click from the email" gap.
