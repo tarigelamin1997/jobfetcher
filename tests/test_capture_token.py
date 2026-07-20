@@ -113,3 +113,11 @@ def test_generic_message_does_not_leak_which_check_failed():
 def test_sign_rejects_empty_key():
     with pytest.raises(CaptureTokenError):
         sign(posting_id="p", status="applied", expires_at=_FUTURE, key=b"")
+
+
+def test_verify_rejects_empty_key():
+    # Symmetry with sign: an empty key is a misconfiguration, never a basis for trust — verify
+    # refuses it up front rather than HMAC-ing against an empty secret.
+    token = sign(posting_id="p", status="applied", expires_at=_FUTURE, key=_KEY)
+    with pytest.raises(CaptureTokenError):
+        verify(token, key=b"", now=_NOW)

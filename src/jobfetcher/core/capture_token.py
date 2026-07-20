@@ -82,6 +82,10 @@ def verify(token: str, *, key: bytes, now: int) -> CaptureClaim:
     message, coarse `reason` for logs). The signature is checked in CONSTANT TIME
     (`hmac.compare_digest`) BEFORE the payload is trusted, so a tampered payload fails at the
     signature step; `now` is unix seconds (the caller passes the current time)."""
+    # Symmetry with `sign`: an empty key is a misconfiguration, never a basis for trust. Both
+    # callers already guard `if not key`; this refuses it here too so `verify` is safe alone.
+    if not key:
+        raise CaptureTokenError("no-key")
     if not isinstance(token, str) or token.count(".") != 1:
         raise CaptureTokenError("malformed")
     payload_b64, sig_b64 = token.split(".")

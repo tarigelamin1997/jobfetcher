@@ -70,19 +70,33 @@ def resolve_capture_secret_name(env: dict[str, str]) -> str:
 
 
 # --------------------------------------------------------------------------- key resolution (I/O)
+# Warm-container cache for the Secrets-Manager-fetched signing key, keyed by secret id. The public
+# Function URL resolves the key on every non-blank-token request, so caching bounds Secrets Manager
+# reads (cost + throttling) under token spam to ONE per warm container. The env-var path (tests/dev)
+# is intentionally NOT cached — each call reflects the current env. The key is Terraform-owned and
+# unrotated; a rotation is picked up when the container recycles.
+_SECRET_KEY_CACHE: dict[str, bytes] = {}
+
+
 def _resolve_signing_key(env: dict[str, str]) -> bytes:
     """The HMAC signing key as bytes: `$CAPTURE_KEY` (tests/dev) wins, else Secrets Manager
-    (`$CAPTURE_KEY_SECRET_NAME`). Accepts a raw secret string or a JSON blob `{"key": "..."}` /
-    `{"api_key": "..."}` — mirrors `llm_openai._resolve_api_key`. The key is NEVER logged."""
+    (`$CAPTURE_KEY_SECRET_NAME`, cached per warm container). Accepts a raw secret string or a JSON
+    blob `{"key": "..."}` / `{"api_key": "..."}` — mirrors `llm_openai._resolve_api_key`. Never logged."""
     raw = (env.get(_CAPTURE_KEY_ENV) or "").strip()
     if raw:
         return raw.encode("utf-8")
+
+    secret_name = resolve_capture_secret_name(env)
+    cached = _SECRET_KEY_CACHE.get(secret_name)
+    if cached is not None:
+        return cached
+
     import boto3  # lazy: the env-var path (tests) needs no AWS SDK
 
     region = (env.get(_REGION_ENV) or "").strip() or _DEFAULT_REGION
     blob = (
         boto3.client("secretsmanager", region_name=region)
-        .get_secret_value(SecretId=resolve_capture_secret_name(env))
+        .get_secret_value(SecretId=secret_name)
         .get("SecretString")
         or ""
     ).strip()
@@ -91,7 +105,10 @@ def _resolve_signing_key(env: dict[str, str]) -> bytes:
         value = str(data.get("key") or data.get("api_key") or "").strip() or blob
     except (json.JSONDecodeError, AttributeError, TypeError):
         value = blob  # not JSON → the whole secret string is the key
-    return value.encode("utf-8")
+    key = value.encode("utf-8")
+    if key:  # never cache an empty/misconfigured key — let a corrected secret be picked up
+        _SECRET_KEY_CACHE[secret_name] = key
+    return key
 
 
 def build_capture_link(env: dict[str, str]) -> Callable[[str, str], str | None] | None:
