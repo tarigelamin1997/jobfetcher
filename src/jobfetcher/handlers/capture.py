@@ -186,7 +186,7 @@ def _ok_html(status: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- handler
-def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[str, Any]:  # noqa: ARG001
+def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[str, Any]:
     """The capture Function URL entry point. Verify the token, then record the outcome.
 
     - missing/blank token → 400 (nothing written)
@@ -199,26 +199,30 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
     Never echoes the token or any secret; a rejected token logs only that it was rejected."""
     configure_log_level(os.environ)
     env = dict(os.environ)
+    # Correlation ID (house standard: "correlation IDs on every pipeline run", like pipeline.py's
+    # run_id): the Lambda request id labels every log line so interleaved lines from concurrent
+    # requests on this public endpoint stay traceable through verify → write → response.
+    rlog = logging.LoggerAdapter(log, {"request_id": getattr(context, "aws_request_id", "unknown")})
 
     token = _read_token(event)
     if not token:
-        log.info("capture: missing/blank token — 400")
+        rlog.info("capture: missing/blank token — 400")
         return _html(400, _MSG_INVALID)
 
     try:
         key = _resolve_signing_key(env)
     except Exception:  # noqa: BLE001 — a key-read failure is a server misconfig, not the client's
-        log.exception("capture: signing key unavailable — 500")
+        rlog.exception("capture: signing key unavailable — 500")
         return _html(500, _MSG_ERROR)
     if not key:
-        log.error("capture: empty signing key — 500")
+        rlog.error("capture: empty signing key — 500")
         return _html(500, _MSG_ERROR)
 
     try:
         claim = verify(token, key=key, now=int(time.time()))
     except CaptureTokenError as exc:
         # Never log the token — only that (and coarsely why) it was rejected.
-        log.info("capture: rejected token (reason=%s) — 400", exc.reason)
+        rlog.info("capture: rejected token (reason=%s) — 400", exc.reason)
         return _html(400, _MSG_INVALID)
 
     try:
@@ -230,13 +234,13 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
     except RepositoryError as exc:
         # Unknown posting (rolled back → zero rows) or a backend error — a 4xx either way; the
         # posting_id/status are safe to log (they are not secrets), the token is not logged.
-        log.warning("capture: not recorded (status=%s) — 404: %s", claim.status, exc)
+        rlog.warning("capture: not recorded (status=%s) — 404: %s", claim.status, exc)
         return _html(404, _MSG_NOT_FOUND)
     except Exception:  # noqa: BLE001 — any other failure is a server error, surfaced as 500
-        log.exception("capture: unexpected failure — 500")
+        rlog.exception("capture: unexpected failure — 500")
         return _html(500, _MSG_ERROR)
 
-    log.info(
+    rlog.info(
         "capture: recorded status=%s posting=%s — 200", claim.status, claim.posting_id
     )
     return _ok_html(claim.status)
