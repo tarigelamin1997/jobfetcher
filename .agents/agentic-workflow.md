@@ -68,7 +68,7 @@ flowchart LR
 4. **Examiner** (fresh) runs its two passes; the orchestrator **fixes every real finding** and re-verifies (a second fresh re-verify if the fixes were non-trivial).
 5. **PR → CI + external reviewer → merge** per the severity gate.
 6. **Scribe close-out** (orchestrator): CHANGELOG `[Unreleased]` entry, ledger rows ([interface-contracts](../docs/ledgers/interface-contracts.md) Produces · [phase-index](../docs/ledgers/phase-index.md) · [backlog](../docs/ledgers/backlog.md)), an [ADR](../docs/adr/) if it's a real decision, and — if the unit came from a dossier — filling that dossier's **Resolution — as-built** section (what shipped · rung taken/divergence · key files · PR/ADR/CHANGELOG links · how to extend) and setting its `status: fixed`.
-7. **Deploy + tag** (see the deploy checkpoint below), then **P2 reopens**.
+7. **Deploy + close-out** (see the deploy checkpoint below): the CHANGELOG `[Unreleased]` entry accrues; **no per-unit tag** — enhancements batch into an occasional `v0.12.x` patch tag ([versioning convention](../CHANGELOG.md)). Then **P2 reopens**.
 
 ---
 
@@ -90,7 +90,7 @@ The orchestrator classifies severity **at brief time** (never at PR time). Doubt
 - **Isolation:** the Surgeon works in a **git worktree** (units that mutate files stay off `main`'s tree until reviewed). Disjoint-file parallel work needs no worktree.
 - **Branch / PR / protected `main`:** one branch → one PR → required checks (`lint-and-test` · `terraform-validate` · `secret-scan`) + CodeRabbit → merge (squash) → delete the branch → prune the worktree ([ADR-0013](../docs/adr/0013-enforcement-gate-trio-branch-pr.md)).
 - **Gate-trio alignment:** the pipeline maps onto the [command set](../.claude/commands/) — `/investigate` (Investigator → a verified [dossier](../docs/investigations/)) · `/start-step` (brief/entry) · `/review-step` (Examiner) · `/close-step` (scribe).
-- **Deploy sequence** (when the unit needs it): `build_lambda` → `terraform apply` → `{"mode":"smoke"}` → **200** → a live-validate invoke → **tag the release**. Honor the three migrate-order classes in the [procedure registry](../docs/ledgers/procedure-registry.md).
+- **Deploy sequence** (when the unit needs it): `build_lambda` → `terraform apply` → `{"mode":"smoke"}` → **200** → a live-validate invoke → **record in CHANGELOG `[Unreleased]`** (tags are **batched** into a `v0.12.x` patch per the [versioning convention](../CHANGELOG.md), not cut per unit). Honor the three migrate-order classes in the [procedure registry](../docs/ledgers/procedure-registry.md).
 
 ### Porting to another runner (deferred)
 
