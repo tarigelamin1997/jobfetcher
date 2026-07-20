@@ -9,7 +9,7 @@ This folder is the **portable definition of how JobFetcher solves a bottleneck w
 | File | What it is |
 |---|---|
 | [`agentic-workflow.md`](agentic-workflow.md) | The **procedure** — principles, the pipeline, the severity gate, how to invoke it, provenance, a worked example. Runner-neutral, with the platform-specific bits isolated in a clearly-labeled "current-runner bindings" section. |
-| [`roles/investigator.md`](roles/investigator.md) | Identity: the fresh, read-only scout — verify, measure, brief, or **kill**. |
+| [`roles/investigator.md`](roles/investigator.md) | Identity: the fresh, read-only scout — verify, measure, and write a durable **dossier** ([`docs/investigations/`](../docs/investigations/), via [`/investigate`](../.claude/commands/investigate.md)), or **kill**. |
 | [`roles/surgeon.md`](roles/surgeon.md) | Identity: the minimal-diff builder — smallest change, in an isolated workspace. |
 | [`roles/examiner.md`](roles/examiner.md) | Identity: the fresh adversarial reviewer — one agent, two passes. |
 | [`roles/orchestrator-scribe.md`](roles/orchestrator-scribe.md) | Identity: the coordinator + record-keeper (Claude, in the current runner). |

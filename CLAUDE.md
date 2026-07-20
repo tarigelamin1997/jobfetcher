@@ -64,6 +64,7 @@ Two planes (full detail in [`docs/02-architecture.md`](docs/02-architecture.md))
 | [`docs/diagrams.md`](docs/diagrams.md) | Mermaid visual index — full-stack architecture, roadmap, dimensional model. |
 | [`docs/adr/`](docs/adr/) | One ADR per foundational decision (rejected alternatives named). |
 | [`docs/ledgers/`](docs/ledgers/) | Live state: phase index · locked decisions · interface contracts · procedure registry · error log · backlog (observed bottlenecks → P2 input). |
+| [`docs/investigations/`](docs/investigations/) | Durable **Investigator dossiers** — one per bottleneck: *does it exist? (evidence, or kill) · root cause · minimal-fix plan · validation gate · typed-connection graph seam*. Produced read-only via `/investigate`; the layer between a backlog signal and an ADR decision ([ADR-0034](docs/adr/0034-investigation-dossier-system.md)). |
 | [`docs/session-log/`](docs/session-log/) | The **verbatim working document** (§1–27) — raw, unedited design + build reasoning notes preserved in full. The granular source the curated docs distill; read it for the *why behind the why*. |
 
 ## What NOT to do

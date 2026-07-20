@@ -64,5 +64,6 @@ Still **not** adopted (coordination/scale ceremony — deferred, labeled): the f
 | Direction | [03-roadmap](03-roadmap.md) | after every release (it's a living hypothesis) |
 | Current stage | [04-v0-build-plan](04-v0-build-plan.md) | per stage (just-in-time) |
 | Live state | [ledgers/](ledgers/) | continuously |
+| Bottleneck investigations | [investigations/](investigations/) | per investigation (a verified dossier between a backlog signal and an ADR decision — [ADR-0034](adr/0034-investigation-dossier-system.md)) |
 
 > The test this system must pass (the **knowledge-transfer test**): a fresh session can read these files and answer *"what is this, why is it built this way, what's the current state, and what do I do next?"* — without the original context window. If it can't, the docs are incomplete.

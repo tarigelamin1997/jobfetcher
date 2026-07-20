@@ -26,7 +26,7 @@ Three fresh subagents + an orchestrator/scribe. Each subagent is a **fresh conte
 
 | Role | One-line | Identity spec |
 |---|---|---|
-| **Investigator** | fresh, **read-only** — verify the problem on real code/data, measure it, draft the minimal-fix brief, classify severity; **can KILL the unit** | [`roles/investigator.md`](roles/investigator.md) |
+| **Investigator** | fresh, **read-only** — verify the problem on real code/data, measure it, write a **durable dossier** ([`docs/investigations/`](../docs/investigations/)), classify severity; **can KILL the unit** | [`roles/investigator.md`](roles/investigator.md) |
 | **Surgeon** | fresh — build the **smallest diff** from the *approved* brief, in an isolated worktree; write tests | [`roles/surgeon.md`](roles/surgeon.md) |
 | **Examiner** | fresh, adversarial — **one agent, two passes** (break-it, then integration/simplify); runs the gate; ranks findings | [`roles/examiner.md`](roles/examiner.md) |
 | **Orchestrator / Scribe** | drives the pipeline, adjudicates, classifies severity, merges, records; the human interface (Claude, in the current runner) | [`roles/orchestrator-scribe.md`](roles/orchestrator-scribe.md) |
@@ -63,7 +63,7 @@ flowchart LR
 
 **Stage detail**
 1. **Pick the bottleneck (P2).** Per the [migration-decision protocol](../docs/03-roadmap.md#the-migration-decision-protocol-how-the-next-step-is-actually-chosen): surface the top-3 bottlenecks blocking the next *real* capability, rank by **leverage = capability ÷ complexity**, pick the highest. Observed-from-use candidates live in [`docs/ledgers/backlog.md`](../docs/ledgers/backlog.md).
-2. **Investigator** verifies it on live code/data (read-only), drafts the minimal-fix brief (problem+evidence · blast radius · minimal change · files · validation gate [behavioral + a negative case] · out-of-scope), and classifies severity. **It can kill the unit.**
+2. **Investigator** verifies it on live code/data (read-only) and writes a **durable dossier** ([`docs/investigations/INV-NNN.md`](../docs/investigations/), via [`/investigate`](../.claude/commands/investigate.md)) — problem+evidence · root cause · blast radius · minimal change · files+reuse · validation gate [behavioral + a negative case] · out-of-scope · typed connections — and classifies severity in it. **It can kill the unit** (`status: killed`). The Surgeon then builds from the dossier, not an in-context brief.
 3. **Surgeon** builds the smallest diff from the *approved* brief in an isolated worktree; writes tests; does not push/merge/deploy.
 4. **Examiner** (fresh) runs its two passes; the orchestrator **fixes every real finding** and re-verifies (a second fresh re-verify if the fixes were non-trivial).
 5. **PR → CI + external reviewer → merge** per the severity gate.
@@ -89,7 +89,7 @@ The orchestrator classifies severity **at brief time** (never at PR time). Doubt
 
 - **Isolation:** the Surgeon works in a **git worktree** (units that mutate files stay off `main`'s tree until reviewed). Disjoint-file parallel work needs no worktree.
 - **Branch / PR / protected `main`:** one branch → one PR → required checks (`lint-and-test` · `terraform-validate` · `secret-scan`) + CodeRabbit → merge (squash) → delete the branch → prune the worktree ([ADR-0013](../docs/adr/0013-enforcement-gate-trio-branch-pr.md)).
-- **Gate-trio alignment:** the pipeline maps onto the [gate-trio commands](../.claude/commands/) — `/start-step` (brief/entry) · `/review-step` (Examiner) · `/close-step` (scribe).
+- **Gate-trio alignment:** the pipeline maps onto the [command set](../.claude/commands/) — `/investigate` (Investigator → a verified [dossier](../docs/investigations/)) · `/start-step` (brief/entry) · `/review-step` (Examiner) · `/close-step` (scribe).
 - **Deploy sequence** (when the unit needs it): `build_lambda` → `terraform apply` → `{"mode":"smoke"}` → **200** → a live-validate invoke → **tag the release**. Honor the three migrate-order classes in the [procedure registry](../docs/ledgers/procedure-registry.md).
 
 ### Porting to another runner (deferred)
