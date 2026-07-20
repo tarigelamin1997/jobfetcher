@@ -43,7 +43,7 @@ Every dossier's **Connections** section is a list of typed edges — a graph-in-
 
 | ID | Title | Status | Severity | One-liner | Backlog / ADR |
 |---|---|---|---|---|---|
-| [INV-001](INV-001-dark-feedback-loop/) | Dark feedback loop — the tool has no ground truth | `handoff-ready` | crucial¹ | 0 outcomes logged (live-verified 2026-07-20) → scoring can't be measured or calibrated (CLI-only capture friction) | [B-3 companion](../ledgers/backlog.md) · M7 |
+| [INV-001](INV-001-dark-feedback-loop/) | Dark feedback loop — the tool has no ground truth | `in-progress` | crucial¹ | 0 outcomes logged (live-verified 2026-07-20) → scoring can't be measured or calibrated (CLI-only capture friction); **Rung 2 approved → squad building** | [B-3 companion](../ledgers/backlog.md) · M7 |
 
 ¹ crucial for the recommended fix (a public capture endpoint — live infra + auth); a rung-1 interim is non-crucial.
 

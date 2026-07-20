@@ -1,7 +1,7 @@
 ---
 id: INV-001
 title: Dark feedback loop — the tool has no ground truth
-status: handoff-ready
+status: in-progress
 severity: crucial          # the recommended fix (a capture endpoint) touches live infra + a public surface + auth; a rung-1 interim is non-crucial
 logged: 2026-07-20
 updated: 2026-07-20
@@ -10,7 +10,9 @@ source: B-3 companion (backlog) + the 2026-07-11 P2 scan; re-verified live 2026-
 
 # INV-001 · Dark feedback loop — the tool has no ground truth
 
-**Status:** `handoff-ready` · **Severity:** `crucial` (recommended rung) · **Owner of the fix:** _(a Surgeon, once a rung is greenlit)_
+**Status:** `in-progress` · **Severity:** `crucial` · **Owner of the fix:** the agentic squad (Surgeon) — **Rung 2 approved** (checkpoint A, 2026-07-20)
+
+> ✅ **Checkpoint A (brief approved, 2026-07-20):** build **Rung 2** — a public **Lambda Function URL** capture endpoint that the digest/report "Mark applied" links hit → `track_application_event`; auth = a **short-lived HMAC-signed token** scoped to `{posting_id, status}` (TTL, signing key in Secrets Manager), mirroring the v0.10.0 presigned-report pattern. Ship the **Rung-1 report hint alongside**. Build in progress via the squad; the PR (checkpoint B) and the live deploy remain human checkpoints.
 
 > The pipeline scores jobs, emails them, and forgets — it never learns whether a job it rated 90 led to an application, an interview, or nothing. It has **zero ground truth**, so scoring can't be measured or calibrated.
 
