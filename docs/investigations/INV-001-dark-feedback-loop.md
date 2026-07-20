@@ -1,7 +1,7 @@
 ---
 id: INV-001
 title: Dark feedback loop — the tool has no ground truth
-status: verified
+status: handoff-ready
 severity: crucial          # the recommended fix (a capture endpoint) touches live infra + a public surface + auth; a rung-1 interim is non-crucial
 logged: 2026-07-20
 updated: 2026-07-20
@@ -10,7 +10,7 @@ source: B-3 companion (backlog) + the 2026-07-11 P2 scan; re-verified live 2026-
 
 # INV-001 · Dark feedback loop — the tool has no ground truth
 
-**Status:** `verified` · **Severity:** `crucial` (recommended rung) · **Owner of the fix:** _(a Surgeon, once a rung is greenlit)_
+**Status:** `handoff-ready` · **Severity:** `crucial` (recommended rung) · **Owner of the fix:** _(a Surgeon, once a rung is greenlit)_
 
 > The pipeline scores jobs, emails them, and forgets — it never learns whether a job it rated 90 led to an application, an interview, or nothing. It has **zero ground truth**, so scoring can't be measured or calibrated.
 
@@ -25,6 +25,7 @@ Every day the tool produces a scored shortlist, but nothing flows *back*: did th
 - **Evidence 2 — human corrections are near-zero.** `score.score_override` is set on **1 of 286** scored rows.
   Reproduce: `… --sql "SELECT count(*) FILTER (WHERE score_override IS NOT NULL) AS overrides, count(*) AS total FROM score"` → expected `overrides=1, total=286`.
 - **Magnitude: 100% of scores are unlabeled; 0 outcomes ever recorded.** There is no dataset — not a small one — to measure accuracy against. This is a total absence, not a thin signal.
+- **Re-verified 2026-07-20 via `/investigate`:** both counts unchanged (`application_event=0` · `score_override 1/286`); the code claims below hold (`track_application_event` exists as the reuse point, the panel Curate tab is present, `render_digest` is a fix surface). The dossier is complete + current → advanced to `handoff-ready`.
 
 ## Mechanism (root cause)
 The *capability* to record outcomes exists — `scripts/track.py` (`applied|interview|offer|rejected|withdrawn` + `override`, migration 0005) and now the v0.12.0 control-panel Curate tab ([ADR-0033](../adr/0033-local-control-panel.md)). The bottleneck is **friction at the moment of the action**:
