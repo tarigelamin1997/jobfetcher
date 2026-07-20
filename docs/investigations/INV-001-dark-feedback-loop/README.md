@@ -20,7 +20,7 @@ Every day the tool produces a scored shortlist, but nothing flows *back*: did th
 ## Does it exist? — verification
 **Yes — measured live over the Aurora Data API, 2026-07-20** (read-only, re-runnable):
 
-- **Evidence 1 — the outcome log is empty.** `application_event` (the append-only outcome table, migration 0005 / [ADR-0026](../adr/0026-outcome-tracking-override-lineage.md)) has **0 rows** across the entire history.
+- **Evidence 1 — the outcome log is empty.** `application_event` (the append-only outcome table, migration 0005 / [ADR-0026](../../adr/0026-outcome-tracking-override-lineage.md)) has **0 rows** across the entire history.
   Reproduce (read-only): `aws rds-data execute-statement --resource-arn <cluster> --secret-arn <secret> --database jobfetcher --region us-east-1 --sql "SELECT count(*) FROM application_event"` → expected `0`.
 - **Evidence 2 — human corrections are near-zero.** `score.score_override` is set on **1 of 286** scored rows.
   Reproduce: `… --sql "SELECT count(*) FILTER (WHERE score_override IS NOT NULL) AS overrides, count(*) AS total FROM score"` → expected `overrides=1, total=286`.
@@ -28,13 +28,13 @@ Every day the tool produces a scored shortlist, but nothing flows *back*: did th
 - **Re-verified 2026-07-20 via `/investigate`:** both counts unchanged (`application_event=0` · `score_override 1/286`); the code claims below hold (`track_application_event` exists as the reuse point, the panel Curate tab is present, `render_digest` is a fix surface). The dossier is complete + current → advanced to `handoff-ready`.
 
 ## Mechanism (root cause)
-The *capability* to record outcomes exists — `scripts/track.py` (`applied|interview|offer|rejected|withdrawn` + `override`, migration 0005) and now the v0.12.0 control-panel Curate tab ([ADR-0033](../adr/0033-local-control-panel.md)). The bottleneck is **friction at the moment of the action**:
+The *capability* to record outcomes exists — `scripts/track.py` (`applied|interview|offer|rejected|withdrawn` + `override`, migration 0005) and now the v0.12.0 control-panel Curate tab ([ADR-0033](../../adr/0033-local-control-panel.md)). The bottleneck is **friction at the moment of the action**:
 
 - Recording is a **separate, deliberate step** — a terminal command (`track.py applied <posting_id>`, and you must first `find` the id) or opening a local Streamlit app. The user applies to a job *in their browser, from the email*; they will not context-switch to a terminal/app afterward.
 - The benefit is **delayed and invisible** (it only pays off later, in analytics that don't exist yet), so the friction ≫ the perceived reward → the log stays empty. Root cause: **there is no capture affordance where the user already is** (the digest / the full-list report). `scripts/track.py` is the only capture path and it's CLI-only.
 
 ## Blast radius
-- **Changes:** a **capture surface** at the point of action — the digest email ([`core/notifier.py`](../../src/jobfetcher/core/notifier.py) `render_digest`) and/or the full-list report page ([`core/report.py`](../../src/jobfetcher/core/report.py)) gain per-job "Mark applied / interview / …" affordances, backed by a small **write endpoint** that calls the existing `Repository.track_application_event`.
+- **Changes:** a **capture surface** at the point of action — the digest email ([`core/notifier.py`](../../../src/jobfetcher/core/notifier.py) `render_digest`) and/or the full-list report page ([`core/report.py`](../../../src/jobfetcher/core/report.py)) gain per-job "Mark applied / interview / …" affordances, backed by a small **write endpoint** that calls the existing `Repository.track_application_event`.
 - **Must NOT change:** the **append-only** `application_event` schema (0005) and the `APPLICATION_STATUSES` vocabulary; the scoring lineage; no new outcome fields on the scoring pipeline.
 - **Unaffected:** fetch → silver → gold → score → notify (the capture is a *return* path, orthogonal to the forward pipeline).
 
@@ -44,7 +44,7 @@ The single high-leverage move is **capture at the moment of action**. Reuse the 
 1. **Rung 0 (already shipped) — the v0.12.0 panel Curate tab** cut the friction vs the raw CLI, but it's still a *separate local app*. Not sufficient alone (the log is still empty).
 2. **Rung 1 (minimal, non-crucial) — reduce the residual friction:** make the panel the obvious path (surface it in the digest footer + docs) and/or have the full-list report emit a ready-to-paste `track.py applied <id>` per row. Cheap, no infra — but it doesn't fully close the "one click from the email" gap.
 3. **Rung 2 (recommended — the real friction-killer, CRUCIAL) — a capture endpoint the email/report links to:** a tiny **AWS Lambda Function URL** (or API Gateway route) that the "Mark applied" links hit → `track_application_event`. One click from the inbox → a row lands. **Open question the Surgeon must resolve:** auth on a public endpoint — a **short-lived signed token** in the link (mirroring the v0.10.0 presigned-report pattern) scoped to `{posting_id, status}`, so a stray click can't be forged. New infra (a Lambda + URL + IAM) → CRUCIAL tier.
-4. **Rung 3 (end-state, deferred) — inline outcome actions in a hosted dashboard** ([ADR-0024](../adr/0024-query-via-export.md) end-state) — the B-1-rung-3 surface. Bigger build; not now.
+4. **Rung 3 (end-state, deferred) — inline outcome actions in a hosted dashboard** ([ADR-0024](../../adr/0024-query-via-export.md) end-state) — the B-1-rung-3 surface. Bigger build; not now.
 
 **Recommendation:** Rung 2 — it's the smallest change that actually closes the loop (one click from where the user already is), reuses the whole existing write + validation path, and adds exactly one small surface. Ship Rung 1's report-side hint alongside it as the zero-cost interim.
 
@@ -55,7 +55,7 @@ The single high-leverage move is **capture at the moment of action**. Reuse the 
 | VG-b | Recording a second, later status (e.g. `interview`) for P → a **new** append-only row; the latest-status read returns `interview` (history preserved, not overwritten). | Double-clicking the same link → at most one *intended* transition; a replayed token past its TTL is rejected (no duplicate spurious row from a stale link). |
 
 ## Out of scope / rejected
-- **A hosted dashboard now** (Rung 3) — deferred ([ADR-0024](../adr/0024-query-via-export.md) end-state).
+- **A hosted dashboard now** (Rung 3) — deferred ([ADR-0024](../../adr/0024-query-via-export.md) end-state).
 - **Auto-inferring outcomes** (e.g. scraping ATS status) — no reliable signal; the tool deliberately doesn't touch external ATS.
 - **New outcome columns on the scoring pipeline** — keep the append-only `application_event` as the single outcome log; the capture only *writes* to it.
 - **Building the M7 calibration loop in the same unit** — this dossier unblocks it (supplies the labels); calibration is its own later unit.
@@ -66,11 +66,20 @@ The single high-leverage move is **capture at the moment of action**. Reuse the 
 - `blocks` → "measure scoring accuracy" (no labels → no accuracy metric)
 - `touches` → `file:src/jobfetcher/core/notifier.py`
 - `touches` → `file:src/jobfetcher/core/report.py`
-- `relates-to` → [ADR-0026](../adr/0026-outcome-tracking-override-lineage.md) (the outcome/override lineage this feeds)
-- `relates-to` → [ADR-0033](../adr/0033-local-control-panel.md) (the panel Curate tab — the partial, still-separate mitigation)
-- `relates-to` → [B-3 companion](../ledgers/backlog.md) (where this was first named)
+- `relates-to` → [ADR-0026](../../adr/0026-outcome-tracking-override-lineage.md) (the outcome/override lineage this feeds)
+- `relates-to` → [ADR-0033](../../adr/0033-local-control-panel.md) (the panel Curate tab — the partial, still-separate mitigation)
+- `relates-to` → [B-3 companion](../../ledgers/backlog.md) (where this was first named)
 
 ## Handoff
 - **Severity tier:** `crucial` for the recommended Rung 2 (a public capture endpoint = live infra + a new surface + auth) → human checkpoints: the brief/rung decision **and** the PR before merge; the deploy is always a checkpoint. Rung 1 alone is non-crucial.
 - **Ready-for-Surgeon checklist:** verified ✅ (live, 2026-07-20) · root-caused ✅ · fix plan (rungs + recommendation) ✅ · validation gate (behavioral + negative) ✅ · out-of-scope ✅ · typed connections ✅. **Open decision for the human:** which rung, and (Rung 2) the token/auth approach.
-- **On fix (fill at close):** PR #… · [ADR-00NN](../adr/) · CHANGELOG `[vX.Y.Z]` → set `status: fixed`.
+- **On fix:** the **Resolution** section below is filled at close → set `status: fixed`.
+
+## Resolution — as-built _(filled at close, when the fix ships)_
+> ⏳ **Pending** — not yet built. When a Surgeon ships the fix, record here **what was actually built** (not just the proposal above), so this closed case is a self-contained archive a future phase can edit or extend from without re-reading the code.
+
+- **What shipped:** _(the change in prose — the as-built)_.
+- **Rung taken · divergence from the Fix plan:** _(which rung; any deviation from the proposal above + why)_.
+- **Key files + decisions:** _(where the code lives; the load-bearing choices)_.
+- **Links:** PR #… · [ADR-00NN](../../adr/) · CHANGELOG `[vX.Y.Z]` · commit `<sha>`.
+- **Extending / editing later:** _(the seams to build on, the gotchas — how a later phase reuses or modifies this)_.

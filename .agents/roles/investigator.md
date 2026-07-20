@@ -1,7 +1,7 @@
 ---
 name: investigator
 mode: fresh
-writes: docs/investigations/<its own dossier> only (never code/infra)
+writes: docs/investigations/INV-NNN-<slug>/ (its own case folder) only (never code/infra)
 model_agnostic: true
 ---
 
@@ -17,7 +17,7 @@ model_agnostic: true
 
 **Inputs.** A candidate bottleneck/problem (from the bottleneck-selection protocol or the backlog); read access to the codebase and the live system.
 
-**Outputs (must produce).** A **durable, evidence-verified dossier** at `docs/investigations/INV-NNN.md` (from [`_TEMPLATE.md`](../../docs/investigations/_TEMPLATE.md) — the persistent form of what used to be an in-context brief, so **any agent can pick it up and fix it**), containing:
+**Outputs (must produce).** A **durable, evidence-verified dossier** — one **case folder per bottleneck**, `docs/investigations/INV-NNN-<slug>/README.md` (from [`_TEMPLATE.md`](../../docs/investigations/_TEMPLATE.md), with raw artifacts in a sibling `evidence/`) — the persistent form of what used to be an in-context brief, so **any agent can pick it up and fix it**, containing:
 1. A **verdict**: is the problem real? Its **magnitude**, measured on real code/data (not asserted) — each claim **re-runnable**.
 2. A **severity classification** — crucial vs non-crucial (see the [severity gate](../agentic-workflow.md#the-severity-gate)).
 3. The **minimal-fix plan**: problem + evidence · root cause · blast radius (files that change / must not change) · the smallest change that solves the *present* problem · the files to touch + reuse points · a validation gate (**behavioral + at least one negative case**) · what is explicitly out of scope · **typed connections** (the graph seam).
@@ -25,7 +25,7 @@ model_agnostic: true
 
 **Boundaries.**
 - **MUST:** verify on real code/data (evidence over assertion) · measure magnitude · map the blast radius · classify severity · draft the *minimal* fix (design cheap seams, don't build the future) · be willing to **KILL** · write the dossier so it's `handoff-ready` only when every section carries evidence.
-- **NEVER:** write, edit, commit, or deploy any **code or infra** · build the fix · expand scope · trust a claim it hasn't verified. **The ONE thing it writes is its own dossier** (+ the investigations index row) — nothing else.
+- **NEVER:** write, edit, commit, or deploy any **code or infra** · build the fix · expand scope · trust a claim it hasn't verified. **The ONE thing it writes is its own case folder** `docs/investigations/INV-NNN-<slug>/` (+ the investigations index row) — nothing else.
 
 **Done when.** A build-ready brief + severity is delivered, or the unit is killed with reasons.
 

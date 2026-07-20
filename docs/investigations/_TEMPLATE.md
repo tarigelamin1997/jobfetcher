@@ -8,6 +8,10 @@ updated: YYYY-MM-DD
 source: <backlog ref, e.g. B-4, or "P2 scan 2026-..."; who/what surfaced it>
 ---
 
+<!-- One folder per case: this file is docs/investigations/INV-NNN-<slug>/README.md; put raw
+     artifacts (query dumps, logs, before/after) in a sibling evidence/ folder. Relative links
+     from here: ../../adr/ · ../../ledgers/ · ../../../src/ . Delete this comment. -->
+
 # INV-NNN · <title>
 
 **Status:** `<status>` · **Severity:** `<severity>` · **Owner of the fix:** _(a Surgeon, once handed off)_
@@ -51,11 +55,20 @@ _What NOT to do — the over-reach guardrails; alternatives considered and rejec
 ## Connections (typed — the graph seam)
 _Typed edges, `<verb> → <target>` (vocab: causes/caused-by · touches · blocks/blocked-by · depends-on · relates-to · duplicates/supersedes). Target = a dossier ID, `file:path`, an ADR/roadmap item, or an external prereq._
 
-- `touches` → `src/jobfetcher/...`
+- `touches` → `file:src/jobfetcher/...`
 - `blocks` → _(a capability, e.g. M7 calibration)_
-- `relates-to` → [ADR-00NN](../adr/00NN-...)
+- `relates-to` → [ADR-00NN](../../adr/00NN-...)
 
 ## Handoff
 - **Severity tier:** `<crucial|non-crucial>` → _(which human checkpoints apply — crucial = brief + PR; deploy is always a checkpoint)_.
 - **Ready-for-Surgeon checklist:** verified ✅ · root-caused ✅ · fix plan ✅ · validation gate (behavioral + negative) ✅ · out-of-scope ✅.
-- **On fix (fill at close):** PR #… · [ADR-00NN](../adr/…) · CHANGELOG `[vX.Y.Z]` → set `status: fixed`.
+- **On fix:** the **Resolution** section below is filled at close → set `status: fixed`.
+
+## Resolution — as-built _(filled at close, when the fix ships)_
+> ⏳ **Pending** — not yet built. When a Surgeon ships the fix, record here **what was actually built** (not just the proposal above), so this closed case is a self-contained archive a future phase can edit or extend from without re-reading the code.
+
+- **What shipped:** _(the change in prose — the as-built)_.
+- **Rung taken · divergence from the Fix plan:** _(which rung; any deviation from the proposal above + why)_.
+- **Key files + decisions:** _(where the code lives; the load-bearing choices)_.
+- **Links:** PR #… · [ADR-00NN](../../adr/…) · CHANGELOG `[vX.Y.Z]` · commit `<sha>`.
+- **Extending / editing later:** _(the seams to build on, the gotchas — how a later phase reuses or modifies this)_.

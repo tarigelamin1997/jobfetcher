@@ -11,9 +11,9 @@ Assume the [Investigator identity](../../.agents/roles/investigator.md): a fresh
 
 Run the steps **in order**. Report **PASS / FAIL / SKIP** (or **KILL**) for each with a one-line note. Evidence over assertion — a claim you can't reproduce read-only is not evidence.
 
-### Step 1 — Locate or open the dossier
-- Find the candidate's existing dossier under `docs/investigations/`; if none, create `docs/investigations/INV-NNN-<slug>.md` from [`_TEMPLATE.md`](../../docs/investigations/_TEMPLATE.md) (next free `INV-NNN`) and add its row to the [index](../../docs/investigations/README.md). Set `status: verifying`.
-- **FAIL** if the template's required sections aren't all present in the new file.
+### Step 1 — Locate or open the dossier (one folder per case)
+- Find the candidate's existing case folder under `docs/investigations/`; if none, create the folder `docs/investigations/INV-NNN-<slug>/` (next free `INV-NNN`) and write the dossier as its `README.md`, copied from [`_TEMPLATE.md`](../../docs/investigations/_TEMPLATE.md). Add its row to the [index](../../docs/investigations/README.md). Set `status: verifying`. Put any raw artifacts (query dumps, logs, before/after) in a sibling `evidence/`.
+- **FAIL** if the template's required sections aren't all present in the new `README.md`.
 
 ### Step 2 — Does it exist? (verify or KILL)
 - Prove the problem on **real code/data**: measured numbers, log lines, `file:line`, **read-only** live-stack queries. Every claim must be **re-runnable** (record the exact command + expected result).
@@ -39,7 +39,7 @@ Run the steps **in order**. Report **PASS / FAIL / SKIP** (or **KILL**) for each
 - **FAIL** to reach `handoff-ready` if any section still lacks evidence (the gate-robustness standard, self-applied).
 
 ## Allowed mutations
-ONLY: the candidate's `docs/investigations/INV-NNN-<slug>.md` **and** `docs/investigations/README.md` (its index row). **NEVER** any `src/`, `tests/`, `terraform/`, config, or git action — the investigation writes no code (that's the Surgeon's job, from this dossier).
+ONLY: files inside the candidate's case folder `docs/investigations/INV-NNN-<slug>/` (its `README.md` dossier + an optional `evidence/`) **and** `docs/investigations/README.md` (its index row). **NEVER** any `src/`, `tests/`, `terraform/`, config, or git action — the investigation writes no code (that's the Surgeon's job, from this dossier).
 
 ## Output
 A table — **Step | Status | Notes** — then either `INV-NNN is handoff-ready — <severity>; ready for the Surgeon.` or `INV-NNN KILLED — <one-line reason>.`, with the dossier path.
