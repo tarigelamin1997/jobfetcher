@@ -43,7 +43,7 @@ The handler deliberately converts stage failures into a returned `statusCode:500
 ## Validation gate
 | # | Behavioral (positive) | Negative case |
 |---|---|---|
-| VG-a | A **normal-mode** run that fails a stage → the log contains `PIPELINE_ALARM`; the metric filter matches that line (`aws logs test-metric-filter --filter-pattern '"PIPELINE_ALARM"'` → matches only the marker), so the alarm would fire. | A **smoke-mode** and a **reassess-mode** 500 → the log has `pipeline failed` but **NOT** `PIPELINE_ALARM` (no false-fire) — `test_returned_500_alarm_marker_only_on_unattended_run`. |
+| VG-a | A **normal-mode** run that fails a stage → the log contains `PIPELINE_ALARM`; the metric filter matches that line — runnable: `aws logs test-metric-filter --filter-pattern '"PIPELINE_ALARM"' --log-event-messages "PIPELINE_ALARM: unattended run returned statusCode=500" "pipeline failed: RuntimeError: boom" "pipeline done {...}"` → **only** the marker line matches — so the alarm would fire. | A **smoke-mode** and a **reassess-mode** 500 → the log has `pipeline failed` but **NOT** `PIPELINE_ALARM` (no false-fire) — `test_returned_500_alarm_marker_only_on_unattended_run`. |
 | VG-b | Post-deploy: `describe-alarms --alarm-names jobfetcher-<env>-pipeline-returned-500` exists + wired to the SNS topic; the filter is present on the log group. | On a healthy stack the alarm sits `OK`/`INSUFFICIENT_DATA` — it does not fire without a real returned-500. |
 
 ## Out of scope / rejected
