@@ -1,7 +1,7 @@
 ---
 id: INV-002
 title: Silent 500 — a returned statusCode:500 pages nobody
-status: in-progress
+status: fixed
 severity: non-crucial   # additive observability (2 alarms + a marker); touches live infra but low-risk, no scoring/schema/dep/PII
 logged: 2026-07-20
 updated: 2026-07-21
@@ -10,7 +10,7 @@ source: B-3 "still-parked companion" (backlog) + the 2026-07-11 P2 scan; picked 
 
 # INV-002 · Silent 500 — a returned statusCode:500 pages nobody
 
-**Status:** `in-progress` · **Severity:** `non-crucial` · **Owner of the fix:** the agentic squad
+**Status:** `fixed` (shipped + live-validated 2026-07-21) · **Severity:** `non-crucial` · **Owner of the fix:** the agentic squad
 
 > The pipeline handler *catches* a stage failure and **returns** `statusCode:500` — which is a **successful** invocation to Lambda, so the AWS/Lambda Errors alarm never counts it and nobody is paged. An unattended daily run can die silently.
 
@@ -65,10 +65,10 @@ The handler deliberately converts stage failures into a returned `statusCode:500
 - **On fix:** the **Resolution** section below is filled at close → set `status: fixed`.
 
 ## Resolution — as-built _(filled at close)_
-> ⏳ **Pending** — filled when the fix ships (deployed + alarm live).
+> ✅ **Shipped + live-validated 2026-07-21.** Merged PR #35 → one-time log-group import → `terraform apply` (2 add / 4 change / 0 destroy). Smoke `200`. The alarm is live: `describe-alarms` → `State=OK`, `AlarmActions=[…:jobfetcher-dev-alarms]`, `PipelineReturned500` / `Sum>=1` / `notBreaching`; the metric filter `"PIPELINE_ALARM"` is on `/aws/lambda/jobfetcher-dev-pipeline`; `aws logs test-metric-filter` matches **only** the marker line; unit tests prove the marker fires on a normal-mode 500 but not on smoke/reassess.
 
-- **What shipped:** _(the as-built)_.
-- **Rung taken · divergence from the Fix plan:** _(any deviation + why)_.
-- **Key files + decisions:** _(where the code lives; the load-bearing choices)_.
-- **Links:** PR #… · CHANGELOG `[Unreleased]` · commit `<sha>`.
-- **Extending / editing later:** _(the seams; the gotchas)_.
+- **What shipped:** the pipeline's returned-`statusCode:500` (a *successful* Lambda invocation, invisible to the AWS/Lambda Errors alarm) now **pages**. The handler emits a distinctive **`PIPELINE_ALARM`** line on the unattended daily-run 500; a CloudWatch log-metric-filter turns it into a `JobFetcher/Pipeline/PipelineReturned500` metric; an alarm (`Sum>=1`, `notBreaching`) → the **existing** SNS topic/email. The dead-man + Errors alarms are unchanged.
+- **Rung taken · divergence from the Fix plan:** as planned — no divergence. Chose the **mode-gated marker** (code + infra) over an infra-only `"pipeline failed"` filter so the alarm never fires on the *expected* pre-migration smoke 500 or a manual reassess (avoiding alarm fatigue). One deploy prerequisite: a **one-time `terraform import`** of the Lambda-auto-created log group (now managed, retention 30d).
+- **Key files + decisions:** [`handlers/pipeline.py`](../../../src/jobfetcher/handlers/pipeline.py) (the mode-gated marker in the outer `except`; `mode` is bound before the `try`) · [`terraform/alarms.tf`](../../../terraform/alarms.tf) (managed log group + metric filter + alarm, reusing `aws_sns_topic.alarms`) · [`tests/test_db_resume.py`](../../../tests/test_db_resume.py) (`test_returned_500_alarm_marker_only_on_unattended_run`).
+- **Links:** PR #35 · CHANGELOG `[Unreleased]` (batches into the next `v0.12.x`) · merge commit `0278e1f` · closes the [ADR-0029](../../adr/0029-ops-hardening.md) documented gap.
+- **Extending / editing later:** the marker line could carry the **failing stage** for richer alerting (a pure string change — the filter matches the `PIPELINE_ALARM` prefix). A separate, still-open gap is a **"digest didn't send" (returned-200-but-empty/partial)** alarm — a *different* metric (out of scope here). The managed log group now also bounds log retention (30d); a fresh clone needs **no import** (Terraform creates the group).

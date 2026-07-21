@@ -55,7 +55,7 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 **Overturned with evidence:** the pre-committed **M7 shadow-`code_total` cut-over** was the roadmap agent's initial pick; the data-quality agent killed it — the code-total inherits the LLM subscore noise (max spread **71** > the holistic's 60), and there's zero ground truth to calibrate toward (`application_event` = 0 rows). M7 stays parked.
 
-**Still-parked companions (named, not built):** the **silent-`500` alarm gap** (a returned `statusCode:500` alerts nobody — a CloudWatch log-metric-filter on the v0.9.0 INFO logs → the existing SNS topic is the small unblocked fix); the **dark human-judge loop** (0 outcomes logged — the reason calibration has no target; a one-click feedback affordance in the digest/report is the later unit).
+**Still-parked companions (named, not built):** the **silent-`500` alarm gap** ✅ **SHIPPED 2026-07-21** ([INV-002](../investigations/INV-002-silent-500-alarm/README.md), PR #35) — a mode-gated `PIPELINE_ALARM` log-metric-filter → the existing SNS topic now pages on a returned `statusCode:500` from the unattended daily run; the **dark human-judge loop** (0 outcomes logged — the reason calibration has no target; a one-click feedback affordance in the digest/report is the later unit).
 
 **Connections:** [ADR-0028](../adr/0028-scorer-subscores-shadow.md) (the shadow instrument the scan re-read) · [ADR-0023](../adr/0023-reassess-replay.md) (the reassess/graduation feature made honest) · M7 (parked, evidence above).
 
