@@ -304,3 +304,35 @@ def test_handler_wait_failure_is_still_a_loud_500(monkeypatch, tmp_path, pkg_log
     assert out["statusCode"] == 500
     assert "DatabaseResumingException" in out["error"]
     assert "upsert_profile" not in calls  # nothing touched the DB after the failed wait
+
+
+# The silent-500 alarm marker (INV-002): a RETURNED statusCode:500 is invisible to the AWS/Lambda
+# Errors alarm, so the handler emits a distinctive `PIPELINE_ALARM` log line that a CloudWatch
+# metric-filter → SNS alarm keys off — but ONLY for the unattended daily run. Smoke (deploy gate,
+# where a pre-migration/DB-unreachable 500 is expected and you're present) and reassess (manual,
+# attended) must NOT emit it, or the alarm cries wolf. Every mode 500s here via the same failed
+# resume wait; only the mode differs.
+@pytest.mark.parametrize(
+    ("event", "marker_expected"),
+    [
+        ({}, True),  # unattended daily cron → page
+        ({"mode": ""}, True),  # normal pipeline, explicit empty mode → page
+        ({"mode": "reassess"}, False),  # manual/attended replay → no page
+        ({"mode": "smoke"}, False),  # deploy gate; a pre-migration 500 is expected → no page
+    ],
+)
+def test_returned_500_alarm_marker_only_on_unattended_run(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog, event, marker_expected
+):
+    calls: list[str] = []
+
+    def _exhausted():
+        raise _resume_error()
+
+    pipe = _wire_handler(monkeypatch, tmp_path, calls, wait=_exhausted)
+    with caplog.at_level("ERROR", logger="jobfetcher.handlers.pipeline"):
+        out = pipe.handler(event, None)
+    assert out["statusCode"] == 500  # every mode still returns the loud 500
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "pipeline failed" in logged  # the debug line is emitted regardless of mode
+    assert ("PIPELINE_ALARM" in logged) is marker_expected  # the alarm marker is mode-gated

@@ -485,6 +485,14 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
 
     except Exception as exc:  # noqa: BLE001 — surface ANY stage failure as a retryable 500
         rlog.exception("pipeline failed: %s", exc)
+        # A RETURNED statusCode:500 is a *successful* invocation to Lambda, so the AWS/Lambda
+        # Errors alarm never counts it (ADR-0029 gap). This distinctive marker is what the
+        # CloudWatch metric-filter → SNS alarm keys off (terraform/alarms.tf). Only the UNATTENDED
+        # daily run emits it: smoke (the deploy gate — a pre-migration/DB-unreachable 500 is
+        # expected + you're present) and reassess (manual, attended) are excluded so the alarm
+        # never cries wolf. `mode` is resolved above, before the try, so it's always bound here.
+        if mode not in ("smoke", "reassess"):
+            rlog.error("PIPELINE_ALARM: unattended run returned statusCode=500")
         error_summary = {
             "statusCode": 500,
             "run_id": run_id,
