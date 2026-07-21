@@ -44,6 +44,7 @@ Every dossier's **Connections** section is a list of typed edges — a graph-in-
 | ID | Title | Status | Severity | One-liner | Backlog / ADR |
 |---|---|---|---|---|---|
 | [INV-001](INV-001-dark-feedback-loop/) | Dark feedback loop — the tool has no ground truth | `fixed` | crucial¹ | 0 outcomes logged (live-verified 2026-07-20) → **Rung 2 capture endpoint shipped + live-validated** (PR #34): one click from the email records an outcome | [B-3 companion](../ledgers/backlog.md) · M7 · [ADR-0035](../adr/0035-outcome-capture-endpoint.md) |
+| [INV-002](INV-002-silent-500-alarm/) | Silent 500 — a returned statusCode:500 pages nobody | `in-progress` | non-crucial | A returned 500 is a *successful* Lambda invocation → invisible to the Errors alarm (0 alerts on the 2026-07-09 missed digest) → mode-gated marker + log-metric-filter alarm | [B-3 companion](../ledgers/backlog.md) · [ADR-0029](../adr/0029-ops-hardening.md) |
 
 ¹ crucial for the recommended fix (a public capture endpoint — live infra + auth); a rung-1 interim is non-crucial.
 
