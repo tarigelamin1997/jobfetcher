@@ -79,6 +79,14 @@ _DISSECTED_COLUMNS = (
     tables.posting.c.dissection_model,
     tables.posting.c.dropped_skill_count,
 )
+# Rows per Data API round-trip for the bulk silver read (ERR-013).
+# Projection alone was NOT enough. The 1 MB cap applies to the SERIALIZED JSON RESPONSE, and
+# `pg_column_size()` — which the first fix was sized on — reports the COMPRESSED ON-DISK size.
+# Measured live on 1,041 silver rows: the `skills` JSONB is 537 kB on disk but **1,291 kB as
+# text**, which is what actually crosses the wire. So the projected read was still ~1.4 MB and
+# still died. 200 rows/page is ~5x under the observed wall (1,000 rows passed, 1,041 failed).
+_SILVER_PAGE_SIZE = 200
+
 _SILVER_COLUMNS = (tables.posting.c.posting_id, *_DISSECTED_COLUMNS)
 _GOLD_COLUMNS = (
     tables.posting.c.posting_id,
@@ -284,16 +292,35 @@ class PostgresRepository:
             where = where | (
                 (p.c.status == "rejected") & p.c.gold_filter_hash.is_distinct_from(filter_hash)
             )
-        # Ordered so the read is deterministic — required for `limit` to mean anything stable.
-        stmt = select(*_SILVER_COLUMNS).where(where).order_by(p.c.posting_id)
-        if limit is not None:
-            stmt = stmt.limit(limit)
+        # KEYSET pagination (ERR-013): the Data API has no cursor and caps each RESPONSE at
+        # 1 MB, so an unbounded read is unbounded by the size of the table — a time bomb whose
+        # fuse is the growth rate. Walking `posting_id` in pages keeps every round-trip small
+        # regardless of how large the backlog gets, and the caller still receives the whole
+        # set. Ordering is what makes the keyset stable; OFFSET is deliberately not used (it
+        # re-scans, and it skips rows if the set shifts mid-walk).
+        out: list[tuple[str, DissectedPosting]] = []
+        after = ""
         try:
             with self.engine.connect() as conn:
-                rows = conn.execute(stmt).mappings().all()
+                while True:
+                    remaining = None if limit is None else limit - len(out)
+                    if remaining is not None and remaining <= 0:
+                        break
+                    page = _SILVER_PAGE_SIZE if remaining is None else min(_SILVER_PAGE_SIZE, remaining)
+                    stmt = (
+                        select(*_SILVER_COLUMNS)
+                        .where(where & (p.c.posting_id > after))
+                        .order_by(p.c.posting_id)
+                        .limit(page)
+                    )
+                    rows = conn.execute(stmt).mappings().all()
+                    if not rows:
+                        break
+                    out.extend((r["posting_id"], _dissected_from_row(r)) for r in rows)
+                    after = rows[-1]["posting_id"]
         except SQLAlchemyError as e:
             raise RepositoryError(f"get_silver_postings failed: {e}") from e
-        return [(row["posting_id"], _dissected_from_row(row)) for row in rows]
+        return out
 
     def mark_gold_rejected(self, posting_id: str, *, filter_hash: str) -> None:
         """Terminal-state a posting the gold filter did NOT promote, stamped with the decision

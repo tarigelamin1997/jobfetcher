@@ -265,3 +265,43 @@ def test_without_a_hash_rejected_rows_stay_out(repo, prefix):
     repo.mark_gold_rejected(drop, filter_hash="hash-A")
 
     assert _ids(repo.get_silver_postings(), prefix) == [silver]
+
+
+# ------------------------------------------------------- pagination (ERR-013)
+def test_read_returns_every_row_across_page_boundaries(repo, prefix):
+    """The bug the first fix missed: column projection alone was not enough.
+
+    The 1 MB cap applies to the SERIALIZED RESPONSE, but the projection was sized on
+    `pg_column_size()` — the COMPRESSED ON-DISK size. Measured live: the `skills` JSONB was
+    537 kB on disk and **1,291 kB as text**, so the "fixed" read was still ~1.4 MB and still
+    died in production. The read is now keyset-paginated, which makes it bounded by page size
+    rather than by table size.
+
+    This seeds more rows than one page holds and asserts every one comes back — a loop that
+    stops after the first page, or one that never terminates, both fail here.
+    """
+    from jobfetcher.adapters.repository_postgres import _SILVER_PAGE_SIZE
+
+    n = _SILVER_PAGE_SIZE + 37  # deliberately not a multiple of the page size
+    for i in range(n):
+        _seed(repo, prefix, f"p{i:04d}")
+
+    got = _ids(repo.get_silver_postings(), prefix)
+    assert len(got) == n
+    assert len(set(got)) == n            # no row served twice by an off-by-one keyset
+    assert got == sorted(got)            # ordering is what makes the keyset correct
+
+
+def test_limit_is_honoured_across_pages(repo, prefix):
+    # negative twin: `limit` must still cap the total, not the page — otherwise a caller asking
+    # for 10 rows gets a full table walk, which is the failure mode in reverse.
+    from jobfetcher.adapters.repository_postgres import _SILVER_PAGE_SIZE
+
+    for i in range(_SILVER_PAGE_SIZE + 10):
+        _seed(repo, prefix, f"p{i:04d}")
+
+    # Count the WHOLE result, not the prefix-filtered slice: `limit` is a global cap, and
+    # other modules' rows may sort ahead of this test's on a shared database.
+    assert len(repo.get_silver_postings(limit=5)) == 5
+    # and a limit larger than one page still walks past the boundary
+    assert len(repo.get_silver_postings(limit=_SILVER_PAGE_SIZE + 3)) == _SILVER_PAGE_SIZE + 3
