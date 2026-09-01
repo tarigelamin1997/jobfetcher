@@ -66,6 +66,39 @@ log = logging.getLogger(__name__)
 _DISSECT_MODEL = "deepseek-v4-flash"
 _SCORE_MODEL = "deepseek-v4-pro"
 
+
+def _dissect_llm_config() -> LlmConfig:
+    """Extraction: **reasoning OFF**, small budget.
+
+    Dissection fills a fixed JSON schema from text that already contains every answer — there
+    is nothing to reason about. Measured on a real 5 KB JD: reasoning off costs **425 tokens**
+    and returns clean JSON, against ~2,950 with it on. `max_tokens=2048` is ~5× the observed
+    need, which is headroom for a long posting without being so large that a runaway response
+    goes unnoticed (ERR-010)."""
+    return LlmConfig(model=_DISSECT_MODEL, reasoning=False, max_tokens=2048)
+
+
+def _score_llm_config() -> LlmConfig:
+    """Scoring: **reasoning ON at high effort**.
+
+    Scoring is the one stage where judgment is the product. Postings describe the same role in
+    wildly different words and split responsibilities differently, so the model has real work
+    to do reconciling a JD against the profile — high effort is bought deliberately here.
+    Keeping reasoning on is also what keeps v0.11.0's boundary calibration (avg spread 15.95 ⇒
+    a resample margin of 16) describing the model actually in use.
+
+    **The effort must be set EXPLICITLY, and that is the whole fix (ERR-011).** Omitting
+    `reasoning_effort` does not mean "default effort" — it means *uncapped*: the failing runs
+    burned all 4,096 tokens on reasoning and returned an EMPTY completion. Naming `high`
+    bounds it. Measured over four live scores at explicit high effort: **1,334–2,348 tokens**
+    total (~1,032–2,036 reasoning), against 4,096-and-empty with the parameter absent.
+
+    `max_tokens=6144` is ~2.6× the observed ceiling. It costs nothing extra — with an explicit
+    effort, usage does NOT expand to fill the budget (2,348 tokens at max_tokens=8192, 2,227 at
+    12,288, 1,334 at 16,384); only the uncapped setting did that. So this is pure headroom."""
+    return LlmConfig(model=_SCORE_MODEL, reasoning_effort="high", max_tokens=6144)
+
+
 _DEFAULT_SEARCH_CONFIG_PATH = "config/search_config.local.yml"
 _DEFAULT_PROFILE_PATH = "config/profile.local.yml"
 
@@ -85,7 +118,7 @@ _ALEMBIC_HEAD_ENV = "ALEMBIC_HEAD"
 # The alembic head THIS code was written against — the smoke gate's fallback expectation when
 # $ALEMBIC_HEAD is unset. Update per migration (terraform/lambda.tf pins the deployed value);
 # the unit test cross-checks it against migrations/versions/ so it can't silently go stale.
-_EXPECTED_MIGRATION_HEAD = "0006_subscores"
+_EXPECTED_MIGRATION_HEAD = "0007_gold_filter_hash"
 
 # Seconds reserved before the Lambda's hard timeout: in-flight LLM calls + the tail of DB
 # writes + notify must finish inside this margin (H-2 deadline guard).
@@ -229,6 +262,39 @@ def compute_profile_hash(profile: Profile, spec: SearchSpec) -> str:
     ).hexdigest()
 
 
+def compute_filter_hash(profile: Profile, spec: SearchSpec, strategy_name: str) -> str:
+    """The lineage hash of what the GOLD FILTER judges against (migration 0007) — stamped on
+    every `status='rejected'` posting so a later run can tell a settled rejection from one
+    made under a configuration that has since changed.
+
+    **This is deliberately NOT `compute_profile_hash`.** That one hashes the profile plus the
+    three strictness knobs — it covers what *scoring* judges against. The gold filter reads
+    different inputs: `spec.targeting.job_titles`, `.countries` and `.cities`
+    (`filter_deterministic.py`) as well as `profile.preferences.avoid_keywords`. Reusing the
+    scoring hash would leave a `job_titles` edit — the single most likely config change —
+    with an unchanged hash, so the rejected backlog would never re-open. That failure is
+    silent and permanent: a job you would now want, never looked at again, with no error.
+
+    So hash the WHOLE profile, the WHOLE spec, and the strategy name. That over-invalidates
+    (editing `threshold` re-opens the backlog for a filter pass that could not change) and
+    never under-invalidates. The asymmetry decides it: over-invalidation costs one cheap
+    deterministic pass; under-invalidation loses a real job with nothing to notice.
+
+    `strategy_name` is in the hash because `$GOLD_FILTER_STRATEGY` changes verdicts. Pure.
+    """
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "profile": profile.model_dump(),
+                "spec": spec.model_dump(mode="json"),
+                "strategy": strategy_name,
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+
+
 def resolve_filter_strategy(env: dict[str, str]) -> Any:
     """The gold `FilterStrategy` from `$GOLD_FILTER_STRATEGY` (H-3): `deterministic`
     (default) or `llm` (the `LlmFilterStrategy` on the cheap dissect model — semantic
@@ -240,7 +306,7 @@ def resolve_filter_strategy(env: dict[str, str]) -> Any:
     if choice == "llm":
         from ..adapters.filter_llm import LlmFilterStrategy
 
-        return LlmFilterStrategy(OpenAICompatLlmClient(LlmConfig(model=_DISSECT_MODEL)))
+        return LlmFilterStrategy(OpenAICompatLlmClient(_dissect_llm_config()))
     raise ValueError(
         f"${_GOLD_FILTER_ENV} must be 'deterministic' or 'llm', got {choice!r}"
     )
@@ -363,11 +429,11 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             rlog.warning("S3 audit store unavailable — run continues without audit: %s", exc)
             audit_store = None
         dissector = Dissector(
-            OpenAICompatLlmClient(LlmConfig(model=_DISSECT_MODEL)), model_id=_DISSECT_MODEL
+            OpenAICompatLlmClient(_dissect_llm_config()), model_id=_DISSECT_MODEL
         )
         strategy = resolve_filter_strategy(env)  # H-3: deterministic (default) | llm
         scorer = Scorer(
-            OpenAICompatLlmClient(LlmConfig(model=_SCORE_MODEL)), model_id=_SCORE_MODEL
+            OpenAICompatLlmClient(_score_llm_config()), model_id=_SCORE_MODEL
         )
         notifier = SesNotifier()
 
@@ -418,9 +484,13 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
 
         rlog.info("stage=gold start")
         db_profile = Profile.from_jsonb(repo.get_profile(user_id)["profile"])
+        # Hash what the FILTER judges against (not what the scorer does — see the docstring).
+        # Built from db_profile, the same object handed to the strategy, so the stamp always
+        # describes the inputs that actually produced the verdict.
+        filter_hash = compute_filter_hash(db_profile, spec, type(strategy).__name__)
         gold_counts = apply_gold_filter(
             spec, db_profile, strategy=strategy, repo=repo, source=spec.source,
-            audit_store=audit_store,
+            audit_store=audit_store, filter_hash=filter_hash,
         )
         rlog.info("stage=gold done %s", gold_counts)
 

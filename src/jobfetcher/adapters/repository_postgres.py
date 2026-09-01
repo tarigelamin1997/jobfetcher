@@ -58,6 +58,35 @@ def _dissected_from_row(row: Any) -> DissectedPosting:
     )
 
 
+# Explicit projections for the BULK reads (ERR-010). `select(tables.posting)` pulls all 22
+# columns — including `description`, the full JD text, which nothing ever reads back — and the
+# RDS Data API caps a result at 1 MB. At 1,022 silver rows that read was 3,110 kB (1,143 kB of
+# it `description`) and every daily run died on `UnsupportedResultException`. These tuples are
+# exactly what `_dissected_from_row` consumes, declared beside it so a projection and its
+# mapper cannot drift: the same read measures 109 kB.
+# Single-row reads (`get_posting`) stay on `select(tables.posting)` — one row can't hit the cap.
+_DISSECTED_COLUMNS = (
+    tables.posting.c.title,
+    tables.posting.c.language,
+    tables.posting.c.location,
+    tables.posting.c.city,
+    tables.posting.c.country,
+    tables.posting.c.employment_type,
+    tables.posting.c.seniority,
+    tables.posting.c.normalized_title,
+    tables.posting.c.sector,
+    tables.posting.c.skills,
+    tables.posting.c.dissection_model,
+    tables.posting.c.dropped_skill_count,
+)
+_SILVER_COLUMNS = (tables.posting.c.posting_id, *_DISSECTED_COLUMNS)
+_GOLD_COLUMNS = (
+    tables.posting.c.posting_id,
+    tables.posting.c.cluster_id,
+    *_DISSECTED_COLUMNS,
+)
+
+
 class PostgresRepository:
     """`Repository` adapter. Construct from a connection URL (one engine, reused)."""
 
@@ -232,9 +261,31 @@ class PostgresRepository:
             raise RepositoryError(f"upsert_profile failed for {user_id!r}: {e}") from e
 
     def get_silver_postings(
-        self, *, limit: int | None = None
+        self, *, limit: int | None = None, filter_hash: str | None = None
     ) -> list[tuple[str, DissectedPosting]]:
-        stmt = select(tables.posting).where(tables.posting.c.status == "silver")
+        """The gold filter's candidate set.
+
+        Without `filter_hash` this is the pre-0007 behaviour: every `status='silver'` row.
+
+        With `filter_hash` (the current gold-filter decision context) it is *also* every
+        `status='rejected'` row whose stored `gold_filter_hash` differs — i.e. rows a
+        *previous* configuration rejected, which the current one has not judged yet. That is
+        what keeps a `targeting.job_titles` edit able to rescue the whole rejected backlog,
+        which the pre-0007 "non-fits stay silver forever" behaviour did by accident and at the
+        cost of re-filtering all of history every single run.
+
+        `IS DISTINCT FROM` (not `!=`) so a NULL hash — a row rejected before 0007, or one
+        written by an older build — correctly counts as needs-evaluation rather than
+        disappearing on a NULL comparison.
+        """
+        p = tables.posting
+        where = p.c.status == "silver"
+        if filter_hash is not None:
+            where = where | (
+                (p.c.status == "rejected") & p.c.gold_filter_hash.is_distinct_from(filter_hash)
+            )
+        # Ordered so the read is deterministic — required for `limit` to mean anything stable.
+        stmt = select(*_SILVER_COLUMNS).where(where).order_by(p.c.posting_id)
         if limit is not None:
             stmt = stmt.limit(limit)
         try:
@@ -243,6 +294,22 @@ class PostgresRepository:
         except SQLAlchemyError as e:
             raise RepositoryError(f"get_silver_postings failed: {e}") from e
         return [(row["posting_id"], _dissected_from_row(row)) for row in rows]
+
+    def mark_gold_rejected(self, posting_id: str, *, filter_hash: str) -> None:
+        """Terminal-state a posting the gold filter did NOT promote, stamped with the decision
+        context that rejected it (migration 0007). The stamp is the whole point: it is what
+        lets a later run tell "already judged under the current config" (skip) from "judged
+        under a config that no longer applies" (look again)."""
+        stmt = (
+            update(tables.posting)
+            .where(tables.posting.c.posting_id == posting_id)
+            .values(status="rejected", gold_filter_hash=filter_hash)
+        )
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(stmt)
+        except SQLAlchemyError as e:
+            raise RepositoryError(f"mark_gold_rejected failed for {posting_id!r}: {e}") from e
 
     def mark_gold_candidate(self, posting_id: str) -> None:
         stmt = (
@@ -298,7 +365,7 @@ class PostgresRepository:
     def get_gold_candidates(self) -> list[tuple[str, str, DissectedPosting]]:
         # Ordered by posting_id so a scoring run is deterministic (re-runs visit the same order).
         stmt = (
-            select(tables.posting)
+            select(*_GOLD_COLUMNS)
             .where(tables.posting.c.status == "gold_candidate")
             .order_by(tables.posting.c.posting_id)
         )

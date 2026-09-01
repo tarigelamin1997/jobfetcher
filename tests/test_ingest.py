@@ -8,7 +8,7 @@ from typing import Any
 
 from jobfetcher.core.dissector import Dissector, DissectionError
 from jobfetcher.core.ingest import fetch_to_bronze, ingest, land_silver
-from jobfetcher.core.ports import LlmError
+from jobfetcher.core.ports import LlmBillingError, LlmError
 from jobfetcher.core.search_spec import SearchSpec
 from tests.helpers import CANNED_LLM_JSON, FakeLlm
 
@@ -294,7 +294,7 @@ def test_ingest_end_to_end_summary():
         _spec(), run_id="r", source_adapter=src, raw_store=store, repo=repo,
         dissector=_dissector(),
     )
-    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0}
+    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0}
     assert set(repo.postings) == {"jsearch:a", "jsearch:b"}
 
 
@@ -310,7 +310,7 @@ def test_ingest_counts_dissection_skips():
         _spec(), run_id="r", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=_D(FakeLlm()),
     )
-    assert summary == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 1, "already": 0, "deferred": 0}
+    assert summary == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 1, "already": 0, "deferred": 0, "billing_blocked": 0}
 
 
 def test_ingest_rerun_does_not_redissect_existing_posting():
@@ -332,12 +332,60 @@ def test_ingest_rerun_does_not_redissect_existing_posting():
         _spec(), run_id="r1", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=dissector,
     )
-    assert first == {"fetched": 1, "bronzed": 1, "silvered": 1, "skipped": 0, "already": 0, "deferred": 0}
+    assert first == {"fetched": 1, "bronzed": 1, "silvered": 1, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0}
     assert dissector.calls == 1
 
     second = ingest(
         _spec(), run_id="r2", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=dissector,
     )
-    assert second == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 0, "already": 1, "deferred": 0}
+    assert second == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 0, "already": 1, "deferred": 0, "billing_blocked": 0}
     assert dissector.calls == 1  # NOT re-dissected on the re-run
+
+
+def test_ingest_counts_billing_failures_separately_from_skips(caplog):
+    """ERR-010: an empty provider account is NOT a per-item dissection failure.
+
+    It hits every posting identically, so it is counted on its own axis and logged ONCE with
+    the total and the operator action. Folding it into `skipped` is what let 137 identical
+    per-item warnings hide "the account has no money" for 38 days — the run summary read
+    `{"fetched": 137, "silvered": 0, "skipped": 137}`, which is indistinguishable from a bad
+    prompt or a flaky provider.
+    """
+    repo, store = FakeRepo(), FakeRawStore()
+
+    class _Broke(Dissector):
+        def dissect(self, jd_text, metadata):
+            raise LlmBillingError("402 Payment Required: Insufficient Balance")
+
+    with caplog.at_level("WARNING"):
+        summary = ingest(
+            _spec(), run_id="r", source_adapter=FakeSource([_job("a"), _job("b")]),
+            raw_store=store, repo=repo, dissector=_Broke(FakeLlm()),
+        )
+
+    assert summary == {
+        "fetched": 2, "bronzed": 2, "silvered": 0, "skipped": 0, "already": 0,
+        "deferred": 0, "billing_blocked": 2,
+    }
+    # exactly one line for two blocked postings, and it names the fix
+    billing_lines = [r for r in caplog.records if "OUT OF CREDIT" in r.getMessage()]
+    assert len(billing_lines) == 1
+    assert "Top up" in billing_lines[0].getMessage()
+
+
+def test_ingest_billing_failure_does_not_crash_the_run():
+    # negative twin: the run still returns a summary (isolated, not run-fatal) — the pipeline
+    # keeps its "one bad provider never kills the run" contract.
+    repo, store = FakeRepo(), FakeRawStore()
+
+    class _Broke(Dissector):
+        def dissect(self, jd_text, metadata):
+            raise LlmBillingError("402")
+
+    summary = ingest(
+        _spec(), run_id="r", source_adapter=FakeSource([_job("a")]),
+        raw_store=store, repo=repo, dissector=_Broke(FakeLlm()),
+    )
+    assert summary["billing_blocked"] == 1
+    assert repo.postings == {}  # nothing landed in silver

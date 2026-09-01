@@ -200,13 +200,38 @@ class FakeGoldRepo:
     status transitions tracked."""
 
     def __init__(self, silver: list[tuple[str, DissectedPosting]]) -> None:
-        self._silver = silver
+        self._postings: dict[str, DissectedPosting] = dict(silver)
         self.clusters: dict[str, dict] = {}
         self.posting_cluster: dict[str, str] = {}
         self.status: dict[str, str] = {pid: "silver" for pid, _ in silver}
+        # migration 0007: the decision context that produced status='rejected'.
+        self.gold_filter_hash: dict[str, str | None] = {pid: None for pid, _ in silver}
+        # Every read's returned ids, in call order — lets a test assert what the SECOND run
+        # even looked at, which is the whole point of the rejection stamp.
+        self.reads: list[list[str]] = []
 
-    def get_silver_postings(self, *, limit=None):
-        return list(self._silver)
+    def get_silver_postings(self, *, limit=None, filter_hash=None):
+        """Mirrors PostgresRepository: unjudged rows always, plus rejected rows whose stamp
+        differs from the current context (a NULL stamp counts as differing)."""
+        out = []
+        for pid, posting in self._postings.items():
+            status = self.status[pid]
+            if status == "silver":
+                out.append((pid, posting))
+            elif (
+                filter_hash is not None
+                and status == "rejected"
+                and self.gold_filter_hash.get(pid) != filter_hash
+            ):
+                out.append((pid, posting))
+        if limit is not None:
+            out = out[:limit]
+        self.reads.append([pid for pid, _ in out])
+        return out
+
+    def mark_gold_rejected(self, posting_id, *, filter_hash):
+        self.status[posting_id] = "rejected"
+        self.gold_filter_hash[posting_id] = filter_hash
 
     def upsert_cluster(self, *, cluster_id, representative_posting_id, posting_count=1):
         self.clusters.setdefault(
@@ -271,3 +296,88 @@ def test_apply_gold_filter_empty_silver_is_zeroes():
     repo = FakeGoldRepo([])
     summary = apply_gold_filter(_spec(), _profile(), strategy=_StubStrategy({}), repo=repo)
     assert summary == {"silver": 0, "gold": 0, "dropped": 0}
+
+
+# ---------------------------------------------------- rejection lineage (migration 0007)
+def test_rejected_posting_is_stamped_and_not_re_read_under_the_same_config():
+    """The point of the stamp: a settled rejection stays out of the next run's candidate set.
+
+    Without this assertion the whole optimisation can be a no-op that still passes every other
+    test — the read would return everything, the filter would agree with itself, and the only
+    symptom would be the 1 MB crash coming back at scale (ERR-010).
+    """
+    silver = [("p-fit", _posting(title="Data Engineer")), ("p-drop", _posting(title="Nurse"))]
+    repo = FakeGoldRepo(silver)
+    strategy = _StubStrategy({"Data Engineer": True, "Nurse": False})
+
+    first = apply_gold_filter(
+        _spec(), _profile(), strategy=strategy, repo=repo, filter_hash="hash-A"
+    )
+
+    assert first == {"silver": 2, "gold": 1, "dropped": 1}
+    assert repo.status["p-drop"] == "rejected"
+    assert repo.gold_filter_hash["p-drop"] == "hash-A"
+    assert repo.reads[0] == ["p-fit", "p-drop"]
+
+    # Second run, same config → the rejection is settled and the promoted row has moved on,
+    # so there is nothing left to look at.
+    second = apply_gold_filter(
+        _spec(), _profile(), strategy=strategy, repo=repo, filter_hash="hash-A"
+    )
+    assert second == {"silver": 0, "gold": 0, "dropped": 0}
+    assert repo.reads[1] == []
+
+
+def test_config_change_reopens_the_rejected_backlog():
+    """A changed decision context must re-open every rejection made under the old one.
+
+    This is the behaviour the pre-0007 "non-fits stay silver forever" read provided by
+    accident, and the reason a plain terminal status was rejected in the ADR. It is also the
+    test that fails if someone stamps `compute_profile_hash` instead of `compute_filter_hash`
+    — that hash does not move when `targeting.job_titles` changes.
+    """
+    repo = FakeGoldRepo([("p-nurse", _posting(title="Nurse"))])
+
+    rejecting = _StubStrategy({"Nurse": False})
+    apply_gold_filter(_spec(), _profile(), strategy=rejecting, repo=repo, filter_hash="hash-A")
+    assert repo.status["p-nurse"] == "rejected"
+
+    # The operator widens their targeting; the decision context changes with it.
+    accepting = _StubStrategy({"Nurse": True})
+    summary = apply_gold_filter(
+        _spec(titles=["Nurse"]), _profile(), strategy=accepting, repo=repo,
+        filter_hash="hash-B",
+    )
+
+    assert repo.reads[1] == ["p-nurse"]  # re-opened, not stranded
+    assert summary == {"silver": 1, "gold": 1, "dropped": 0}
+    assert repo.status["p-nurse"] == "gold_candidate"
+
+
+def test_no_filter_hash_keeps_the_pre_0007_behaviour():
+    # negative: without a hash nothing is ever stamped rejected — the legacy shape the
+    # in-memory unit fakes and any pre-0007 caller still rely on.
+    repo = FakeGoldRepo([("p-drop", _posting(title="Nurse"))])
+    summary = apply_gold_filter(
+        _spec(), _profile(), strategy=_StubStrategy({"Nurse": False}), repo=repo
+    )
+    assert summary == {"silver": 1, "gold": 0, "dropped": 1}
+    assert repo.status["p-drop"] == "silver"
+    assert repo.gold_filter_hash["p-drop"] is None
+
+
+def test_fail_open_posting_is_never_stamped_rejected():
+    # negative: a strategy that raises is a verdict we never got. Promoting it (fail-open) is
+    # existing behaviour; the new requirement is that it must NOT be recorded as a decided
+    # rejection, or a transient filter outage would permanently close postings.
+    repo = FakeGoldRepo([("p-1", _posting())])
+
+    class _BoomStrategy:
+        def filter(self, spec, profile, posting):
+            raise FilterError("cannot decide")
+
+    apply_gold_filter(
+        _spec(), _profile(), strategy=_BoomStrategy(), repo=repo, filter_hash="hash-A"
+    )
+    assert repo.status["p-1"] == "gold_candidate"
+    assert repo.gold_filter_hash["p-1"] is None

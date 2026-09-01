@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from jobfetcher.adapters.llm_openai import OpenAICompatLlmClient
+from jobfetcher.handlers.pipeline import _dissect_llm_config
 from jobfetcher.core.dissector import Dissector
 from tests.helpers import load_probe
 
@@ -20,7 +21,7 @@ _ABSENT_TOOLS = {"python", "sql", "spark", "airflow", "kafka", "snowflake", "aws
 
 def test_dissect_real_thin_jd_live(capsys):
     jd_text, meta = load_probe("sample_sa_en.json")
-    out = Dissector(OpenAICompatLlmClient()).dissect(jd_text, meta)
+    out = Dissector(OpenAICompatLlmClient(_dissect_llm_config())).dissect(jd_text, meta)
 
     # VG-a: a valid contract, metadata carried through, provenance recorded.
     assert out.language == "en"
@@ -47,7 +48,7 @@ def test_dissect_detailed_jd_live(capsys):
     yields a non-English JD. The `language` field is still carried from metadata.
     """
     jd_text, meta = load_probe("sample_sa.json")
-    out = Dissector(OpenAICompatLlmClient()).dissect(jd_text, meta)
+    out = Dissector(OpenAICompatLlmClient(_dissect_llm_config())).dissect(jd_text, meta)
     assert out.normalized_title.strip() and out.model
     assert out.skills, "a detailed JD should yield at least some grounded skills"
     assert all(s.evidence.strip() for s in out.skills)  # kept skills carry evidence

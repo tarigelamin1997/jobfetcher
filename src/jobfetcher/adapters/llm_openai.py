@@ -21,9 +21,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from typing import Any
 
 from ..config import LlmConfig
-from ..core.ports import LlmAuthError, LlmError, LlmModelNotFoundError
+from ..core.ports import LlmAuthError, LlmBillingError, LlmError, LlmModelNotFoundError
 
 log = logging.getLogger(__name__)
 
@@ -75,17 +76,25 @@ class OpenAICompatLlmClient:
         return self._api_key
 
     def complete(self, *, system: str, user: str) -> str:
-        body = json.dumps(
-            {
-                "model": self.config.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "temperature": self.config.temperature,
-                "max_tokens": self.config.max_tokens,
-            }
-        ).encode()
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        # Reasoning control (ERR-010 follow-up). Only ONE of these is ever sent: disabling
+        # thinking makes an effort level meaningless, and sending both invites a 400 from a
+        # provider that validates the combination. Both keys are omitted entirely on the
+        # default config, so a non-reasoning OpenAI-compatible host sees the same body it
+        # always did.
+        if not self.config.reasoning:
+            payload["thinking"] = {"type": "disabled"}
+        elif self.config.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.config.reasoning_effort
+        body = json.dumps(payload).encode()
         req = urllib.request.Request(
             f"{self.config.base_url.rstrip('/')}/chat/completions",
             data=body,
@@ -97,9 +106,31 @@ class OpenAICompatLlmClient:
         )
         data = self._request_with_retries(req)
         try:
-            return data["choices"][0]["message"]["content"] or ""
+            choice = data["choices"][0]
+            content = choice["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as e:
             raise LlmError(f"unexpected response shape: {json.dumps(data)[:300]}") from e
+
+        # A truncated completion is NOT a formatting failure — say so (ERR-010 follow-up).
+        # DeepSeek's v4 models are reasoners: `max_tokens` budgets reasoning AND content
+        # together, and reasoning runs first. When it eats the whole budget the API still
+        # returns HTTP 200 with `finish_reason: "length"` and an EMPTY `content`. The old
+        # `content or ""` swallowed that, so it surfaced two layers up as
+        # `no JSON object in model output: ''` — which blames the model's formatting and
+        # sends the caller into a pointless re-prompt, when the actual cause is a token
+        # budget that needs raising. Measured: a real JD at max_tokens=512 burns all 512 on
+        # reasoning and returns nothing; the same call at 4096 returns clean JSON.
+        if choice.get("finish_reason") == "length":
+            usage = data.get("usage") or {}
+            reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            raise LlmError(
+                f"response truncated at max_tokens={self.config.max_tokens} "
+                f"(finish_reason=length, completion_tokens={usage.get('completion_tokens')}"
+                + (f", of which reasoning={reasoning}" if reasoning is not None else "")
+                + f", content_chars={len(content)}) — raise LlmConfig.max_tokens; "
+                "re-prompting at the same budget cannot help"
+            )
+        return content
 
     def _request_with_retries(self, req: urllib.request.Request) -> dict:
         """One HTTP round-trip, retrying ONLY transient failures (429/5xx/connection) with
@@ -125,6 +156,10 @@ class OpenAICompatLlmClient:
                 low = detail.lower()
                 if e.code == 401:
                     raise LlmAuthError(f"401 Unauthorized: {detail}") from e
+                # Checked BEFORE the model-not-found heuristic below, which matches on body
+                # text and could otherwise swallow a 402 whose message mentions a model.
+                if e.code == 402:
+                    raise LlmBillingError(f"402 Payment Required: {detail}") from e
                 if e.code == 404 or ("model" in low and "not" in low):
                     raise LlmModelNotFoundError(f"model '{self.config.model}': {detail}") from e
                 err = LlmError(f"HTTP {e.code}: {detail}")
