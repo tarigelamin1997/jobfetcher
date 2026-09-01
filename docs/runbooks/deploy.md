@@ -92,3 +92,23 @@ review flags, and the migration cost only grows with the data.
 Once the data stops being replaceable this becomes a snapshot → encrypted-copy → restore
 migration instead, which is a different and much longer procedure.
 
+## 6 · Aurora MAJOR version upgrades (the `ignore_changes` caveat)
+
+`terraform/aurora.tf` carries `lifecycle { ignore_changes = [engine_version] }` on both the
+cluster and its instance ([ERR-012](../ledgers/errors.md)). That is what stops Terraform
+fighting AWS's `auto_minor_version_upgrade` — which had it attempting to **downgrade the live
+database on every apply**, blocking a deploy outright.
+
+The cost: **a major upgrade will not apply while it is there.** Minor versions are AWS's and
+need no action. For a major (e.g. 16 → 17):
+
+1. Read the Aurora PostgreSQL major-upgrade notes and take a manual snapshot first — this one
+   is not the throwaway-data path.
+2. Temporarily remove `ignore_changes = [engine_version]` from **both** `aws_rds_cluster.main`
+   and `aws_rds_cluster_instance.main`.
+3. Set the new major in `engine_version`, `terraform plan`, and **read it** — a major upgrade
+   is a real, disruptive operation, not an in-place attribute change.
+4. Apply, verify, then put `ignore_changes` back.
+
+Never leave it removed: without it the next AWS minor patch re-creates ERR-012.
+
