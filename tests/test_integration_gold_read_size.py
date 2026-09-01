@@ -280,9 +280,9 @@ def test_read_returns_every_row_across_page_boundaries(repo, prefix):
     This seeds more rows than one page holds and asserts every one comes back — a loop that
     stops after the first page, or one that never terminates, both fail here.
     """
-    from jobfetcher.adapters.repository_postgres import _SILVER_PAGE_SIZE
+    from jobfetcher.adapters.repository_postgres import _PAGE_SIZE
 
-    n = _SILVER_PAGE_SIZE + 37  # deliberately not a multiple of the page size
+    n = _PAGE_SIZE + 37  # deliberately not a multiple of the page size
     for i in range(n):
         _seed(repo, prefix, f"p{i:04d}")
 
@@ -295,13 +295,70 @@ def test_read_returns_every_row_across_page_boundaries(repo, prefix):
 def test_limit_is_honoured_across_pages(repo, prefix):
     # negative twin: `limit` must still cap the total, not the page — otherwise a caller asking
     # for 10 rows gets a full table walk, which is the failure mode in reverse.
-    from jobfetcher.adapters.repository_postgres import _SILVER_PAGE_SIZE
+    from jobfetcher.adapters.repository_postgres import _PAGE_SIZE
 
-    for i in range(_SILVER_PAGE_SIZE + 10):
+    for i in range(_PAGE_SIZE + 10):
         _seed(repo, prefix, f"p{i:04d}")
 
     # Count the WHOLE result, not the prefix-filtered slice: `limit` is a global cap, and
     # other modules' rows may sort ahead of this test's on a shared database.
     assert len(repo.get_silver_postings(limit=5)) == 5
     # and a limit larger than one page still walks past the boundary
-    assert len(repo.get_silver_postings(limit=_SILVER_PAGE_SIZE + 3)) == _SILVER_PAGE_SIZE + 3
+    assert len(repo.get_silver_postings(limit=_PAGE_SIZE + 3)) == _PAGE_SIZE + 3
+
+
+def _seed_scored(repo, prefix: str, name: str, score: int) -> str:
+    """A fully scored posting: bronze -> silver -> cluster -> gold -> score -> status='scored'."""
+    posting_id = _seed(repo, prefix, name)
+    repo.upsert_cluster(cluster_id=posting_id, representative_posting_id=posting_id)
+    repo.set_posting_cluster(posting_id, posting_id)
+    repo.save_score(
+        cluster_id=posting_id, score=score, fit_category="strong_fit",
+        strengths=["a"], gaps=["b"], strategic_assessment="x",
+        poster_type="direct", legitimacy_verified=True,
+        scoring_model="test", profile_hash="h", run_id="seed",
+    )
+    repo.mark_scored(posting_id)
+    return posting_id
+
+
+def test_gold_candidates_read_paginates(repo, prefix):
+    """The read that failed one stage after the silver read was fixed.
+
+    With silver paginated, the gold filter promoted 781 candidates and `get_gold_candidates`
+    then blew the same 1 MB cap. Every bulk read shares the root cause, so every bulk read is
+    paginated — this pins the one that actually bit.
+    """
+    from jobfetcher.adapters.repository_postgres import _PAGE_SIZE
+
+    n = _PAGE_SIZE + 23
+    for i in range(n):
+        pid = _seed(repo, prefix, f"g{i:04d}")
+        repo.upsert_cluster(cluster_id=pid, representative_posting_id=pid)
+        repo.set_posting_cluster(pid, pid)
+        repo.mark_gold_candidate(pid)
+
+    got = [pid for pid, _cid, _d in repo.get_gold_candidates() if pid.startswith(prefix)]
+    assert len(got) == n
+    assert len(set(got)) == n
+    assert got == sorted(got)
+
+
+def test_all_scored_keeps_score_desc_ordering_across_pages(repo, prefix):
+    """Ordering moved from SQL into Python when the read became keyset-paginated.
+
+    A keyset must walk a unique key, so `ORDER BY score DESC` could not survive in the query.
+    If the Python re-sort were dropped or written wrong, the digest and the full-list report
+    would silently reorder — no error, just a worse product. Scores here are deliberately
+    interleaved so posting_id order and score order disagree.
+    """
+    from jobfetcher.adapters.repository_postgres import _PAGE_SIZE
+
+    n = _PAGE_SIZE + 15
+    for i in range(n):
+        _seed_scored(repo, prefix, f"s{i:04d}", score=(i * 7) % 100)
+
+    mine = [it for it in repo.get_all_scored() if it.posting_id.startswith(prefix)]
+    assert len(mine) == n
+    scores = [it.score for it in mine]
+    assert scores == sorted(scores, reverse=True), "score DESC ordering was lost"
