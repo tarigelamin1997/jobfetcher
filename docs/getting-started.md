@@ -105,7 +105,7 @@ recipient_email = "<you@example.com>"         # verified in step 5 (sandbox need
 ```bash
 python scripts/build_lambda.py                 # package the Lambda (vendors Linux wheels; no Docker)
 terraform -chdir=terraform init                # connects to YOUR S3 backend
-terraform -chdir=terraform apply               # ~21 resources; also SEEDS your config/*.local.yml → S3
+terraform -chdir=terraform apply               # ~32 resources; also SEEDS your config/*.local.yml → S3
 
 # migrate the schema on Aurora, over the Data API. Grab the ARNs terraform just created:
 aws lambda get-function-configuration --function-name jobfetcher-dev-pipeline --region us-east-1 \

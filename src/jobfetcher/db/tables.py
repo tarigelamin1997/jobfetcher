@@ -78,7 +78,12 @@ posting = Table(
     Column("match_status", Text),  # confirmed | suspected | rejected_by_user
     Column("match_confidence", Float),
     Column("fetched_at", _TS),
-    Column("status", Text),  # silver | gold_candidate | scored
+    Column("status", Text),  # silver | gold_candidate | scored | rejected
+    # The gold-filter decision context that produced status='rejected' (migration 0007) —
+    # sha256 over profile + spec + strategy name. NULL on any row the gold filter has not
+    # judged. Read back by get_silver_postings to re-open only the rejections a *changed*
+    # configuration would decide differently.
+    Column("gold_filter_hash", Text),
 )
 
 

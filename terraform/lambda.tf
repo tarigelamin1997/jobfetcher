@@ -60,7 +60,7 @@ resource "aws_lambda_function" "pipeline" {
       PROFILE_PATH       = "s3://${aws_s3_bucket.data.id}/${var.profile_key}"
       # Update per migration — the {"mode":"smoke"} gate pins deployed code to the migrated
       # schema: post-apply it compares the DB's alembic_version to this (200 match / 400 not).
-      ALEMBIC_HEAD = "0006_subscores"
+      ALEMBIC_HEAD = "0007_gold_filter_hash"
       # Telemetry verbosity for the `jobfetcher` package logger (ERR-009 rider) — the code
       # defaults to INFO when unset; this entry just makes the knob IaC-visible.
       LOG_LEVEL = "INFO"

@@ -67,6 +67,17 @@ class LlmModelNotFoundError(LlmError):
     """The model id is unknown to the provider (HTTP 404 / 'model not found')."""
 
 
+class LlmBillingError(LlmError):
+    """The provider account cannot pay for the call (HTTP 402 — 'Insufficient Balance').
+
+    Distinct from every other LLM failure because the operator response is distinct: no
+    retry, no prompt change, no code change will help — someone has to top up the account.
+    It is also the one LLM failure that hits EVERY item in a run identically, so the pipeline
+    counts it separately rather than emitting one indistinguishable warning per posting
+    (ERR-010: 137 identical per-item warnings buried the fact that the account was empty).
+    """
+
+
 class LlmClient(Protocol):
     """A provider-agnostic single-turn chat completion.
 
@@ -199,14 +210,32 @@ class Repository(Protocol):
         ...
 
     def get_silver_postings(
-        self, *, limit: int | None = None
+        self, *, limit: int | None = None, filter_hash: str | None = None
     ) -> "list[tuple[str, DissectedPosting]]":
-        """Read postings with `status='silver'` as `(posting_id, DissectedPosting)` pairs —
-        the id is needed to mark/cluster each. The gold step's input set."""
+        """The gold step's input set, as `(posting_id, DissectedPosting)` pairs — the id is
+        needed to mark/cluster each.
+
+        Without `filter_hash`: every `status='silver'` posting.
+
+        With `filter_hash` (the current gold-filter decision context, migration 0007): also
+        every `status='rejected'` posting stamped with a *different* hash — the ones a
+        previous configuration rejected and the current one has not judged. A NULL stamp
+        counts as unjudged. Implementations MUST return a superset of "never judged under
+        this context"; narrowing further would silently strand a posting the filter would
+        now accept, with no error to notice.
+        """
         ...
 
     def mark_gold_candidate(self, posting_id: str) -> None:
         """Promote a posting: set `posting.status = 'gold_candidate'`."""
+        ...
+
+    def mark_gold_rejected(self, posting_id: str, *, filter_hash: str) -> None:
+        """Terminal-state a posting the gold filter did not promote: set
+        `posting.status = 'rejected'` and stamp `gold_filter_hash` with the context that
+        decided it (migration 0007). The stamp is what `get_silver_postings` reads back to
+        tell a settled rejection from one made under a configuration that has since changed.
+        """
         ...
 
     def upsert_cluster(

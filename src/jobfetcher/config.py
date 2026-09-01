@@ -3,6 +3,7 @@ provider or model is a config change, never a rewrite (ADR-0012 / ADR-0017)."""
 from __future__ import annotations
 
 import os
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +24,21 @@ class LlmConfig(BaseModel):
     aws_region: str = "us-east-1"
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, ge=1)
+
+    # --- Reasoning control (ERR-010 follow-up) --------------------------------------------
+    # DeepSeek's v4 models are reasoners: `max_tokens` budgets reasoning AND content together,
+    # and reasoning runs FIRST. Exhaust it and the API returns HTTP 200 with an EMPTY content
+    # — which is how a whole run can silently produce nothing. Measured on a real 5 KB JD:
+    #   dissect, reasoning off        →   425 tokens total, clean JSON
+    #   score,   effort=low           → 1,224 tokens (886 reasoning + ~338 content)
+    #   score,   effort default(high) → 4,096 tokens, ALL reasoning, content EMPTY
+    # Note reasoning expands to fill the budget you give it (effort=low used 886 tokens at
+    # max_tokens=4096 but 1,412 at 6,144), so a bigger budget is not a free safety margin.
+    #
+    # `reasoning=False` sends `thinking: {"type": "disabled"}` — right for extraction, which
+    # only fills a fixed JSON schema. Keep it on for judgment work like scoring.
+    reasoning: bool = True
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
     timeout_s: float = Field(default=60.0, gt=0.0)
     # Transient-failure policy (ERR-006): retries apply ONLY to 429/5xx/connection errors —
     # auth (401) and model-not-found (404) always fail fast. 0 disables retrying.

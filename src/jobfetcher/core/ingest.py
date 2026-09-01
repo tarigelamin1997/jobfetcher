@@ -20,7 +20,7 @@ from .clean import clean
 from .dissector import DissectionError
 from .fingerprint import fingerprint
 from .notifier import render_digest
-from .ports import FilterError, LlmError, NotifierError, RepositoryError
+from .ports import FilterError, LlmBillingError, LlmError, NotifierError, RepositoryError
 from .profile import Profile
 from .report import render_full_list
 from .scorer import ScorerError, subscores_payload
@@ -84,6 +84,12 @@ _REPORT_URL_EXPIRY_S = 12 * 3600
 # Sentinel returned by a worker whose task started after the deadline: the item was neither
 # processed nor failed — it is deferred to the next (idempotent) run.
 _DEFERRED = object()
+
+# Sentinel for "the LLM account cannot pay" (HTTP 402). Distinct from a generic dissection
+# failure because it is not per-item at all: it hits every posting identically and no retry
+# or re-run fixes it. Counted and logged ONCE (ERR-010 — 137 identical per-item warnings hid
+# the fact that the account was simply empty, for 38 days).
+_BILLING_BLOCKED = object()
 
 
 class Deadline:
@@ -196,10 +202,11 @@ def _prepare_silver(
     language: str = "en",
     query_country: str | None = None,
     pipeline_version: str = "v0",
-) -> tuple[Any, dict[str, Any]] | None:
+) -> "tuple[Any, dict[str, Any]] | object | None":
     """The pure-LLM half of `land_silver` — map → clean → fingerprint → dissect, **no DB**
     (H-2: this is what runs on the worker threads). Returns `(dissected, save_kwargs)` for
-    the main-thread `repo.save_posting`, or `None` on an isolated dissection failure."""
+    the main-thread `repo.save_posting`, `None` on an isolated dissection failure, or
+    `_BILLING_BLOCKED` when the LLM account cannot pay (run-wide, counted once)."""
     jd_text, meta = jd_and_metadata_from_jsearch(
         raw_payload, language=language, query_country=query_country
     )
@@ -219,6 +226,10 @@ def _prepare_silver(
     # (e.g. a 503 that outlived the client's retries) skips THIS posting, never the run.
     try:
         dissected = dissector.dissect(jd, meta)
+    except LlmBillingError:
+        # Deliberately NOT logged per item: this failure is identical for every posting in the
+        # run. The caller counts the sentinel and logs one line with the total.
+        return _BILLING_BLOCKED
     except (DissectionError, LlmError) as exc:
         log.warning("dissection failed for %s (run_id=%s): %s", bronze_id, run_id, exc)
         return None
@@ -274,6 +285,7 @@ def ingest(
     skipped = 0
     already = 0
     deferred = 0
+    billing_blocked = 0
 
     # Main-thread pass: partition into already-silvered vs to-dissect (repo reads stay here).
     work: list[tuple[str, dict[str, Any], str | None]] = []
@@ -312,6 +324,8 @@ def ingest(
                 outcome = fut.result()
                 if outcome is _DEFERRED:
                     deferred += 1
+                elif outcome is _BILLING_BLOCKED:
+                    billing_blocked += 1
                 elif outcome is None:
                     skipped += 1
                 else:
@@ -332,6 +346,14 @@ def ingest(
             run_id,
             deferred,
         )
+    if billing_blocked:
+        # ONE line, at ERROR, naming the operator action. Nothing else in the run can fix it.
+        log.error(
+            "LLM ACCOUNT OUT OF CREDIT (run_id=%s): %d dissection(s) blocked by HTTP 402. "
+            "Top up the provider account — no retry or re-run will clear this.",
+            run_id,
+            billing_blocked,
+        )
 
     return {
         "fetched": len(landed),
@@ -340,6 +362,7 @@ def ingest(
         "skipped": skipped,
         "already": already,
         "deferred": deferred,
+        "billing_blocked": billing_blocked,
     }
 
 
@@ -351,21 +374,36 @@ def apply_gold_filter(
     repo: "Repository",
     source: str = "jsearch",  # noqa: ARG001 — accepted for symmetry/future multi-source; unused in v0
     audit_store: "S3AuditStore | None" = None,
+    filter_hash: str | None = None,
 ) -> dict[str, int]:
-    """Step-4b gold filter: load every silver posting → ask the `strategy` if it is a likely
+    """Step-4b gold filter: load the unjudged postings → ask the `strategy` if each is a likely
     fit → for each fit, create its trivial **1:1 cluster** (cluster_id == posting_id), attach
-    it (`posting.cluster_id`), and promote it (`status='gold_candidate'`). Non-fits stay silver.
+    it (`posting.cluster_id`), and promote it (`status='gold_candidate'`).
+
+    **Rejection lineage** (migration 0007, ERR-010): a non-fit is terminal-stated
+    `status='rejected'` and stamped with `filter_hash` — the decision context that rejected
+    it. The next run's candidate set is then "never judged" + "judged under a context that no
+    longer applies", instead of *every posting ever rejected*. Change `targeting.job_titles`
+    and the whole rejected backlog re-opens; leave the config alone and the read stays small.
+
+    Pass `filter_hash=None` to keep the pre-0007 behaviour (read every silver row, leave
+    non-fits silver) — the shape the unit tests with in-memory fakes still use.
 
     **Type-replaceable** (ADR-0015): the caller injects the strategy — `DeterministicFilterStrategy`
-    by default (P1 — no redundant LLM at v0 volume), `LlmFilterStrategy` selectable.
+    by default (P1 — no redundant LLM at v0 volume), `LlmFilterStrategy` selectable. Note the
+    hash caches a *sample*, not a verdict, when the strategy is the (non-deterministic) LLM
+    one; acceptable while deterministic is the default and the only strategy used in
+    production, but it is a real limitation, not an oversight.
 
     **Fail-open** (build-plan Step 4b FAILURE-MODE): a `FilterStrategy` that raises `FilterError`
     is treated as INCLUDE — a real fit must never be dropped before scoring; over-inclusion is
     cheap (the Scorer filters), a dropped fit is invisible. The fail-open count is logged.
+    A failed-open posting is promoted, so it is never stamped as rejected — the next run
+    re-judges it, which is the correct behaviour for a verdict we never actually got.
 
     Returns `{silver, gold, dropped}` (silver = candidates examined; gold + dropped partition it).
     """
-    candidates = repo.get_silver_postings()
+    candidates = repo.get_silver_postings(filter_hash=filter_hash)
     gold = 0
     dropped = 0
     failed_open = 0
@@ -393,6 +431,8 @@ def apply_gold_filter(
 
         if not likely_fit:
             dropped += 1
+            if filter_hash is not None:
+                repo.mark_gold_rejected(posting_id, filter_hash=filter_hash)
             continue
 
         # v0: a trivial 1:1 cluster (cluster_id == posting_id); real clustering is M2.

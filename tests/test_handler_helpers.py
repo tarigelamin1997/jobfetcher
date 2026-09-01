@@ -13,6 +13,7 @@ from jobfetcher.handlers.pipeline import (
     _DEFAULT_PROFILE_PATH,
     _DEFAULT_SEARCH_CONFIG_PATH,
     _EXPECTED_MIGRATION_HEAD,
+    compute_filter_hash,
     compute_profile_hash,
     configure_log_level,
     resolve_db_url,
@@ -262,7 +263,7 @@ def test_configure_log_level_junk_falls_back_to_info(pkg_logger, caplog):
 
 
 # --------------------------------------------------------------------------- profile hash (0004)
-def _hash_inputs(threshold=60, skill="Python"):
+def _hash_inputs(threshold=60, skill="Python", titles=None, avoid=None):
     from jobfetcher.core.profile import Profile
     from jobfetcher.core.search_spec import SearchSpec
 
@@ -270,11 +271,12 @@ def _hash_inputs(threshold=60, skill="Python"):
         "name": "Tester",
         "skills": [{"name": skill}],
         "preferences": {"target_titles": ["Data Engineer"], "target_locations": ["Riyadh"],
-                        "avoid_keywords": []},
+                        "avoid_keywords": avoid or []},
     })
     spec = SearchSpec.model_validate({
         "source": "jsearch", "secret_name": "s", "aws_region": "us-east-1",
-        "targeting": {"job_titles": ["de"], "countries": ["sa"], "cities": [], "states": []},
+        "targeting": {"job_titles": titles or ["de"], "countries": ["sa"], "cities": [],
+                      "states": []},
         "date_posted": "week", "language": "en", "employment_types": [],
         "remote": "off", "threshold": threshold, "hard_floor": 50, "near_miss_band": 10,
         "reassess_max_age_days": 45, "digest_max_age_days": 90,
@@ -301,3 +303,99 @@ def test_compute_profile_hash_changes_when_content_changes():
     p_spark, _ = _hash_inputs(skill="Spark")
     assert compute_profile_hash(p, stricter) != base
     assert compute_profile_hash(p_spark, s) != base
+
+
+# ------------------------------------------------- gold-filter hash (migration 0007, ERR-010)
+def test_compute_filter_hash_is_deterministic():
+    p, s = _hash_inputs()
+    h1 = compute_filter_hash(p, s, "DeterministicFilterStrategy")
+    h2 = compute_filter_hash(p, s, "DeterministicFilterStrategy")
+    assert h1 == h2
+    assert len(h1) == 64
+    int(h1, 16)  # raises if it isn't hex
+
+
+def test_filter_hash_moves_on_a_targeting_change_that_profile_hash_cannot_see():
+    """THE regression guard for the trap this design invites.
+
+    `compute_profile_hash` covers what SCORING judges against; it does not include
+    `spec.targeting`. The gold filter's verdict depends on `targeting.job_titles`
+    (`filter_deterministic.py`). If a rejection were stamped with the scoring hash, editing
+    your target titles — the single most likely config change — would leave the stamp
+    unchanged, so every posting rejected under the old titles would stay closed forever.
+    Silent and permanent: no error, just jobs never looked at again.
+
+    So this asserts BOTH halves: the profile hash genuinely cannot see the change (which is
+    why reusing it is tempting and wrong), and the filter hash can.
+    """
+    p, base_spec = _hash_inputs()
+    _, widened_spec = _hash_inputs(titles=["de", "analytics engineer"])
+
+    assert compute_profile_hash(p, widened_spec) == compute_profile_hash(p, base_spec)
+
+    assert compute_filter_hash(p, widened_spec, "DeterministicFilterStrategy") != (
+        compute_filter_hash(p, base_spec, "DeterministicFilterStrategy")
+    )
+
+
+def test_filter_hash_moves_on_an_avoid_keyword_change():
+    # the other filter input that lives on the PROFILE side (`_hits_avoid_keyword`)
+    p_base, s = _hash_inputs()
+    p_avoid, _ = _hash_inputs(avoid=["internship"])
+    assert compute_filter_hash(p_avoid, s, "DeterministicFilterStrategy") != (
+        compute_filter_hash(p_base, s, "DeterministicFilterStrategy")
+    )
+
+
+def test_filter_hash_moves_on_a_strategy_swap():
+    # negative twin: same profile + same spec, different strategy → a different context.
+    # Swapping $GOLD_FILTER_STRATEGY changes verdicts, so it must re-open the backlog.
+    p, s = _hash_inputs()
+    assert compute_filter_hash(p, s, "LlmFilterStrategy") != (
+        compute_filter_hash(p, s, "DeterministicFilterStrategy")
+    )
+
+
+# --------------------------------------- per-task LLM budgets (ERR-010 follow-up, measured)
+def test_dissect_config_disables_reasoning_with_a_small_budget():
+    from jobfetcher.handlers.pipeline import _DISSECT_MODEL, _dissect_llm_config
+
+    cfg = _dissect_llm_config()
+    assert cfg.model == _DISSECT_MODEL
+    assert cfg.reasoning is False          # extraction fills a fixed schema — nothing to reason about
+    assert cfg.reasoning_effort is None
+    assert cfg.max_tokens == 2048          # ~5x the measured 425-token need
+
+
+def test_score_config_keeps_reasoning_on_at_high_effort():
+    from jobfetcher.handlers.pipeline import _SCORE_MODEL, _score_llm_config
+
+    cfg = _score_llm_config()
+    assert cfg.model == _SCORE_MODEL
+    assert cfg.reasoning is True            # scoring is judgment — and v0.11.0 was calibrated on it
+    assert cfg.reasoning_effort == "high"   # postings word the same role very differently
+    assert cfg.max_tokens == 6144           # ~2.6x the observed 2,348-token ceiling
+
+
+def test_the_two_stages_do_not_share_a_budget():
+    """negative twin: a single shared LlmConfig is what let one stage's needs silently set the
+    other's. Extraction and scoring have different shapes and must stay separately tuned."""
+    from jobfetcher.handlers.pipeline import _dissect_llm_config, _score_llm_config
+
+    dissect, score = _dissect_llm_config(), _score_llm_config()
+    assert dissect.model != score.model
+    assert dissect.reasoning != score.reasoning
+    assert dissect.max_tokens != score.max_tokens
+
+
+def test_score_effort_is_set_explicitly_not_left_to_the_default():
+    """ERR-011's actual root cause, in one assertion.
+
+    Omitting `reasoning_effort` does not select a sensible default — it leaves reasoning
+    UNCAPPED, which is what burned all 4,096 tokens and returned an empty completion for a
+    month. An explicit level is the bound. This fails if anyone "simplifies" by dropping the
+    parameter, which looks harmless and is not.
+    """
+    from jobfetcher.handlers.pipeline import _score_llm_config
+
+    assert _score_llm_config().reasoning_effort is not None

@@ -75,4 +75,64 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 ---
 
+---
+
+## B-5 · A daily alarm is not an alarm — nothing escalates a *persistent* failure ⚠️
+
+**Logged:** 2026-09-01, from [ERR-010](errors.md). **Status:** open — the real residual gap from the 38-day outage. Not built.
+
+**What.** The `pipeline-returned-500` alarm ([INV-002](../investigations/INV-002-silent-500-alarm/README.md)) worked exactly as designed: it fired on **all 38** days of the outage and SNS delivered **two emails per day** (ALARM + OK) to the operator's inbox — confirmed in Gmail. The pipeline still sat dead for 38 days.
+
+**Why it matters (this is the uncomfortable one).** Detection was never the gap, so *adding another alarm is treating the wrong failure.* An alarm that fires every single morning becomes indistinguishable from the product it is reporting the absence of — and in this case literally so: the daily SNS email *replaced* the daily digest email in the inbox, at roughly the same hour. Every gate this project has fires at **build** time (start/review/close-step, Investigator → Surgeon → Examiner). Nothing fires at **use** time.
+
+**So-what (design space — nothing chosen).** (a) **Escalate on persistence, not occurrence** — a second alarm on "N consecutive days in ALARM" routed differently (the CloudWatch-native shape is an `M out of N` datapoints alarm on the same metric). (b) **Alarm on the absence of the *product*, not the presence of an error** — SES `Send == 0` over 24h is the one signal that means "the tool did not do its job", whatever the cause; it would have caught both this outage *and* a run that silently succeeds while finding nothing. (c) **Make the OK email stop** — the `ok_actions` half doubles the volume and carries no information on a chronic failure. (d) Accept it and rely on noticing the missing digest — which is what actually happened, 38 days late.
+
+**Connections:** [ERR-010](errors.md) (the incident) · [INV-002](../investigations/INV-002-silent-500-alarm/README.md) (the alarm that worked) · [ADR-0029](../adr/0029-ops-hardening.md) (the two original alarms) · the "zero-results run" blind spot, which (b) would also close.
+
+---
+
+## B-6 · Four more unbounded reads share the 1 MB ceiling
+
+**Logged:** 2026-09-01, from [ERR-010](errors.md). **Status:** open, measured, not urgent. Not built.
+
+**What.** [ADR-0036](../adr/0036-gold-filter-rejection-lineage.md) fixed `get_silver_postings` and `get_gold_candidates`. Three unbounded `.all()` reads remain behind the same Data API cap: `get_scored_for_reassess`, `get_scored_shortlist`, and `get_all_scored` — the last powering the v0.10.0 full-list report and selecting wide LLM prose (`strengths`, `gaps`, `strategic_assessment`).
+
+**Measured 2026-08-31 on the live table:** `scored` = **401 rows / 834 kB**, of which **274 kB** is prose. Not at the wall; approaching it. `get_scored_shortlist` and `get_all_scored` are also ~150 lines of duplicated join, so a fix should probably parameterise one builder rather than patch two.
+
+**Why it matters.** The same failure, on a slower fuse, in the path that produces the digest. `get_all_scored` is the one to watch — it grows with every scored posting and never sheds rows.
+
+**So-what.** The column-projection pattern from ADR-0036 transfers directly; the `max_age_days` bound already exists on both and is simply not always passed. The interesting question is whether the shortlist split (currently: pull every scored row, partition by threshold in a Python loop) belongs in SQL.
+
+**Connections:** [ERR-010](errors.md) · [ADR-0036](../adr/0036-gold-filter-rejection-lineage.md) · [ADR-0030](../adr/0030-reachable-full-list-from-digest.md) (the report path).
+
+---
+
+## B-7 · `ALEMBIC_HEAD` lives in three places; the staleness test guards two
+
+**Logged:** 2026-09-01, found while shipping migration 0007. **Status:** open, small. Not built.
+
+**What.** The migration head is written in `handlers/pipeline.py` (`_EXPECTED_MIGRATION_HEAD`), in `terraform/lambda.tf` (the `ALEMBIC_HEAD` env var), and implicitly in `migrations/versions/`. `test_expected_migration_head_matches_migrations_directory` pins the first against the third — but the **env var overrides the constant at runtime**, so a stale `lambda.tf` sails past the unit test and the smoke gate then validates against the wrong expected head. The gate the test protects is bypassed by the value the test does not check.
+
+**Why it matters.** The smoke gate exists to prove the deployed code matches the migrated schema. This is the one way it can pass while being wrong. [The runbook](../runbooks/deploy.md) says to update both by hand — which is exactly the coordination the test was written to stop relying on.
+
+**So-what.** Cheapest fix: extend the existing test to parse `terraform/lambda.tf` and assert its `ALEMBIC_HEAD` equals the real head. Alternative: drop the env var and let the constant be the single source (loses the ability to override without a rebuild — which is why it exists).
+
+**Connections:** [ADR-0029](../adr/0029-ops-hardening.md) (the smoke gate) · [ADR-0036](../adr/0036-gold-filter-rejection-lineage.md) (surfaced it).
+
+---
+
+## B-8 · The tree is 262 lint errors behind a modern ruff (unpinned tool drift)
+
+**Logged:** 2026-09-01, when PR #36's CI went red for reasons unrelated to PR #36. **Status:** open, contained. Not built.
+
+**What.** `pyproject.toml` floored `ruff>=0.4` while `.pre-commit-config.yaml` pinned `v0.6.9`, so CI linted with whatever shipped most recently. Ruff **0.16.5** broadened its *default* rule set — `UP037`/`UP007`/`UP017`, `I001`, `RUF100`, `BLE001`, `DTZ011`, `TRY004`, `EXE001` — and a green `main` became **262 errors with no code change**. Measured on the day: main 262, PR branch 272 (so ~10 attributable to the branch, the rest inherited).
+
+**Fixed for now by pinning** `ruff==0.6.9` to match the pre-commit hook, so local and CI cannot disagree. That closes the reproducibility hole; it does **not** address the 262.
+
+**Why it matters.** Two things, and the second is the interesting one. (a) `terraform/providers.tf` states *"reproducibility is the portfolio value"* — and the providers are pinned via `.terraform.lock.hcl` while the Python toolchain was not, which is the sharpest internal inconsistency in the repo. (b) Most of the 262 are genuinely worth fixing: `I001` import sorting, `UP007`/`UP037` modern annotations, `DTZ011` naive `date.today()`, and — pointedly — **`BLE001` blind `except Exception`**, which the codebase already annotates with `# noqa: BLE001` in ~13 places *believing the rule was enforced*. It never was: with only the old default `E4/E7/E9/F` enabled, every one of those `noqa` comments is decorative, and the newer ruff flags them as `RUF100` unused. The project has been writing suppressions for a rule it does not run.
+
+**So-what.** Pick a target ruff, adopt an explicit `[tool.ruff.lint] select` (the real fix — never rely on a linter's *defaults*, which are a moving target by design), run `--fix` for the mechanical 245, and hand-review the rest. Pair it with the long-deferred `ruff format` decision ([procedure-registry](procedure-registry.md) still carries it as `Deferred` with no owning stage, which that ledger's own invariant calls a bug). No dependency lockfile exists either — same root cause, bigger scope.
+
+**Connections:** [ERR-010](errors.md) / [ERR-011](errors.md) (found during the same close-out) · `.pre-commit-config.yaml` · [procedure-registry](procedure-registry.md) (`ruff-format` deferred).
+
 > **How this feeds the roadmap:** when the current program closes and P2 reopens, these entries are ranked (leverage = capability ÷ complexity) alongside the [roadmap](../03-roadmap.md) candidates (M2 dedup, M3 Step Functions, near-miss M4, CV tailoring). A graduated entry becomes a labeled release; a rejected one stays here with the reasoning.

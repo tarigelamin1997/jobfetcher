@@ -18,16 +18,19 @@ from pathlib import Path
 import pytest
 
 from jobfetcher.adapters.llm_openai import OpenAICompatLlmClient
-from jobfetcher.config import LlmConfig
 from jobfetcher.core.dissector import Dissector
 from jobfetcher.core.ports import LlmAuthError
 from jobfetcher.core.profile import Profile
 from jobfetcher.core.scorer import Scorer
+from jobfetcher.handlers.pipeline import _dissect_llm_config, _score_llm_config
 from tests.helpers import load_probe
 
 pytestmark = pytest.mark.integration
 
-_SCORING_MODEL = "deepseek-v4-pro"
+# The model AND its token/reasoning budget both come from the production factory — a live
+# test that builds its own LlmConfig proves only that *some* config works (ERR-010: the
+# production budget was the thing that was broken, and this test's private copy hid it).
+_SCORING_MODEL = _score_llm_config().model
 
 
 def _sample_profile() -> Profile:
@@ -39,15 +42,14 @@ def _sample_profile() -> Profile:
 
 
 def _scoring_client() -> OpenAICompatLlmClient:
-    # the scoring model is config (LlmConfig.model), not hardcoded in the Scorer.
-    return OpenAICompatLlmClient(LlmConfig(model=_SCORING_MODEL))
+    return OpenAICompatLlmClient(_score_llm_config())
 
 
 def test_live_score_real_jd(capsys):
     jd_text, meta = load_probe("sample_sa.json")
     profile = _sample_profile()
     try:
-        dissected = Dissector(OpenAICompatLlmClient()).dissect(jd_text, meta)
+        dissected = Dissector(OpenAICompatLlmClient(_dissect_llm_config())).dissect(jd_text, meta)
         result = Scorer(_scoring_client(), model_id=_SCORING_MODEL).score(dissected, profile)
     except LlmAuthError:
         pytest.skip("no resolvable DeepSeek key (env or Secrets Manager) -- live scoring skipped")
@@ -81,7 +83,7 @@ def test_live_score_is_deterministic(capsys):
     # The real invariant we CAN guarantee: the scoring client sends temperature 0.
     assert client.config.temperature == 0.0
     try:
-        dissected = Dissector(OpenAICompatLlmClient()).dissect(jd_text, meta)
+        dissected = Dissector(OpenAICompatLlmClient(_dissect_llm_config())).dissect(jd_text, meta)
         scorer = Scorer(client, model_id=_SCORING_MODEL)
         a = scorer.score(dissected, profile).score
         b = scorer.score(dissected, profile).score
