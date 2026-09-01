@@ -72,10 +72,11 @@ def _dissect_llm_config() -> LlmConfig:
 
     Dissection fills a fixed JSON schema from text that already contains every answer — there
     is nothing to reason about. Measured on a real 5 KB JD: reasoning off costs **425 tokens**
-    and returns clean JSON, against ~2,950 with it on. `max_tokens=2048` is ~5× the observed
-    need, which is headroom for a long posting without being so large that a runaway response
-    goes unnoticed (ERR-010)."""
-    return LlmConfig(model=_DISSECT_MODEL, reasoning=False, max_tokens=2048)
+    and returns clean JSON, against ~2,950 with it on. `max_tokens=8192` after a live run truncated a
+    long posting at 2048 with 8,273 characters already written (ERR-013) — extraction output
+    scales with how many skills a JD lists, and the typical 425 tokens hides a long tail.
+    With reasoning off there is no expand-to-fill risk, so the headroom is free."""
+    return LlmConfig(model=_DISSECT_MODEL, reasoning=False, max_tokens=8192)
 
 
 def _score_llm_config() -> LlmConfig:

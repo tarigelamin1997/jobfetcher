@@ -357,14 +357,14 @@ def test_filter_hash_moves_on_a_strategy_swap():
 
 
 # --------------------------------------- per-task LLM budgets (ERR-010 follow-up, measured)
-def test_dissect_config_disables_reasoning_with_a_small_budget():
+def test_dissect_config_disables_reasoning():
     from jobfetcher.handlers.pipeline import _DISSECT_MODEL, _dissect_llm_config
 
     cfg = _dissect_llm_config()
     assert cfg.model == _DISSECT_MODEL
     assert cfg.reasoning is False          # extraction fills a fixed schema — nothing to reason about
     assert cfg.reasoning_effort is None
-    assert cfg.max_tokens == 2048          # ~5x the measured 425-token need
+    assert cfg.max_tokens == 8192          # a live JD truncated at 2048 with 8,273 chars written
 
 
 def test_score_config_keeps_reasoning_on_at_high_effort():
