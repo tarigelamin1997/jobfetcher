@@ -18,7 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.4", "testcontainers[postgres]>=4", "moto[s3]>=5"]
+# NOTE: `ruff` is PINNED, not floored. It is a linter whose DEFAULT RULE SET grows between
+# releases, so an unpinned floor means CI lints against whatever shipped this week: on
+# 2026-09-01 a green `main` went red with 262 errors — no code had changed, ruff 0.16 had
+# simply enabled UP*/I001/RUF100/BLE001/DTZ*/TRY* by default. The pin matches
+# `.pre-commit-config.yaml` (v0.6.9) so the local hook and CI cannot disagree. Moving it is
+# a deliberate unit (backlog B-8), not a side effect of an unrelated `pip install -U`.
+dev = ["pytest>=7", "pytest-cov>=4", "ruff==0.6.9", "testcontainers[postgres]>=4", "moto[s3]>=5"]
 # Not a runtime dep — the recommended viewer for the `scripts/export.py` snapshot (ADR-0024):
 #   pip install -e '.[query]' && datasette export/jobs.sqlite
 query = ["datasette>=1"]

@@ -68,7 +68,7 @@ def db_url() -> Iterator[str]:
 
 
 @pytest.fixture(scope="module")
-def repo(db_url: str) -> Iterator["object"]:
+def repo(db_url: str) -> Iterator:
     from jobfetcher.adapters.repository_postgres import PostgresRepository
     from jobfetcher.db.engine import make_engine
 

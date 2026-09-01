@@ -119,4 +119,20 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 **Connections:** [ADR-0029](../adr/0029-ops-hardening.md) (the smoke gate) · [ADR-0036](../adr/0036-gold-filter-rejection-lineage.md) (surfaced it).
 
+---
+
+## B-8 · The tree is 262 lint errors behind a modern ruff (unpinned tool drift)
+
+**Logged:** 2026-09-01, when PR #36's CI went red for reasons unrelated to PR #36. **Status:** open, contained. Not built.
+
+**What.** `pyproject.toml` floored `ruff>=0.4` while `.pre-commit-config.yaml` pinned `v0.6.9`, so CI linted with whatever shipped most recently. Ruff **0.16.5** broadened its *default* rule set — `UP037`/`UP007`/`UP017`, `I001`, `RUF100`, `BLE001`, `DTZ011`, `TRY004`, `EXE001` — and a green `main` became **262 errors with no code change**. Measured on the day: main 262, PR branch 272 (so ~10 attributable to the branch, the rest inherited).
+
+**Fixed for now by pinning** `ruff==0.6.9` to match the pre-commit hook, so local and CI cannot disagree. That closes the reproducibility hole; it does **not** address the 262.
+
+**Why it matters.** Two things, and the second is the interesting one. (a) `terraform/providers.tf` states *"reproducibility is the portfolio value"* — and the providers are pinned via `.terraform.lock.hcl` while the Python toolchain was not, which is the sharpest internal inconsistency in the repo. (b) Most of the 262 are genuinely worth fixing: `I001` import sorting, `UP007`/`UP037` modern annotations, `DTZ011` naive `date.today()`, and — pointedly — **`BLE001` blind `except Exception`**, which the codebase already annotates with `# noqa: BLE001` in ~13 places *believing the rule was enforced*. It never was: with only the old default `E4/E7/E9/F` enabled, every one of those `noqa` comments is decorative, and the newer ruff flags them as `RUF100` unused. The project has been writing suppressions for a rule it does not run.
+
+**So-what.** Pick a target ruff, adopt an explicit `[tool.ruff.lint] select` (the real fix — never rely on a linter's *defaults*, which are a moving target by design), run `--fix` for the mechanical 245, and hand-review the rest. Pair it with the long-deferred `ruff format` decision ([procedure-registry](procedure-registry.md) still carries it as `Deferred` with no owning stage, which that ledger's own invariant calls a bug). No dependency lockfile exists either — same root cause, bigger scope.
+
+**Connections:** [ERR-010](errors.md) / [ERR-011](errors.md) (found during the same close-out) · `.pre-commit-config.yaml` · [procedure-registry](procedure-registry.md) (`ruff-format` deferred).
+
 > **How this feeds the roadmap:** when the current program closes and P2 reopens, these entries are ranked (leverage = capability ÷ complexity) alongside the [roadmap](../03-roadmap.md) candidates (M2 dedup, M3 Step Functions, near-miss M4, CV tailoring). A graduated entry becomes a labeled release; a rejected one stays here with the reasoning.
