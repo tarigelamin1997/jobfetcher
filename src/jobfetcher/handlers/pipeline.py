@@ -96,8 +96,16 @@ def _score_llm_config() -> LlmConfig:
 
     `max_tokens=6144` is ~2.6× the observed ceiling. It costs nothing extra — with an explicit
     effort, usage does NOT expand to fill the budget (2,348 tokens at max_tokens=8192, 2,227 at
-    12,288, 1,334 at 16,384); only the uncapped setting did that. So this is pure headroom."""
-    return LlmConfig(model=_SCORE_MODEL, reasoning_effort="high", max_tokens=6144)
+    12,288, 1,334 at 16,384); only the uncapped setting did that. So this is pure headroom.
+
+    `timeout_s=180` because high effort is SLOW. Measured live, the same scoring call took
+    **34.5 s and 68.5 s** on consecutive attempts — the 60 s default timed out mid-flight, and
+    a client timeout is classed transient, so it burned up to four retries on a call that was
+    working perfectly (ERR-013 follow-up). Reasoning effort and request timeout are coupled:
+    raising one without the other converts *slow* into *failed*."""
+    return LlmConfig(
+        model=_SCORE_MODEL, reasoning_effort="high", max_tokens=6144, timeout_s=180.0
+    )
 
 
 _DEFAULT_SEARCH_CONFIG_PATH = "config/search_config.local.yml"
@@ -123,7 +131,13 @@ _EXPECTED_MIGRATION_HEAD = "0007_gold_filter_hash"
 
 # Seconds reserved before the Lambda's hard timeout: in-flight LLM calls + the tail of DB
 # writes + notify must finish inside this margin (H-2 deadline guard).
-_DEADLINE_MARGIN_S = 60.0
+# Sized to the SCORING timeout (180 s): the guard checks `expired` BEFORE starting a call,
+# never during one, so a call begun a moment before the wall runs its full timeout past it.
+# A margin smaller than that timeout means the Lambda can hard-timeout instead of returning
+# a clean `partial` — which is the one behaviour H-2 exists to guarantee.
+# Residual, unchanged: a call that RETRIES can still exceed this (up to 4 x timeout). That
+# tail is bounded only by the Lambda timeout itself; see backlog B-9.
+_DEADLINE_MARGIN_S = 200.0
 
 
 # --------------------------------------------------------------------------- pure helpers
