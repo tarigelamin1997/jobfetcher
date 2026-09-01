@@ -79,13 +79,16 @@ _DISSECTED_COLUMNS = (
     tables.posting.c.dissection_model,
     tables.posting.c.dropped_skill_count,
 )
-# Rows per Data API round-trip for the bulk silver read (ERR-013).
+# Rows per Data API round-trip for EVERY bulk read (ERR-013).
 # Projection alone was NOT enough. The 1 MB cap applies to the SERIALIZED JSON RESPONSE, and
 # `pg_column_size()` — which the first fix was sized on — reports the COMPRESSED ON-DISK size.
 # Measured live on 1,041 silver rows: the `skills` JSONB is 537 kB on disk but **1,291 kB as
 # text**, which is what actually crosses the wire. So the projected read was still ~1.4 MB and
 # still died. 200 rows/page is ~5x under the observed wall (1,000 rows passed, 1,041 failed).
-_SILVER_PAGE_SIZE = 200
+# Applied to every bulk read, not just the one that happened to fail first: the gold read blew
+# up at 781 rows the moment the silver read was fixed. Fixing them one at a time is whack-a-mole
+# on a shared root cause.
+_PAGE_SIZE = 200
 
 _SILVER_COLUMNS = (tables.posting.c.posting_id, *_DISSECTED_COLUMNS)
 _GOLD_COLUMNS = (
@@ -93,6 +96,38 @@ _GOLD_COLUMNS = (
     tables.posting.c.cluster_id,
     *_DISSECTED_COLUMNS,
 )
+
+
+
+def _read_paginated(conn, stmt, key_col, *, key: str = "posting_id", limit: int | None = None):
+    """Execute `stmt` as a KEYSET-paginated walk and return every row.
+
+    The Data API has no cursor and caps each RESPONSE at 1 MB, so any read whose size scales
+    with the table is a time bomb (ERR-010, ERR-013). Walking a unique key in fixed-size pages
+    makes each round-trip bounded by page size instead, whatever the table does.
+
+    The caller's `ORDER BY` is REPLACED by the keyset order — pagination requires ordering on
+    the key being walked. A caller that needs a different output order must sort the returned
+    rows itself; at these row counts that is free, and it keeps the keyset simple and correct
+    (a mixed-direction compound key cannot be expressed as a single row comparison anyway).
+
+    `OFFSET` is deliberately not used: it re-scans on every page, and it silently skips rows if
+    the underlying set shifts mid-walk.
+    """
+    rows: list = []
+    after = ""
+    base = stmt.order_by(None).order_by(key_col)
+    while True:
+        remaining = None if limit is None else limit - len(rows)
+        if remaining is not None and remaining <= 0:
+            break
+        page = _PAGE_SIZE if remaining is None else min(_PAGE_SIZE, remaining)
+        got = conn.execute(base.where(key_col > after).limit(page)).mappings().all()
+        if not got:
+            break
+        rows.extend(got)
+        after = got[-1][key]
+    return rows
 
 
 class PostgresRepository:
@@ -292,34 +327,13 @@ class PostgresRepository:
             where = where | (
                 (p.c.status == "rejected") & p.c.gold_filter_hash.is_distinct_from(filter_hash)
             )
-        # KEYSET pagination (ERR-013): the Data API has no cursor and caps each RESPONSE at
-        # 1 MB, so an unbounded read is unbounded by the size of the table — a time bomb whose
-        # fuse is the growth rate. Walking `posting_id` in pages keeps every round-trip small
-        # regardless of how large the backlog gets, and the caller still receives the whole
-        # set. Ordering is what makes the keyset stable; OFFSET is deliberately not used (it
-        # re-scans, and it skips rows if the set shifts mid-walk).
-        out: list[tuple[str, DissectedPosting]] = []
-        after = ""
+        stmt = select(*_SILVER_COLUMNS).where(where)
         try:
             with self.engine.connect() as conn:
-                while True:
-                    remaining = None if limit is None else limit - len(out)
-                    if remaining is not None and remaining <= 0:
-                        break
-                    page = _SILVER_PAGE_SIZE if remaining is None else min(_SILVER_PAGE_SIZE, remaining)
-                    stmt = (
-                        select(*_SILVER_COLUMNS)
-                        .where(where & (p.c.posting_id > after))
-                        .order_by(p.c.posting_id)
-                        .limit(page)
-                    )
-                    rows = conn.execute(stmt).mappings().all()
-                    if not rows:
-                        break
-                    out.extend((r["posting_id"], _dissected_from_row(r)) for r in rows)
-                    after = rows[-1]["posting_id"]
+                rows = _read_paginated(conn, stmt, p.c.posting_id, limit=limit)
         except SQLAlchemyError as e:
             raise RepositoryError(f"get_silver_postings failed: {e}") from e
+        out = [(r["posting_id"], _dissected_from_row(r)) for r in rows]
         return out
 
     def mark_gold_rejected(self, posting_id: str, *, filter_hash: str) -> None:
@@ -391,14 +405,11 @@ class PostgresRepository:
 
     def get_gold_candidates(self) -> list[tuple[str, str, DissectedPosting]]:
         # Ordered by posting_id so a scoring run is deterministic (re-runs visit the same order).
-        stmt = (
-            select(*_GOLD_COLUMNS)
-            .where(tables.posting.c.status == "gold_candidate")
-            .order_by(tables.posting.c.posting_id)
-        )
+        stmt = select(*_GOLD_COLUMNS).where(tables.posting.c.status == "gold_candidate")
         try:
             with self.engine.connect() as conn:
-                rows = conn.execute(stmt).mappings().all()
+                # Paginated (ERR-013): this read blew the 1 MB cap at 781 candidates.
+                rows = _read_paginated(conn, stmt, tables.posting.c.posting_id)
         except SQLAlchemyError as e:
             raise RepositoryError(f"get_gold_candidates failed: {e}") from e
         return [
@@ -459,10 +470,10 @@ class PostgresRepository:
             joined = joined.outerjoin(b, p.c.bronze_id == b.c.bronze_id)
             # A COALESCE'd NULL is INCLUDED (see docstring) — the OR IS NULL is load-bearing.
             stmt = stmt.where(age_source.is_(None) | (age_source >= cutoff))
-        stmt = stmt.select_from(joined).where(p.c.status == "scored").order_by(p.c.posting_id)
+        stmt = stmt.select_from(joined).where(p.c.status == "scored")
         try:
             with self.engine.connect() as conn:
-                rows = conn.execute(stmt).mappings().all()
+                rows = _read_paginated(conn, stmt, p.c.posting_id)  # ERR-013
         except SQLAlchemyError as e:
             raise RepositoryError(f"get_scored_for_reassess failed: {e}") from e
         return [
@@ -760,7 +771,6 @@ class PostgresRepository:
                     b, p.c.bronze_id == b.c.bronze_id
                 )
             )
-            .order_by(s.c.score.desc())
         )
         if max_age_days is not None and max_age_days > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
@@ -770,9 +780,12 @@ class PostgresRepository:
             joined = joined.where(age_source.is_(None) | (age_source >= cutoff))
         try:
             with self.engine.connect() as conn:
-                rows = conn.execute(joined).mappings().all()
+                # Paginated (ERR-013) on posting_id, then ordered here: the keyset must walk a
+                # unique key, so score-DESC ordering moves to Python. Free at these row counts.
+                rows = _read_paginated(conn, joined, p.c.posting_id)
         except SQLAlchemyError as e:
             raise RepositoryError(f"get_scored_shortlist failed: {e}") from e
+        rows = sorted(rows, key=lambda r: (-(r["score"] or 0), r["posting_id"]))
 
         surfaced: list[ShortlistItem] = []
         below = 0
@@ -860,16 +873,17 @@ class PostgresRepository:
                     b, p.c.bronze_id == b.c.bronze_id
                 )
             )
-            .order_by(s.c.score.desc(), p.c.posting_id)
         )
         if max_age_days is not None and max_age_days > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
             stmt = stmt.where(age_source.is_(None) | (age_source >= cutoff))
         try:
             with self.engine.connect() as conn:
-                rows = conn.execute(stmt).mappings().all()
+                rows = _read_paginated(conn, stmt, p.c.posting_id)  # ERR-013
         except SQLAlchemyError as e:
             raise RepositoryError(f"get_all_scored failed: {e}") from e
+        # score DESC, posting_id ASC — the order the SQL used to produce (see _read_paginated).
+        rows = sorted(rows, key=lambda r: (-(r["score"] or 0), r["posting_id"]))
 
         out: list[ShortlistItem] = []
         for row in rows:

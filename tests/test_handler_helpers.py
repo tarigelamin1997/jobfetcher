@@ -375,6 +375,7 @@ def test_score_config_keeps_reasoning_on_at_high_effort():
     assert cfg.reasoning is True            # scoring is judgment — and v0.11.0 was calibrated on it
     assert cfg.reasoning_effort == "high"   # postings word the same role very differently
     assert cfg.max_tokens == 6144           # ~2.6x the observed 2,348-token ceiling
+    assert cfg.timeout_s == 180.0           # high effort measured 68.5s; the 60s default timed out
 
 
 def test_the_two_stages_do_not_share_a_budget():

@@ -135,4 +135,18 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 **Connections:** [ERR-010](errors.md) / [ERR-011](errors.md) (found during the same close-out) · `.pre-commit-config.yaml` · [procedure-registry](procedure-registry.md) (`ruff-format` deferred).
 
+---
+
+## B-9 · A retrying LLM call can still outlive the deadline guard
+
+**Logged:** 2026-09-01, while sizing the scoring timeout ([ERR-013](errors.md)). **Status:** open, bounded, not urgent. Not built.
+
+**What.** The H-2 deadline guard checks `deadline.expired` **before starting** a call, never during one, so a call begun a moment before the wall runs its full timeout past it. `_DEADLINE_MARGIN_S` is now 200 s to cover a single 180 s scoring call — but the transport retries transients up to `max_retries=3`, so the true worst case is **4 x 180 s plus backoff ≈ 12 minutes** past the wall. Against a 900 s Lambda that is a hard timeout instead of the clean `partial` return H-2 exists to guarantee.
+
+**Why it matters (mildly).** It needs a genuinely transient failure (429/5xx/connection) on a call that starts in the last moments of a run — rare, and the consequence is a lost run rather than lost data, since every stage is idempotent and the `run_log` blocks a double digest. But it silently defeats the one guarantee the deadline guard makes, so it should not stay unnamed.
+
+**So-what.** (a) Give the *retry loop* a deadline, not just the task: pass the `Deadline` into `OpenAICompatLlmClient` and stop retrying once expired — the smallest honest fix. (b) Derive `_DEADLINE_MARGIN_S` from `(max_retries + 1) * timeout_s` instead of hand-tuning it, so the two can never drift apart again. (c) Cap total in-flight time per posting rather than per attempt. (a) is probably right; (b) is a good companion because the coupling is exactly what ERR-013 showed people get wrong.
+
+**Connections:** [ERR-013](errors.md) (raised the timeout that exposed this) · [ADR-0021](../adr/0021-m1-pipeline-hardening.md) (H-2, the deadline guard) · [ADR-0037](../adr/0037-per-task-reasoning-budgets.md) (reasoning effort and timeout are coupled).
+
 > **How this feeds the roadmap:** when the current program closes and P2 reopens, these entries are ranked (leverage = capability ÷ complexity) alongside the [roadmap](../03-roadmap.md) candidates (M2 dedup, M3 Step Functions, near-miss M4, CV tailoring). A graduated entry becomes a labeled release; a rejected one stays here with the reasoning.
