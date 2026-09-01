@@ -51,8 +51,15 @@ resource "aws_rds_cluster" "main" {
   cluster_identifier = "jobfetcher-${var.env}"
   engine             = "aurora-postgresql"
   engine_mode        = "provisioned" # required for Serverless v2
-  engine_version     = "16.6"        # supports Serverless v2 + Data API + scale-to-0 + pgvector
-  database_name      = var.db_name
+  # MAJOR ONLY, deliberately. `auto_minor_version_upgrade` is true (below/default), so AWS
+  # owns the minor: it bumped this cluster 16.6 -> 16.11 on its own. A hard minor pin here
+  # contradicts that — Terraform then tries to DOWNGRADE the live database on every apply,
+  # which AWS rejects ("Cannot find upgrade target from 16.11 with requested version 16.6")
+  # and which blocked the ERR-010 deploy on 2026-09-01. Tracking the major lets AWS patch
+  # minors while a MAJOR upgrade stays deliberate and explicit. 16 supports Serverless v2 +
+  # Data API + scale-to-0 + pgvector.
+  engine_version = "16"
+  database_name  = var.db_name
 
   master_username = "jobfetcher_admin"
   # NO password literal — AWS generates + stores it in Secrets Manager and rotates ownership.
