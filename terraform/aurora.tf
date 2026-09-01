@@ -81,6 +81,24 @@ resource "aws_rds_cluster" "main" {
   skip_final_snapshot = true
   apply_immediately   = true
 
+  lifecycle {
+    # ERR-012. `auto_minor_version_upgrade` is true, so AWS owns the minor version and moves
+    # it without us (it took this cluster 16.6 -> 16.11 on its own). Terraform reads that as
+    # drift and tries to push it back: at best a pointless ModifyDBCluster, at worst a
+    # downgrade AWS refuses outright -- which is exactly what blocked the ERR-010 deploy.
+    # A major-only `engine_version` does NOT suppress the diff on this provider (verified
+    # 2026-09-01: it still plans `16.11 -> "16"`), so the reconciliation must be turned off.
+    #
+    # The literal above is still load-bearing: it governs cluster CREATION, so a fresh apply
+    # after the destroy cadence still lands on 16.x (Data API + scale-to-0 + pgvector). This
+    # only stops Terraform re-asserting the version on an EXISTING cluster.
+    #
+    # A MAJOR upgrade (16 -> 17) will NOT apply while this is here. That is deliberate --
+    # major upgrades are planned, human-present operations -- but it means this
+    # `ignore_changes` has to be removed for the duration of one. See docs/runbooks/deploy.md.
+    ignore_changes = [engine_version]
+  }
+
   # ── Encryption at rest: DELIBERATELY NOT ENABLED (decided 2026-09-01, Tarig) ───────────
   # NOTE TO ANY FUTURE READER, HUMAN OR AGENT: do NOT "helpfully" add `storage_encrypted`
   # here. Its absence is a recorded decision, not an oversight, and enabling it is NOT a
@@ -105,4 +123,10 @@ resource "aws_rds_cluster_instance" "main" {
   instance_class     = "db.serverless"
   engine             = aws_rds_cluster.main.engine
   engine_version     = aws_rds_cluster.main.engine_version
+
+  lifecycle {
+    # Mirrors the cluster (ERR-012): the instance inherits the cluster's version, so it
+    # inherits the same fight with AWS auto-minor-upgrade.
+    ignore_changes = [engine_version]
+  }
 }
