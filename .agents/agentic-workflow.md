@@ -68,6 +68,13 @@ flowchart LR
 4. **Examiner** (fresh) runs its two passes; the orchestrator **fixes every real finding** and re-verifies (a second fresh re-verify if the fixes were non-trivial).
 5. **PR → CI + external reviewer → merge** per the severity gate.
 6. **Scribe close-out** (orchestrator): CHANGELOG `[Unreleased]` entry, ledger rows ([interface-contracts](../docs/ledgers/interface-contracts.md) Produces · [phase-index](../docs/ledgers/phase-index.md) · [backlog](../docs/ledgers/backlog.md)), an [ADR](../docs/adr/) if it's a real decision, and — if the unit came from a dossier — filling that dossier's **Resolution — as-built** section (what shipped · rung taken/divergence · key files · PR/ADR/CHANGELOG links · how to extend) and setting its `status: fixed`.
+
+   **Also, every time — the five this list used to omit** ([ERR-010](../docs/ledgers/errors.md) close-out, 2026-09-01). A 2026-08-31 audit found a clean split: *everything this checklist named was current; everything it did not name had drifted.* The omissions were **[errors.md](../docs/ledgers/errors.md)** (no entry since 2026-07-09, despite two deploy-time deviations recorded elsewhere), **[README.md](../README.md)**, **[CLAUDE.md](../CLAUDE.md)**, **[02-architecture.md](../docs/02-architecture.md)** and **[diagrams.md](../docs/diagrams.md)** — the last four had **zero mentions** of the public capture endpoint two units after it shipped, in a project whose first pillar is *the repo is the memory*. So:
+   - **`errors.md`** — an ERR entry for any error, deviation, or platform surprise hit during the unit (including at deploy). The ledger's own rule: *"a stage cannot close with an open error."*
+   - **`README.md` + `CLAUDE.md`** — if the unit changed what the system *is* (a new surface, a new resource, a changed count), fix it here. These are what a reader meets first.
+   - **`02-architecture.md` + `diagrams.md`** — if the unit added or changed a component, it belongs in the as-built picture. A new internet-facing surface is never "just a detail".
+
+   This is a checklist, not a suggestion — the [second pillar](../docs/00-design-philosophy.md) is that *a standard not wired into a command is a suggestion*, and this list is the command.
 7. **Deploy + close-out** (see the deploy checkpoint below): the CHANGELOG `[Unreleased]` entry accrues; **no per-unit tag** — enhancements batch into an occasional `v0.12.x` patch tag ([versioning convention](../CHANGELOG.md)). Then **P2 reopens**.
 
 ---

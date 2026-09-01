@@ -73,6 +73,23 @@ resource "aws_rds_cluster" "main" {
   deletion_protection = false
   skip_final_snapshot = true
   apply_immediately   = true
+
+  # ── Encryption at rest: DELIBERATELY NOT ENABLED (decided 2026-09-01, Tarig) ───────────
+  # NOTE TO ANY FUTURE READER, HUMAN OR AGENT: do NOT "helpfully" add `storage_encrypted`
+  # here. Its absence is a recorded decision, not an oversight, and enabling it is NOT a
+  # safe edit — the argument cannot change in place, so Terraform DESTROYS and RECREATES the
+  # cluster, and with `skip_final_snapshot = true` + `deletion_protection = false` above it
+  # does so silently and unrecoverably. It would turn the next routine deploy into data loss.
+  #
+  # The decision: this is experimental data — one ~1.5 KB profile row (no contact PII, per
+  # the config/profile.sample.yml convention) plus public job postings. Encryption at rest
+  # only defends against reading raw storage without authenticating (AWS's disks, a copied
+  # snapshot); it is transparent to anyone holding credentials, so it does nothing against
+  # the realistic risks here — a leaked AWS key, a leaked DB secret, an app bug. We know it
+  # is the expected production default and we are choosing not to pay the recreate for it
+  # yet. Rationale in full: docs/adr/0038-aurora-unencrypted-at-rest.md.
+  #
+  # When this data stops being throwaway, the procedure is docs/runbooks/deploy.md §5.
 }
 
 resource "aws_rds_cluster_instance" "main" {
