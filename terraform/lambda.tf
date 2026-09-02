@@ -64,6 +64,23 @@ resource "aws_lambda_function" "pipeline" {
       # Telemetry verbosity for the `jobfetcher` package logger (ERR-009 rider) — the code
       # defaults to INFO when unset; this entry just makes the knob IaC-visible.
       LOG_LEVEL = "INFO"
+      # ⚠️ TEMPORARY — raised 8 -> 80 to drain the ERR-010 backlog. REVERT TO 8 (or delete
+      # this line) once `gold_candidate` reaches 0.
+      #
+      # H-2 concurrency: the size of the dissect/score ThreadPoolExecutor, i.e. how many LLM
+      # calls are in flight at once INSIDE ONE INVOCATION (not a number of invocations).
+      # Threads here are almost entirely blocked on the network, and every DB write stays on
+      # the main thread, so raising this adds no thread-safety surface.
+      #
+      # Why 80 is safe: `deepseek-v4-pro` caps at 500 CONCURRENT requests account-wide (no RPM
+      # cap; over the cap is a hard 429, no queue). 80 is 16% of that. Why 80 is enough: the
+      # 698-posting backlog needs 67 workers to fit in one run's ~687 s scoring window, at the
+      # measured ~73.5 s/posting/worker. The real ceiling above ~80 is not DeepSeek, it is the
+      # main-thread write path (~9.3 saves/sec over the Data API).
+      #
+      # The daily 10-30 job run needs none of this — leaving it high is standing risk for no
+      # benefit, which is why this is temporary.
+      PIPELINE_MAX_WORKERS = "80"
       # INV-001: the capture endpoint the "Mark applied" links point at + the signing-key secret
       # name. The pipeline signs the links (build_capture_link); the capture Lambda verifies them.
       # An empty CAPTURE_BASE_URL would just disable the links (graceful) — here it is always set.
