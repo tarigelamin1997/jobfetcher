@@ -162,12 +162,19 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 | | |
 |---|---|
 | Postings scored | **618** |
-| Balance before → after | **$9.71 → $1.48** |
-| **Cost** | **$8.23** |
-| **Per posting** | **$0.0133** |
+| Balance before → after (settled) | **$9.71 → $0.14** |
+| **Cost** | **$9.57** |
+| **Per posting** | **$0.0155** |
 | Wall clock | ~10 min at 80 workers |
 
-**Extrapolated to the daily run** (10–30 new postings): **$0.13–$0.40/day ⇒ roughly $4–12/month.** Against an AWS bill that is near zero at idle, DeepSeek is essentially the entire running cost of the product.
+**Extrapolated to the daily run** (10–30 new postings): **$0.15–$0.46/day ⇒ roughly $5–14/month.**
+
+> ⚠️ **Billing settles late, and the first reading lied.** Immediately after the run the balance
+> read **$1.48**, giving $8.23 / $0.0133 per posting. Re-read ~30 minutes later it was **$0.14** —
+> another **$1.34**, a **16% understatement**. So `GET /user/balance` is authoritative *eventually*,
+> not immediately. Any measurement or guard built on it must allow for settlement lag, and a
+> threshold alarm that reads it right after a run will read high. The figures above are the settled
+> ones. Against an AWS bill that is near zero at idle, DeepSeek is essentially the entire running cost of the product.
 
 **What drives it.** `reasoning_effort=high` on the scorer ([ADR-0037](../adr/0037-per-task-reasoning-budgets.md)). Measured token split per score: ~1,000–2,000 **reasoning** tokens against only ~270–340 tokens of actual answer — so **80–85% of scoring spend buys thinking that is discarded.** Dropping to `low` measured 886 reasoning tokens vs high's ~1,850, so it would roughly halve the bill. That is a real quality-vs-cost decision (and it would invalidate ADR-0031's calibration), not a free win — which is exactly why it belongs in a decision, not a tweak.
 
