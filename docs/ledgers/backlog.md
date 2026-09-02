@@ -149,4 +149,34 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 **Connections:** [ERR-013](errors.md) (raised the timeout that exposed this) · [ADR-0021](../adr/0021-m1-pipeline-hardening.md) (H-2, the deadline guard) · [ADR-0037](../adr/0037-per-task-reasoning-budgets.md) (reasoning effort and timeout are coupled).
 
+---
+
+## B-10 · The real running cost is DeepSeek, not AWS — and it is unmeasured per run 💰
+
+**Logged:** 2026-09-02, from the ERR-010 backlog drain. **Status:** open — figures established, no instrumentation built. Requested by Tarig as a thing to be *aware of*, not to build yet.
+
+**What.** The architecture's cost story has always been about AWS ("Aurora scale-to-0 ⇒ ~$0 idle"). That framing is now wrong in the way that matters: **AWS is the cheap part.** The binding constraint on whether this tool runs tomorrow is the DeepSeek balance, and nothing in the pipeline measures or reports it.
+
+**Measured 2026-09-02** (balance read via `GET https://api.deepseek.com/user/balance` before and after a single run):
+
+| | |
+|---|---|
+| Postings scored | **618** |
+| Balance before → after | **$9.71 → $1.48** |
+| **Cost** | **$8.23** |
+| **Per posting** | **$0.0133** |
+| Wall clock | ~10 min at 80 workers |
+
+**Extrapolated to the daily run** (10–30 new postings): **$0.13–$0.40/day ⇒ roughly $4–12/month.** Against an AWS bill that is near zero at idle, DeepSeek is essentially the entire running cost of the product.
+
+**What drives it.** `reasoning_effort=high` on the scorer ([ADR-0037](../adr/0037-per-task-reasoning-budgets.md)). Measured token split per score: ~1,000–2,000 **reasoning** tokens against only ~270–340 tokens of actual answer — so **80–85% of scoring spend buys thinking that is discarded.** Dropping to `low` measured 886 reasoning tokens vs high's ~1,850, so it would roughly halve the bill. That is a real quality-vs-cost decision (and it would invalidate ADR-0031's calibration), not a free win — which is exactly why it belongs in a decision, not a tweak.
+
+Multiply by the [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md) boundary resample: a posting near the threshold is scored **3×**, so it costs ~$0.04 rather than $0.013. Roughly 1 in 5 postings qualify.
+
+**Why it matters.** Two failure modes, both seen today: (a) an empty balance stops the tool dead — 402 on every call, which is how the 38-day outage compounded; (b) a *low* balance silently throttles it, because DeepSeek scales concurrency with balance ([ERR-014](errors.md)) — 39 concurrent at ~empty, ≥200 at $10. So the balance is not just a bill, it is a **capacity input**, and it is invisible to every gate the project has.
+
+**So-what (candidates — none chosen).** (a) Report `usage` totals per run in the run summary and the S3 audit — the API already returns prompt/completion/reasoning counts per call, so this is accumulation, not new data. (b) A balance check in the `{"mode":"smoke"}` gate, failing or warning under a threshold — the deploy gate already exists and this is one HTTP call. (c) A CloudWatch alarm on a published balance metric — closes the "empty account" failure class properly, and is the only option that catches it *before* a run dies. (d) Reconsider `reasoning_effort` with the cost visible.
+
+**Connections:** [ERR-011](errors.md) / [ERR-014](errors.md) (both were balance failures wearing other costumes) · [ADR-0037](../adr/0037-per-task-reasoning-budgets.md) (the effort setting that drives the cost) · [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md) (the 3× resample multiplier) · [B-9](#) (the retry tail also spends).
+
 > **How this feeds the roadmap:** when the current program closes and P2 reopens, these entries are ranked (leverage = capability ÷ complexity) alongside the [roadmap](../03-roadmap.md) candidates (M2 dedup, M3 Step Functions, near-miss M4, CV tailoring). A graduated entry becomes a labeled release; a rejected one stays here with the reasoning.
