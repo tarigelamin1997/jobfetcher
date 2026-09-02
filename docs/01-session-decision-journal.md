@@ -369,3 +369,121 @@ Three disciplines from the earlier phases recurred, and the squad phase added a 
 - **Match the tool, then make it swappable (§20) — the ports paid dividends again.** `get_all_scored`, `S3ReportStore`, `track.py`'s CLI, and the smoke gate all slotted behind the existing `Repository`/adapter seams with no migration to the contract — the same P3 discipline that made `Bedrock→DeepSeek` a config change.
 - **Independent verification beats self-assessment (§21) — now the *default*, and gated by severity.** The fresh-context Examiner caught the ADR-0027 newness defect on the very first auto-merge (§29) and cleared v0.8/v0.9's CRUCIAL work honestly — the asymmetry (catches when defects are there, passes clean when they aren't) held across four releases.
 - **And the fourth — the append-only log as the antidote to unreplayable loss.** Three releases (0025 score lineage, 0026 outcomes/overrides, 0028 subscore blobs) are the *same move*: keep a current view for the readers, **append immutable history in the same transaction** so nothing a future run does can erase what a past run judged. Bronze had this property from v0 (§185 — replay over immutable raw); Part 5 extended it to the *derived* judgments bronze can't reproduce, because non-deterministic scoring means that history must be **recorded, not re-derived.** The repo is still the memory — and now the *judgments* are too: v0.10.0 is tagged, the tool runs unattended at 06:00, and the next session resumes knowing not just what shipped but that the pipeline finally **remembers.**
+
+---
+
+## 36. The 38-day outage — a review that became an incident, and what the method was
+
+*(2026-08-31 → 2026-09-02. The journal had stopped at §35/v0.10.0; this section resumes it and covers ERR-010 → ERR-014, ADR-0036 → ADR-0038, backlog B-5 → B-10, PRs #36–#45.)*
+
+### 36.1 How it was found — and how it was NOT found
+
+The session began as an open-ended code review: *"explore the whole codebase and tell me what you make of it."* No incident was reported. Nothing in the repo indicated one — working tree clean, CI green, tests passing, the last commit a tidy INV-002 close-out.
+
+**The finding came from refusing to review the repo alone.** The repo is a *description* of a system; the system is on AWS. So alongside reading `src/`, the deployed stack was queried read-only — `describe-db-clusters`, `list-functions`, and crucially `get-metric-statistics` for Lambda `Invocations` over 45 days. The cron had fired 46/46 times: impressive, and exactly the reason to look one level deeper. Invocations prove the *trigger* works; they say nothing about the *run*. Pulling the custom `JobFetcher/Pipeline PipelineReturned500` metric showed `1.0` every single day since 2026-07-25, and `AWS/SES Send` showed the last digest on **2026-07-24**.
+
+**The tool had been dead for 38 days and the repository could not have told anyone.**
+
+The uncomfortable half: detection was never the gap. INV-002's alarm — built precisely for a returned-500 — fired on all 38 days and SNS delivered **two emails a day** to the operator. Verified in the operator's own inbox: `ALARM` at 06:03, `OK` at 06:18, every morning. The alarm had become a reliable daily email arriving at roughly the hour the digest used to, and was read as the product still working. **An alarm that fires every day is not an alarm.** Logged as B-5, deliberately *without* adding another alarm, because adding one would treat the wrong failure.
+
+**Method note that generalises:** for any scheduled system, "did it run" and "did it work" are different questions and only the second matters. Invocation count, returned `statusCode`, and *product output* (here: SES sends) are three independent signals — this outage sat in the gap between the first and the third.
+
+### 36.2 ERR-010 — the read that outgrew its transport, and a stock sized by its flow
+
+`get_silver_postings()` ran `select(tables.posting)` — all 22 columns, unbounded — over the RDS Data API, which caps a response at 1 MB. At 1,022 accumulated silver rows the read crossed it and every run died.
+
+The instructive part is not the bug, it is that **[ADR-0014](adr/0014-operational-store-aurora-serverless-data-api.md) had considered this exact limit and dismissed it in writing**: *"the Data API has request/result-size limits (irrelevant at 10–30 rows/day)."* 10–30 rows/day is the **ingest rate**. The read is **cumulative** — `apply_gold_filter` left non-fits at `status='silver'` forever, so every run re-read every posting ever rejected. A *stock* was sized by its *flow*. That single substitution is the entire outage, and it is the kind of error that survives review because the sentence reads as quantified.
+
+The ADR's consequence line is now struck through and annotated rather than quietly corrected — the original reasoning is worth preserving precisely because it was wrong in an interesting way.
+
+### 36.3 The design question that made ERR-010 more than a patch
+
+The obvious fix — mark rejected postings terminal so they stop being re-read — would have silently destroyed a real property the *broken* behaviour provided **by accident**: because rejections stayed `silver`, editing `targeting.job_titles` re-opened the entire rejected backlog on the next run. `reassess` cannot substitute (it replays `status='scored'` rows only), so gold-filter decisions would have frozen permanently with nothing announcing the loss.
+
+So [ADR-0036](adr/0036-gold-filter-rejection-lineage.md) keeps the re-open property *explicit*: a rejection is stamped with `gold_filter_hash`, and the read re-opens only rejections whose stamp differs from the current context. This is the `score_event.profile_hash` mechanism from [ADR-0025](adr/0025-score-event-lineage.md), applied one layer earlier.
+
+**The trap inside the fix, and why it has a test.** The existing `compute_profile_hash` looks like exactly the right thing to reuse. It is not: it covers the profile plus the three strictness knobs but **not `spec.targeting`**, which is what the gold filter actually reads. Stamping with it would leave a `job_titles` edit — the single most likely config change anyone makes — unable to re-open anything, silently and permanently. A dedicated `compute_filter_hash` hashes the whole profile, the whole spec and the strategy name: it over-invalidates and never under-invalidates, because over-invalidation costs one cheap pass and under-invalidation loses a job with no error. `test_filter_hash_moves_on_a_targeting_change_that_profile_hash_cannot_see` asserts *both halves* — that the scoring hash provably cannot see the change, and that the filter hash can — so the tempting shortcut fails loudly.
+
+### 36.4 ERR-011 — three faults wearing one costume
+
+The 2026-08-22 production log showed `no valid extraction after one retry: no JSON object in model output: ''` for every posting. That message says *the model returned malformed JSON*. It was false.
+
+DeepSeek's v4 models are **reasoners**: `max_tokens` budgets reasoning **and** content together, reasoning first. Exhaust it and the API returns a well-formed HTTP 200 whose `content` is empty. `complete()` did `content or ""` and discarded `finish_reason` entirely, converting a truncation signal into an empty string three layers from its cause — and the scorer then *re-prompted at the same budget*, which cannot help.
+
+Measured live against the real scorer prompt at the production `max_tokens=4096`: `completion_tokens=4096, reasoning_tokens=4096, content_chars=0`. **The model spent the entire budget thinking and emitted nothing.**
+
+So the summary `{fetched: 137, silvered: 0, skipped: 137}` had at various points meant three completely different things — an empty account (402), a truncated response, and a crashed read — all indistinguishable. `LlmBillingError` and the truncation raise exist so the summary says *which*.
+
+**And the fix's own gap, found the same way.** Billing was made legible in *dissection* only. When the account emptied mid-drain, scoring reported `failed: 618` under 618 identical per-item warnings — the exact misdiagnosis shape ERR-011 was written to prevent, reproduced one stage over (fixed in PR #43). ***A lesson applied to one instance of a pattern is not applied.***
+
+### 36.5 The measurement error that mattered more than the bug — ERR-013
+
+The ERR-010 fix deployed cleanly. Smoke gate `200 @ 0007`. Ingest worked for the first time in 38 days. **And the run died at the same place with the same error.**
+
+The projection had been sized with `pg_column_size()`, which reports the **compressed on-disk** size. The Data API sends **uncompressed JSON**. Re-measured on the same rows: the `skills` JSONB is **537 kB on disk and 1,291 kB as text** — over the cap by itself. The "109 kB, 28× headroom" figure was fiction, and the conclusion built on it — *"pagination is subsumed at this row count"* — was wrong.
+
+**Why every check agreed with the wrong number.** The regression test asserts on the *emitted SQL* (correctly — it proves `description` is not selected) and on row payloads measured through **psycopg2**, a different transport with no cap and no JSON envelope. There is no local RDS Data API, so no test in the suite can observe the thing that failed — the identical gap [ERR-004](ledgers/errors.md) named at v0.1.0. The measurement that mattered was only ever available in production.
+
+**The generalisable rule, which is not a test:** behind a request/response API with a response cap, a read must be **bounded by construction** (paginated), never by an estimate of how big the data is. *An estimate can be wrong about units; pagination cannot be wrong about row count.*
+
+**A second-order lesson about test quality.** The first version of the size regression test **passed against the broken code**. It measured the returned `DissectedPosting` objects, which never contain `description` either way — a tautology. It was caught only by deliberately reverting the fix and re-running. That check — *does this test fail on the un-fixed code?* — is the only thing separating a regression test from a decoration, and nothing performs it automatically.
+
+### 36.6 Whack-a-mole, and stopping it
+
+With silver paginated, the gold filter processed the whole backlog — `stage=gold done {'silver': 1041, 'gold': 781, 'dropped': 260}` — and the run then died one stage later on `get_gold_candidates()` with 781 rows. Same cause, next query.
+
+Two reads had by then been fixed one at a time, each revealing the next. **The third time, all five bulk reads were paginated through one shared `_read_paginated` helper.** The helper *replaces* the caller's `ORDER BY`, because a keyset must walk a unique key — so `get_scored_shortlist` and `get_all_scored` sort in Python now, which also sidesteps a mixed-direction compound keyset (`score DESC, posting_id ASC`) that cannot be expressed as a single row comparison. A test asserts the score-DESC ordering survived the move, with scores deliberately interleaved so `posting_id` order and score order disagree — because a dropped re-sort would silently reorder the digest with no error at all.
+
+**Pattern worth naming:** when a fix reveals the same failure one layer along, that is the signal to stop fixing instances and fix the class.
+
+### 36.7 ERR-012 — a config contradiction that had been arming itself for weeks
+
+The deploy failed with `InvalidParameterCombination: Cannot find upgrade target from 16.11 with requested version 16.6`. `aurora.tf` hard-pinned `engine_version = "16.6"` while the cluster ran `auto_minor_version_upgrade = true`; AWS had patched it to 16.11, Terraform read that as drift and tried to push it back — and RDS does not support minor downgrades.
+
+**Every `terraform apply`, including any routine code deploy, had been attempting to downgrade the production database.** Not caused by this work; merely the first thing to touch Terraform since AWS's patch. A `-target`ed Lambda apply did not avoid it either — the Lambda depends on the cluster ARN, so Terraform pulled the cluster in and failed before the Lambda was touched.
+
+The first fix (major-only `engine_version = "16"`) was **also wrong**, and was caught by reading the plan rather than trusting the reasoning: the provider still planned `16.11 -> "16"`, which would issue a real `ModifyDBCluster`. `lifecycle { ignore_changes = [engine_version] }` was needed. **Plan-then-read is the gate; `-auto-approve` on an unread plan would have found this in production.**
+
+**Rule:** any attribute a cloud provider may change on its own — engine minors, certificate rotations, managed-key versions — must be left un-asserted or explicitly ignored. Asserting it *and* delegating it is a contradiction that stays silent until the provider acts.
+
+### 36.8 ERR-014 — the published limit that was never about this account
+
+Draining the backlog needed concurrency. The number was researched properly: sources agreed `deepseek-v4-pro` allows **500 concurrent**, and the account was probed directly for `x-ratelimit-*` headers, which **do not exist**. There is no `/limits` endpoint. 80 workers looked like 16% of the cap.
+
+The run scored **exactly 80** — one full round of workers — then 618 failed. DeepSeek, verbatim:
+
+> `Your current concurrency is 40, which exceeds your concurrency limit of 39 based on your remaining balance.`
+
+**The documented 500 is a ceiling, not an entitlement. The effective limit is scaled to the account's remaining balance, and it is stated only in the body of a 429 you have already triggered.** The published figure was accurate *and* inapplicable — the worst combination, because it invites confident over-provisioning.
+
+**Then the same question was answered by experiment instead.** After a $10 top-up, bursts of 60, 120 and 200 concurrent trivial requests (reasoning off, `max_tokens=4` — a few hundred tokens in total) drew **zero 429s**, establishing ≥200 empirically for a fraction of a cent. **When a limit is unpublished and unobservable, a cheap deliberate overshoot is the measurement instrument.**
+
+### 36.9 The cost model — and the framing correction it forces (B-10)
+
+DeepSeek exposes `GET /user/balance`. That makes cost directly measurable: read the balance, run, read it again.
+
+| | |
+|---|---|
+| Postings scored in one run | **618** |
+| Balance | **$9.71 → $1.48** |
+| **Cost** | **$8.23** ⇒ **$0.0133 per posting** |
+
+Extrapolated to the daily 10–30 postings: **$0.13–0.40/day, roughly $4–12/month.**
+
+**This overturns the project's standing cost story.** Every document says the same thing — *Aurora scale-to-0 ⇒ ~$0 idle*. True, and beside the point: **AWS is the cheap part, and DeepSeek is essentially the entire running cost.** Nothing in the pipeline measures it.
+
+Where it goes: **80–85% of scoring spend is reasoning tokens that are then discarded** — ~1,000–2,000 reasoning tokens against ~270–340 tokens of answer. `reasoning_effort` is therefore the cost lever, but moving it is a quality decision that would invalidate [ADR-0031](adr/0031-boundary-self-consistency-honest-graduations.md)'s calibration, not a tweak. Recorded in B-10, not acted on.
+
+**And the sharper point: balance is a capacity input, not just a bill.** A low balance silently throttles concurrency (ERR-014); an empty one stops the tool dead (ERR-011). Both happened in one session, wearing different costumes. No gate in the project can see either.
+
+### 36.10 What the session says about the method
+
+- **The repo cannot audit the system.** Pillar 1 says *the repo is the memory* — true for decisions, false for state. Every document was internally consistent while the product had been dead for 38 days. A review that reads only the repository will confirm the repository.
+- **Confident prose is where wrong numbers hide.** ADR-0014's *"irrelevant at 10–30 rows/day"* and this session's own *"28× headroom"* are the same failure: a quantified-sounding claim whose **unit** was never checked. Both survived every review they passed through.
+- **Deploying is a measurement.** Faults 2, 3 and 4 were found only by deploying and watching. Three deploys were needed; each was informative rather than wasteful, and reasoning longer would not have produced numbers that only production could supply.
+- **Ask what the failure *is*, not just what to change.** B-5 is the clearest case: detection worked perfectly and changed nothing, so more alarming would have been effort spent making an ignored signal louder.
+- **Verify a regression test fails on the un-fixed code.** Twice this session a check agreed with a wrong belief — the tautological size test, and `terraform validate` passing a config that could not apply.
+- **A published number describes the product, not you.** Rate limits, quotas and defaults scale with tier, spend or balance. The authoritative source is the error the system returns.
+
+The through-line of §20/§26/§35 — *intellectual honesty over a convenient story* — held, and cost something this time. This record contains a wrong measurement, a wrong conclusion drawn from it, two failed deploys, and a fix that reproduced the very bug it was fixing one stage over. **That is the useful half.**
+
