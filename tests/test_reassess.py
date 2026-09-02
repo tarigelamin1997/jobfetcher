@@ -153,7 +153,7 @@ def test_reassess_defers_on_expired_deadline():
                       scorer=_CountingScorer(), deadline=Deadline(0))
     assert report == {
         "reassessed": 0, "graduated": 0, "downgraded": 0, "unchanged": 0,
-        "failed": 0, "deferred": 3, "graduations": [],
+        "failed": 0, "deferred": 3, "billing_blocked": 0, "graduations": [],
         # nothing reassessed → an all-zero distribution (honest zeros, keys still present)
         "delta_buckets": {"0-5": 0, "6-10": 0, "11-20": 0, "21+": 0},
         "max_delta": 0, "mean_delta": 0.0,
