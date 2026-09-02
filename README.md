@@ -2,7 +2,7 @@
 
 **A serverless job-matching pipeline that fetches roles, scores them against your real profile with an LLM, and emails you a daily shortlist — built as an *evolutionary architecture* you can watch grow, one deliberate, documented migration at a time.**
 
-> **Status: `v0.12.0` SHIPPED (2026-07-17).** The minimal core (`v0.1.0`) is live on AWS; eleven bottleneck-driven releases have shipped on top of it, each a clean release — and as of `v0.9.0` the pipeline **runs itself fully unattended** (the daily 06:00 UTC EventBridge cron flew solo end-to-end on 2026-07-10, digest delivered with nobody watching).
+> **Status: `v0.12.1` SHIPPED (2026-09-02 — the outage release; `v0.12.0` 2026-07-17).** The minimal core (`v0.1.0`) is live on AWS; eleven bottleneck-driven releases have shipped on top of it, each a clean release — and as of `v0.9.0` the pipeline **runs itself fully unattended** (the daily 06:00 UTC EventBridge cron flew solo end-to-end on 2026-07-10, digest delivered with nobody watching).
 >
 > **⚠️ Correction (2026-09-02) — the unattended claim above was true, then stopped being true, and nobody noticed for 38 days.** The pipeline returned `statusCode: 500` on **every run from 2026-07-25 to 2026-09-01**; the last digest went out **2026-07-24**. Three independent faults shared one symptom: the gold-filter read crossed the RDS Data API's 1 MB cap, the LLM account ran out of credit, and reasoning tokens consumed the whole `max_tokens` so the API returned HTTP 200 with empty content. The alarms fired on all 38 days and reached the operator — **detection was never the gap**; a signal arriving every morning had become indistinguishable from the product.
 >

@@ -6,6 +6,47 @@ The ***why*** behind every entry is the [session decision journal](docs/01-sessi
 
 ## [Unreleased]
 
+_Nothing yet — the next migration is re-derived by the [P2 protocol](docs/03-roadmap.md#the-migration-decision-protocol-how-the-next-step-is-actually-chosen) from real use._
+
+## [v0.12.1] — 2026-09-02 — the outage release: the tool was dead for 38 days, and the repo could not have shown it
+
+> **The patch that matters most is not a feature.** Between 2026-07-25 and 2026-09-01 the daily
+> pipeline returned `statusCode: 500` on **every single run** — 46 invocations, 38 consecutive
+> failures, last digest **2026-07-24**. It was found during an open-ended code review, by querying
+> the deployed stack rather than reading the repository: the repo was clean, CI green, and every
+> document internally consistent throughout.
+>
+> **Detection was never the gap.** INV-002's returned-500 alarm fired on all 38 days and delivered
+> two emails a day to the operator. A signal arriving every morning at the hour the digest used to
+> had become indistinguishable from the product ([B-5](docs/ledgers/backlog.md)).
+>
+> Three independent faults shared one symptom, `silvered: 0` — an unbounded read crossing the Data
+> API's 1 MB cap, an empty LLM account, and reasoning tokens consuming the whole `max_tokens` so
+> the API returned HTTP 200 with empty content. Two further faults surfaced *while fixing them*: a
+> Terraform pin that had been trying to downgrade the production database on every apply, and a
+> published rate limit that was accurate and inapplicable.
+>
+> **Also recorded: two measurement errors made during the fix** — `pg_column_size()` read as a wire
+> size (it is compressed on-disk), and a cost figure taken before billing settled. Both are written
+> up rather than quietly corrected, because they are the transferable part.
+>
+> **Resolved and live-validated 2026-09-02:** `{'gold': 618, 'scored': 618, 'failed': 0,
+> 'deferred': 0}`, `partial: False`. **1,182 scored, 260 rejected, nothing pending.** Digest
+> sending again. **547 tests green.**
+>
+> The full method — how it was found, what was measured, what was tried and rejected, and where the
+> reasoning was wrong — is [decision journal §36](docs/01-session-decision-journal.md). Read that
+> before touching the read path or the LLM budgets.
+>
+> **Two standing facts a future session needs:** DeepSeek's concurrency limit is **scaled to account
+> balance** (39 near-empty, ≥200 at $10) and is reported *only* in a 429 body; and at **$0.0155 per
+> posting**, **DeepSeek — not AWS — is this project's entire running cost** (~$5–14/month), which
+> overturns the standing *"scale-to-0 ⇒ ~$0 idle"* framing ([B-10](docs/ledgers/backlog.md)).
+>
+> Also in this tag: the two previously-untagged INV units (INV-001 outcome capture, INV-002 the
+> silent-500 alarm) that had accumulated under `[Unreleased]`.
+
+
 ### Fixed — the ERR-010 fix was sized in the wrong units; every bulk read now paginates ([ERR-013](docs/ledgers/errors.md))
 
 - **The first fix deployed cleanly and the run died in the same place.** The column projection was sized with `pg_column_size()` — the **compressed on-disk** size — while the Data API sends **uncompressed JSON**. Re-measured on the same rows: the `skills` JSONB is **537 kB on disk but 1,291 kB as text**, over the cap by itself. The "109 kB, 28× headroom" figure was fiction and the conclusion drawn from it ("pagination is subsumed at this row count") was wrong.
