@@ -70,19 +70,18 @@ resource "aws_lambda_function" "pipeline" {
       # H-2 concurrency: the size of the dissect/score ThreadPoolExecutor, i.e. how many LLM
       # calls are in flight at once INSIDE ONE INVOCATION (not a number of invocations).
       #
-      # 30, NOT 80 — and the difference is the whole lesson (ERR-014). Public docs say
-      # `deepseek-v4-pro` allows 500 concurrent. That is the CEILING, not the entitlement: the
-      # effective limit is scaled to the account's remaining balance, and this account's real
-      # limit is 39. DeepSeek says so only in the 429 body —
-      #   "your current concurrency is 40, which exceeds your concurrency limit of 39 based on
-      #    your remaining balance"
-      # — there is no /limits endpoint and no x-ratelimit-* header to ask beforehand. At 80 the
-      # run scored exactly 80 (one round) and then 618 postings failed on 429.
+      # 80, measured (ERR-014). Public docs say
+      # `deepseek-v4-pro` allows 500 concurrent. That is a CEILING, not an entitlement: the
+      # effective limit is scaled to the account's REMAINING BALANCE. At a near-empty balance
+      # it measured 39 (DeepSeek states the real number only in the 429 body — there is no
+      # /limits endpoint and no x-ratelimit-* header). After a $10 top-up, a burst probe of
+      # 200 concurrent requests drew zero 429s, so the limit is >= 200.
       #
-      # 30 leaves ~23% headroom under 39, which matters because the limit MOVES: it falls as
-      # balance is consumed, so a value close to the cap is safe at the start of a run and not
-      # at the end. Top up the balance to raise the ceiling and this can go higher.
-      PIPELINE_MAX_WORKERS = "30"
+      # 80 clears the whole 618-posting backlog in one run (~10.4 postings per worker per run)
+      # while sitting at <40% of a measured >=200. It is NOT a fixed safe value: if the balance
+      # is allowed to run down, the ceiling falls with it and this becomes too high again.
+      # Check `GET https://api.deepseek.com/user/balance` before raising it.
+      PIPELINE_MAX_WORKERS = "80"
       # INV-001: the capture endpoint the "Mark applied" links point at + the signing-key secret
       # name. The pipeline signs the links (build_capture_link); the capture Lambda verifies them.
       # An empty CAPTURE_BASE_URL would just disable the links (graceful) — here it is always set.
