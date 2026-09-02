@@ -19,7 +19,7 @@ from jobfetcher.core.scorer import (
     compute_code_total,
     subscores_payload,
 )
-from jobfetcher.core.ports import LlmError
+from jobfetcher.core.ports import LlmBillingError, LlmError
 from tests.helpers import FakeLlm
 
 
@@ -413,7 +413,7 @@ def test_vg8_threshold_0_surfaces_all():
     repo = _FakeScoreRepo(_profile_row(0), _candidates(), None)
     summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
                          scorer=_scorer_for([30, 65, 90]), max_workers=1)
-    assert summary == {"gold": 3, "scored": 3, "surfaced": 3, "failed": 0, "deferred": 0}
+    assert summary == {"gold": 3, "scored": 3, "surfaced": 3, "failed": 0, "deferred": 0, "billing_blocked": 0}
     assert all(v["fit_category"] == "strong_fit" for v in repo.saved.values())
 
 
@@ -457,7 +457,7 @@ def test_score_gold_skips_failed_scoring_and_continues():
     # max_workers=1: "the 2nd call" must map to p-mid deterministically (order-sensitive)
     summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
                          scorer=_OneBoomScorer(), max_workers=1)
-    assert summary == {"gold": 3, "scored": 2, "surfaced": 2, "failed": 1, "deferred": 0}
+    assert summary == {"gold": 3, "scored": 2, "surfaced": 2, "failed": 1, "deferred": 0, "billing_blocked": 0}
     assert repo.status["p-mid"] == "gold_candidate"  # the failed one is NOT marked scored
 
 
@@ -468,7 +468,7 @@ def test_score_gold_skips_llm_transport_error():
 
     repo = _FakeScoreRepo(_profile_row(60), [("p", "c", _dissected())], None)
     summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit", scorer=_BoomScorer())
-    assert summary == {"gold": 1, "scored": 0, "surfaced": 0, "failed": 1, "deferred": 0}
+    assert summary == {"gold": 1, "scored": 0, "surfaced": 0, "failed": 1, "deferred": 0, "billing_blocked": 0}
 
 
 def test_score_gold_defers_on_expired_deadline():
@@ -487,7 +487,7 @@ def test_score_gold_defers_on_expired_deadline():
     summary = score_gold(
         run_id="r", repo=repo, profile_hash="ph-unit", scorer=_CountingScorer(), deadline=Deadline(0)
     )
-    assert summary == {"gold": 3, "scored": 0, "surfaced": 0, "failed": 0, "deferred": 3}
+    assert summary == {"gold": 3, "scored": 0, "surfaced": 0, "failed": 0, "deferred": 3, "billing_blocked": 0}
     assert _CountingScorer.calls == 0
     assert repo.saved == {}  # nothing written
     assert all(v == "gold_candidate" for v in repo.status.values())  # nothing marked
@@ -670,3 +670,49 @@ def test_score_gold_resample_disabled_matches_today():
                resample_n=1)
     assert repo.saved["c-low"]["score"] == 62
     assert len(llm.calls) == 1
+
+
+def test_score_gold_counts_billing_failures_separately_and_logs_once(caplog):
+    """The half of ERR-011 that was missed, and what it cost.
+
+    Dissection already treated HTTP 402 as its own axis; scoring did not, so an empty account
+    surfaced as `failed: 618` — indistinguishable from 618 bad LLM responses — under 618
+    identical per-item warnings. That is the exact shape of the misdiagnosis that let a
+    38-day outage read as a model-quality problem.
+    """
+    class _BrokeScorer:
+        model_id = "test-model"
+
+        def score(self, dissected, profile):
+            raise LlmBillingError("402 Payment Required: Insufficient Balance")
+
+    repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
+    with caplog.at_level("WARNING"):
+        summary = score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
+                             scorer=_BrokeScorer(), max_workers=1)
+
+    assert summary["billing_blocked"] == 3
+    assert summary["failed"] == 0      # NOT folded into the generic bucket
+    assert summary["scored"] == 0
+
+    # one line for three blocked postings, and it names the fix
+    billing = [r for r in caplog.records if "OUT OF CREDIT" in r.getMessage()]
+    assert len(billing) == 1
+    assert "Top up" in billing[0].getMessage()
+    # and no per-item noise for them
+    assert not [r for r in caplog.records if "scoring failed for" in r.getMessage()]
+
+
+def test_score_gold_billing_failure_leaves_postings_rescorable():
+    # negative twin: a posting blocked on billing must NOT be marked scored, or topping up
+    # would leave it silently skipped forever.
+    class _BrokeScorer:
+        model_id = "test-model"
+
+        def score(self, dissected, profile):
+            raise LlmBillingError("402")
+
+    repo = _FakeScoreRepo(_profile_row(60), _candidates(), None)
+    score_gold(run_id="r", repo=repo, profile_hash="ph-unit",
+               scorer=_BrokeScorer(), max_workers=1)
+    assert all(s == "gold_candidate" for s in repo.status.values())

@@ -590,6 +590,7 @@ def score_gold(
 
     candidates = repo.get_gold_candidates()
     scored = 0
+    billing_blocked = 0
     surfaced = 0
     failed = 0
     deferred = 0
@@ -610,6 +611,12 @@ def score_gold(
                 resample_n=resample_n,
                 deadline=deadline,
             )
+        except LlmBillingError:
+            # NOT per-item: the account is empty, so this is identical for every posting in
+            # the run. Counted and logged once by the caller (ERR-011 — the same treatment
+            # dissection already had; scoring was the half that got missed, which is how a
+            # run reported `failed: 618` when it meant `billing_blocked: 618`).
+            return _BILLING_BLOCKED
         except (ScorerError, LlmError) as exc:
             log.warning("scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)
             return None
@@ -621,6 +628,9 @@ def score_gold(
                 result = fut.result()
                 if result is _DEFERRED:
                     deferred += 1
+                    continue
+                if result is _BILLING_BLOCKED:
+                    billing_blocked += 1
                     continue
                 if result is None:
                     failed += 1
@@ -669,12 +679,21 @@ def score_gold(
             deferred,
         )
 
+    if billing_blocked:
+        # ONE line, at ERROR, naming the operator action — not %d identical warnings.
+        log.error(
+            "LLM ACCOUNT OUT OF CREDIT (run_id=%s): %d scoring call(s) blocked by HTTP 402. "
+            "Top up the provider account — no retry or re-run will clear this.",
+            run_id,
+            billing_blocked,
+        )
     return {
         "gold": len(candidates),
         "scored": scored,
         "surfaced": surfaced,
         "failed": failed,
         "deferred": deferred,
+        "billing_blocked": billing_blocked,
     }
 
 
@@ -732,6 +751,7 @@ def reassess(
     downgraded = 0
     unchanged = 0
     failed = 0
+    billing_blocked = 0
     deferred = 0
     graduations: list[dict[str, Any]] = []
     deltas: list[int] = []  # |new − old| per successful reassess — the distribution input
@@ -752,6 +772,12 @@ def reassess(
                 resample_n=resample_n,
                 deadline=deadline,
             )
+        except LlmBillingError:
+            # NOT per-item: the account is empty, so this is identical for every posting in
+            # the run. Counted and logged once by the caller (ERR-011 — the same treatment
+            # dissection already had; scoring was the half that got missed, which is how a
+            # run reported `failed: 618` when it meant `billing_blocked: 618`).
+            return _BILLING_BLOCKED
         except (ScorerError, LlmError) as exc:
             log.warning("reassess scoring failed for %s (run_id=%s): %s", posting_id, run_id, exc)
             return None
@@ -763,6 +789,9 @@ def reassess(
                 result = fut.result()
                 if result is _DEFERRED:
                     deferred += 1
+                    continue
+                if result is _BILLING_BLOCKED:
+                    billing_blocked += 1
                     continue
                 if result is None:
                     failed += 1
@@ -867,6 +896,14 @@ def reassess(
         max_delta,
         mean_delta,
     )
+    if billing_blocked:
+        # ONE line, at ERROR, naming the operator action — not %d identical warnings.
+        log.error(
+            "LLM ACCOUNT OUT OF CREDIT (run_id=%s): %d scoring call(s) blocked by HTTP 402. "
+            "Top up the provider account — no retry or re-run will clear this.",
+            run_id,
+            billing_blocked,
+        )
     return {
         "reassessed": reassessed,
         "graduated": graduated,
@@ -874,6 +911,7 @@ def reassess(
         "unchanged": unchanged,
         "failed": failed,
         "deferred": deferred,
+        "billing_blocked": billing_blocked,
         "graduations": graduations,
         "delta_buckets": delta_buckets,
         "max_delta": max_delta,
