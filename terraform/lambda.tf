@@ -64,23 +64,25 @@ resource "aws_lambda_function" "pipeline" {
       # Telemetry verbosity for the `jobfetcher` package logger (ERR-009 rider) — the code
       # defaults to INFO when unset; this entry just makes the knob IaC-visible.
       LOG_LEVEL = "INFO"
-      # ⚠️ TEMPORARY — raised 8 -> 80 to drain the ERR-010 backlog. REVERT TO 8 (or delete
-      # this line) once `gold_candidate` reaches 0.
+      # ⚠️ TEMPORARY — raised to drain the ERR-010 backlog. REVERT TO 8 (or delete this
+      # line) once `gold_candidate` reaches 0.
       #
       # H-2 concurrency: the size of the dissect/score ThreadPoolExecutor, i.e. how many LLM
       # calls are in flight at once INSIDE ONE INVOCATION (not a number of invocations).
-      # Threads here are almost entirely blocked on the network, and every DB write stays on
-      # the main thread, so raising this adds no thread-safety surface.
       #
-      # Why 80 is safe: `deepseek-v4-pro` caps at 500 CONCURRENT requests account-wide (no RPM
-      # cap; over the cap is a hard 429, no queue). 80 is 16% of that. Why 80 is enough: the
-      # 698-posting backlog needs 67 workers to fit in one run's ~687 s scoring window, at the
-      # measured ~73.5 s/posting/worker. The real ceiling above ~80 is not DeepSeek, it is the
-      # main-thread write path (~9.3 saves/sec over the Data API).
+      # 30, NOT 80 — and the difference is the whole lesson (ERR-014). Public docs say
+      # `deepseek-v4-pro` allows 500 concurrent. That is the CEILING, not the entitlement: the
+      # effective limit is scaled to the account's remaining balance, and this account's real
+      # limit is 39. DeepSeek says so only in the 429 body —
+      #   "your current concurrency is 40, which exceeds your concurrency limit of 39 based on
+      #    your remaining balance"
+      # — there is no /limits endpoint and no x-ratelimit-* header to ask beforehand. At 80 the
+      # run scored exactly 80 (one round) and then 618 postings failed on 429.
       #
-      # The daily 10-30 job run needs none of this — leaving it high is standing risk for no
-      # benefit, which is why this is temporary.
-      PIPELINE_MAX_WORKERS = "80"
+      # 30 leaves ~23% headroom under 39, which matters because the limit MOVES: it falls as
+      # balance is consumed, so a value close to the cap is safe at the start of a run and not
+      # at the end. Top up the balance to raise the ceiling and this can go higher.
+      PIPELINE_MAX_WORKERS = "30"
       # INV-001: the capture endpoint the "Mark applied" links point at + the signing-key secret
       # name. The pipeline signs the links (build_capture_link); the capture Lambda verifies them.
       # An empty CAPTURE_BASE_URL would just disable the links (graceful) — here it is always set.
