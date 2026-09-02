@@ -465,10 +465,18 @@ DeepSeek exposes `GET /user/balance`. That makes cost directly measurable: read 
 | | |
 |---|---|
 | Postings scored in one run | **618** |
-| Balance | **$9.71 → $1.48** |
-| **Cost** | **$8.23** ⇒ **$0.0133 per posting** |
+| Balance (settled) | **$9.71 → $0.14** |
+| **Cost** | **$9.57** ⇒ **$0.0155 per posting** |
 
-Extrapolated to the daily 10–30 postings: **$0.13–0.40/day, roughly $4–12/month.**
+Extrapolated to the daily 10–30 postings: **$0.15–0.46/day, roughly $5–14/month.**
+
+**And a coda that is itself the lesson of §36.5 repeating.** The balance read **$1.48** immediately
+after the run — $8.23, $0.0133/posting — and **$0.14** half an hour later. Billing settles late, so
+the first measurement understated the cost by **16%**. A number was taken at the moment it was
+convenient rather than the moment it was final, which is exactly the shape of the `pg_column_size()`
+error: not a wrong tool, a right tool read at the wrong time. `GET /user/balance` is authoritative
+*eventually*, not immediately — and any threshold guard built on it will read high if polled right
+after a run.
 
 **This overturns the project's standing cost story.** Every document says the same thing — *Aurora scale-to-0 ⇒ ~$0 idle*. True, and beside the point: **AWS is the cheap part, and DeepSeek is essentially the entire running cost.** Nothing in the pipeline measures it.
 
