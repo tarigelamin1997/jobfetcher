@@ -34,4 +34,4 @@ Add a **`reassess` mode** to the single Lambda handler. Flow (builds on the runt
 - New event shape: `{"mode":"reassess"}`. New repo method + orchestrator; the handler's default path is untouched.
 - **Follow-ons (noted, not built here):** the "what graduated" **digest email** rides the email-UX unit (don't entangle the notifier rework); the **query/filter** surface (export to SQLite/CSV → Datasette/Excel) is the next capability; a `score_history` table if time-series is wanted.
 
-Full reasoning: [journal](../01-session-decision-journal.md) · plan §41. Related: [ADR-0022](0022-runtime-config-in-s3.md) (the edit→push flow), [ADR-0016](0016-llm-dissection-at-silver.md) + the immutable-bronze/replay principle in [02-architecture](../02-architecture.md).
+Full reasoning: [journal §28](../01-session-decision-journal.md) — the P2-driven capability burst, which absorbed the design-session working notes §41 this ADR was written against; those notes were never committed. Related: [ADR-0022](0022-runtime-config-in-s3.md) (the edit→push flow), [ADR-0016](0016-llm-dissection-at-silver.md) + the immutable-bronze/replay principle in [02-architecture](../02-architecture.md).

@@ -24,7 +24,7 @@ The **Workflow** tool (deterministic, scripted fan-out/pipeline) remains an avai
 ## Consequences
 - **Easier:** the gate trio ([ADR-0013](0013-enforcement-gate-trio-branch-pr.md)) becomes the literal pipeline stages; separation of concerns is enforced by distinct agents; the orchestration is a visible senior/staff portfolio signal; deviations are logged live (documentation-as-infrastructure).
 - **Harder:** more token cost + coordination than a solo build; worktree isolation adds setup; on small units the full team can be overkill — mitigated by right-sizing (start on C-2; fan out only across genuinely independent units).
-- **Impact:** resolves the "enforcement = emergent" open item in [05-methodology](../05-methodology.md); the first run is **C-2** (schema + `Repository` — [ADR-0018](0018-persistence-sqlalchemy-data-api-repository.md), plan §31); applies to every subsequent v0 unit and later migrations.
+- **Impact:** resolves the "enforcement = emergent" open item in [05-methodology](../05-methodology.md); the first run is **C-2** (schema + `Repository` — [ADR-0018](0018-persistence-sqlalchemy-data-api-repository.md); written up as [journal §22 · *Storage and infra, validated against reality (C-2, C-3)*](../01-session-decision-journal.md) — the working notes §31 originally cited were never committed); applies to every subsequent v0 unit and later migrations.
 
 ## Amendment — the Independent Verifier stage (Step-4 learning)
 

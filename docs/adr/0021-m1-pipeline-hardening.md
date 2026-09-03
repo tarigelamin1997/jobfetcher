@@ -51,4 +51,4 @@ Re-ran the **exact ~132-posting backlog** the pre-fix code died on (same infra, 
 - New config knobs: `PIPELINE_MAX_WORKERS`, `GOLD_FILTER_STRATEGY`, `LlmConfig.max_retries` / `backoff_base_s`. New Terraform: `aws_lambda_function_event_invoke_config` (retry=0), memory 1024.
 - **Follow-on (next migration candidate):** the digest **email UX** — Tarig flagged the format as poor and the job links as not visible enough. Queued, not in v0.2.0.
 
-Full reasoning trail: [01-session-decision-journal](../01-session-decision-journal.md) · plan §35–§36. Errors: [ERR-006, ERR-007](../ledgers/errors.md).
+Full reasoning trail: [journal §28](../01-session-decision-journal.md) *(the P2-driven capability burst, v0.2 → v0.6)* — which absorbed the design-session working notes §35–§36 this ADR was written against; those notes were never committed. Errors: [ERR-006, ERR-007](../ledgers/errors.md).

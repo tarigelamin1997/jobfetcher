@@ -5,7 +5,7 @@
 
 ## Context
 
-After the settings work ([plan §37](../../)), the "normal job-seeker" knobs (search targeting, the three shortlist-strictness knobs, the profile) are all user-editable — but only by editing a YAML that is **bundled into the Lambda deployment zip**, which means **rebuild + `terraform apply`** to change *any* value. Tarig: *"this is not efficient or user-friendly — I shouldn't reconfigure and redeploy every time."*
+After the settings work ([journal §28](../01-session-decision-journal.md); the working notes §37 originally cited were never committed), the "normal job-seeker" knobs (search targeting, the three shortlist-strictness knobs, the profile) are all user-editable — but only by editing a YAML that is **bundled into the Lambda deployment zip**, which means **rebuild + `terraform apply`** to change *any* value. Tarig: *"this is not efficient or user-friendly — I shouldn't reconfigure and redeploy every time."*
 
 The root cause is not "literals vs variables" — it is that **config lives inside the immutable deployment artifact**. Any value baked into the zip needs a redeploy to change. Variable-substitution (his first idea) only helps if the variables resolve at *runtime*; as Lambda env vars they'd be flat strings that fight the list/nested fields (`job_titles`, `skills`, `avoid_keywords`), cap at 4 KB, and still require an AWS API call — not user-friendly.
 
@@ -37,4 +37,4 @@ The wiring made a clean fix cheap: the Lambda role **already** grants `s3:GetObj
 - **Seam to a UI:** an eventual settings form writes the same S3 object (or the DB) — no pipeline change needed.
 - **Config is not versioned** in S3 (bucket versioning is OFF) — a bad edit has no S3 rollback yet; `push_config.py`'s pre-upload validation is the current guard. S3 versioning for config-rollback is an easy later add.
 
-Full reasoning: [journal](../01-session-decision-journal.md) · plan §38. Related: [ADR-0015](0015-type-replaceable-pipeline-stages.md) (ports), [ADR-0020](0020-lambda-deployment-packaging.md) (packaging).
+Full reasoning: [journal §28](../01-session-decision-journal.md) — the P2-driven capability burst, which absorbed the design-session working notes §38 this ADR was written against; those notes were never committed. Related: [ADR-0015](0015-type-replaceable-pipeline-stages.md) (ports), [ADR-0020](0020-lambda-deployment-packaging.md) (packaging).
