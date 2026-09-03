@@ -21,7 +21,7 @@ We ingest *unfiltered* job data from external APIs and land/filter it ourselves.
 - **Impact:** multi-source + cross-source clustering dedup stays **M2** ([ADR-0005](0005-dedup-cluster-and-surface.md), [roadmap](../03-roadmap.md)); ingestion is a **medallion landing** ([02-architecture](../02-architecture.md#ingestion--medallion-landing-the-operational-medallion)); the v0 build opens with the coverage probe ([04-v0-build-plan](../04-v0-build-plan.md)).
 
 ## Addendum — query strategy + request budget (2026-06-17)
-The concrete probe configuration, decided interactively (see plan §20). Config lives in [`config/search_config.sample.yml`](../../config/search_config.sample.yml); the runner is [`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py).
+The concrete probe configuration, decided interactively (see [working-document §20](../session-log/working-document.md)). Config lives in [`config/search_config.sample.yml`](../../config/search_config.sample.yml); the runner is [`scripts/jsearch_probe.py`](../../scripts/jsearch_probe.py).
 - **Query matrix = 3 core titles × 6 GCC countries = 18 base queries.** Titles: `Data Engineer`, `Data Platform Engineer`, `Data Architect`. Countries (`country` param): `sa, ae, qa, kw, bh, om`. On-site oriented → `remote_jobs_only=false`.
 - **Backfill window = `date_posted=month` (30 days)** — a one-time seed/probe window, *distinct from the later daily-incremental window* (deferred — "backfill only for now").
 - **Budget split:** one 30-day all-GCC sweep ≈ **40–70 requests** (≤ `max_pages_per_query`, hard `request_budget_per_run` cap) → **fits free Basic (200/mo)**, room for 2–3 sweeps; daily all-GCC incremental ≈ 18/run → ~540/mo → **Pro (10k/mo, $25)**, deferred until the probe's numbers justify it.

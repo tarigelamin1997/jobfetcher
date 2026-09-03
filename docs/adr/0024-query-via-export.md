@@ -29,4 +29,4 @@ Ship **`scripts/export.py`** — a read-only snapshot of the operational DB into
 - The snapshot may contain the real profile / job data → `export/` is gitignored, never committed.
 - **Follow-ons (noted):** a `score_history` append table for full time-series ("45→62→78"), and a per-run **input snapshot** (which profile/config produced each score) to fully "search previous inputs" — both small schema adds; today's export covers the full *results* history + the current profile. A hosted **dashboard** remains the end-state.
 
-Full reasoning: [journal](../01-session-decision-journal.md) · plan §42. Related: [ADR-0018](0018-persistence-sqlalchemy-data-api-repository.md) (the DB), [ADR-0023](0023-reassess-replay.md) (the `previous_score` history this surfaces).
+Full reasoning: [journal §28](../01-session-decision-journal.md) — the P2-driven capability burst, which absorbed the design-session working notes §42 this ADR was written against; those notes were never committed. Related: [ADR-0018](0018-persistence-sqlalchemy-data-api-repository.md) (the DB), [ADR-0023](0023-reassess-replay.md) (the `previous_score` history this surfaces).
