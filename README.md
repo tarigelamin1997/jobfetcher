@@ -32,7 +32,7 @@ A personal-scale tool built to **production standards**, and deliberately an exe
 
 ## Architecture
 
-### As-built (what's live today, `v0.12.0`)
+### As-built (what's live today, `v0.12.1`)
 
 One EventBridge-scheduled Lambda (`jobfetcher.handlers.pipeline.handler`) runs the whole operational medallion **fully unattended** (the daily 06:00 UTC cron ran solo end-to-end 2026-07-10), threading one correlation `run_id` through logs, rows, and S3 objects. Since v0 it has gained **in-Lambda concurrency** (a `ThreadPoolExecutor` fans out silver dissection with all DB writes kept on the main thread) behind a **deadline guard** (a run returns `partial` rather than timing out), a **`{"mode":"reassess"}` replay path** (re-score already-bronzed postings against the current profile, zero JSearch calls), **runtime config read from S3** (settings change with no rebuild/redeploy), **append-only `score_event` + `application_event` lineage** (re-scores and human overrides never erase judgments), a **7-factor score carrying 7 bounded subscores + a SHADOW-mode weighted `code_total`** (logged + persisted, never yet the product number — an M7 cut-over criterion), a **card-style SES digest that tells the truth** — "new since last digest" leads (graduations badged `↑ old→new`), earlier matches compact into a "still open" count, and same-fingerprint repeats collapse to one card ([ADR-0027](docs/adr/0027-digest-truthfulness.md)) — whose overflow lines now carry a **presigned link to a self-contained HTML page of every scored job** ([ADR-0030](docs/adr/0030-reachable-full-list-from-digest.md)), and an **ops-hardened runtime** — a **`{"mode":"smoke"}` post-deploy gate**, two **CloudWatch alarms → SNS email** (a dead-man on the daily rule + a Lambda Errors alarm), and an **Aurora cold-start resume-wait** so a scale-to-zero resume is waited out, not fatal ([ADR-0029](docs/adr/0029-ops-hardening.md); [ERR-009](docs/ledgers/errors.md)), a **boundary-resampled scorer** (a score near the cutoff is re-scored and the median kept, so the shortlist boundary isn't a coin-flip; a graduation is badged only on a real profile change — [ADR-0031](docs/adr/0031-boundary-self-consistency-honest-graduations.md)), and **full S3 audit persistence** (every stage's structured results also land in S3 as batched JSONL — `silver/`/`gold/`/`scores/`/`runs/`, non-fatal, alongside Aurora) plus a **local Streamlit control panel** (`streamlit run scripts/panel.py`) for browse/curate/config ([ADR-0032](docs/adr/0032-full-s3-audit-persistence.md) · [ADR-0033](docs/adr/0033-local-control-panel.md)):
 
@@ -48,7 +48,12 @@ flowchart LR
   G --> SC["score<br/>DeepSeek 7-factor ATS + 7 shadow subscores<br/>+ weighted code_total → score rows"]
   SC --> N["notify<br/>SES card digest + presigned full-list link"]
   N --> RPT["report<br/>self-contained HTML → S3 reports/"]
-  SM["Secrets Manager<br/>jobfetcher/deepseek · jobfetcher/jsearch"] -.-> H
+  N -. "signed ✓Mark-applied links" .-> CAP
+  RPT -. "signed links" .-> CAP
+  YOU(["you, in your inbox"]) -- "one click (GET ?token=…)" --> CAP["capture Lambda<br/>PUBLIC Function URL (auth = NONE)<br/>HMAC verify BEFORE any DB touch"]
+  CAP -- "valid token only" --> PG
+  SM["Secrets Manager<br/>jobfetcher/deepseek · jobfetcher/jsearch<br/>+ the Terraform-owned capture signing key"] -.-> H
+  SM -.-> CAP
   B -. raw .-> S3[("S3<br/>raw · audit · reports · config")]
   RPT -. presigned .-> S3
   S & G & SC -. audit jsonl v0.12<br/>silver/gold/scores .-> S3
@@ -67,6 +72,7 @@ flowchart LR
 - **Immutable bronze enables replay** ([`v0.4.0`](docs/adr/0023-reassess-replay.md)): a `{"mode":"reassess"}` invocation re-scores the already-fetched postings against the **current** profile with **zero JSearch calls** — as your profile grows a `stretch` role graduates to `strong_fit`, and `previous_score` tracks before→after. Live-proven: 180 reassessed, 15 graduated, bronze untouched.
 - **Runtime config in S3, not the zip** ([`v0.3.0`](docs/adr/0022-runtime-config-in-s3.md)): the `SearchSpec` + profile YAMLs are read from S3 at runtime and the profile row **re-syncs from config every run** (fixing the old write-once trap). Changing any of the three strictness knobs (threshold · hard-floor · near-miss band) or the JSearch query is `python scripts/push_config.py` — no rebuild, no redeploy.
 - **Gold is deterministic in v0** — at 10–30 jobs/day an LLM gold-filter is largely redundant with the Scorer (P1 minimalism). The subset-title filter ("Data Architect" needs `data`+`architect`) is config-selectable via `$GOLD_FILTER_STRATEGY`; an `LlmFilterStrategy` is built behind the same port for scale.
+- **One public write surface, and the auth is a token — not the network** ([INV-001 / ADR-0035](docs/adr/0035-outcome-capture-endpoint.md)): the "✓ Mark applied" links in the digest and the full-list report hit a **second Lambda behind a Function URL with `authorization_type = "NONE"`**. Every request must carry a short-lived **HMAC-signed token** scoped to exactly `{posting_id, status}` (30-day TTL, signing key generated and owned by Terraform in Secrets Manager). `verify` runs in constant time **before any DB touch**, so a forged or expired token returns 400 having written **zero rows**; a valid one drives exactly one append-only `application_event`. This exists because outcome capture was CLI-only, so the log had **0 rows** and scoring had no ground truth to calibrate against. **Accepted trade-off:** a one-click GET can be pre-fetched by an email scanner → a spurious `applied`; the append-only log plus `track.py override` makes that correctable, and a confirmation interstitial is the documented fast-follow.
 - **Lambda runs outside any VPC** — Aurora is reached over the **RDS Data API** (HTTPS), so there is no VPC/NAT, and Aurora Serverless v2 scales to zero when idle.
 
 ### Target shape (reached via migrations, not built at once)
@@ -104,12 +110,12 @@ The CV tailor, multi-source clustering dedup, Step Functions, Notion, and the db
 | Area | Choice |
 |---|---|
 | **Language** | Python 3.11 · Pydantic 2 |
-| **Compute** | AWS Lambda (one handler, outside any VPC) · EventBridge daily cron |
+| **Compute** | AWS Lambda, outside any VPC — the scheduled pipeline handler (EventBridge daily cron) **plus a second handler from the same zip behind a public Function URL** for outcome capture ([ADR-0035](docs/adr/0035-outcome-capture-endpoint.md)) |
 | **Store** | Aurora Serverless v2 (scale-to-0) via the **RDS Data API** · S3 (raw bronze payloads · runtime config YAMLs · the **`silver/`/`gold/`/`scores/`/`runs/` audit trail** (v0.12.0) · presigned reports) |
 | **DB access** | SQLAlchemy 2 + `sqlalchemy-aurora-data-api` behind a `Repository` port · Alembic migrations |
 | **LLM** | OpenAI-compatible API, **provider + model in config** ([ADR-0017](docs/adr/0017-llm-transport-openai-compatible-deepseek.md)); v0 = **DeepSeek** (`deepseek-v4-flash` dissect · `deepseek-v4-pro` score). Bedrock parked. |
 | **Email** | SES (HTML + plaintext digest) |
-| **Secrets** | Secrets Manager (`jobfetcher/deepseek`, `jobfetcher/jsearch`) |
+| **Secrets** | Secrets Manager — `jobfetcher/deepseek`, `jobfetcher/jsearch` (CLI-created data-source keys) + the capture-endpoint HMAC signing key (**generated and owned by Terraform**, never in outputs or logs) |
 | **IaC** | Terraform ≥ 1.10 — **32 resources**, us-east-1, least-privilege IAM (no Bedrock); **S3 remote state** (`backend "s3"`, native `use_lockfile` locking, deliberately unmanaged state bucket) |
 | **Known trade-off** | Aurora runs **unencrypted at rest**, deliberately — a labeled decision, not an oversight ([ADR-0038](docs/adr/0038-aurora-unencrypted-at-rest.md)). The data is experimental and re-derivable; encryption is free but cannot be enabled in place, so turning it on destroys and recreates the cluster. Revisited the moment the data stops being throwaway. |
 | **Observability** | 3 CloudWatch alarms (dead-man on the daily rule · Lambda Errors · a returned `statusCode:500` via log-metric-filter) → 1 SNS topic → email; `{"mode":"smoke"}` post-deploy gate |
@@ -201,6 +207,7 @@ LocalStack can't mock the Aurora Data API, so integration DB tests use a **real 
 - **Lineage proven live (2026-07-08):** migrations `0004`+`0005` applied over the Data API with the **228-score baseline backfill verified**; a reassess smoke wrote **771 lineage events through the new dual-write**, **10 graduations standing**, and one `track.py override` exercised the codebase's first **`.rowcount` over the Data API** (clean) ([ADR-0025](docs/adr/0025-score-event-lineage.md) · [ADR-0026](docs/adr/0026-outcome-tracking-override-lineage.md); ERR-008).
 - **First unattended flight (2026-07-10 06:00 UTC):** the daily EventBridge cron ran the whole pipeline end-to-end and delivered a digest **with nobody watching** — post-deploy smoke gate `200 @ 0006_subscores`, both alarms armed ([ADR-0029](docs/adr/0029-ops-hardening.md)).
 - **Reachable full-list proven live (2026-07-10):** `get_all_scored` over the Aurora Data API returned **286 rows** (61 above / 225 below threshold), rendered into a **~242 KB self-contained HTML report** written to S3 and presigned into the digest ([ADR-0030](docs/adr/0030-reachable-full-list-from-digest.md)).
+- **The public capture endpoint proven live (2026-07-20):** the security core was validated on the deployed Function URL *without polluting the outcome log* — forged / expired / absent token → **400**, valid token for an unknown posting → **404 with 0 rows written**. Auth is verified before any DB touch, so the negative cases never reach Aurora ([ADR-0035](docs/adr/0035-outcome-capture-endpoint.md); [INV-001](docs/investigations/INV-001-dark-feedback-loop/README.md)).
 - **Validation gates VG1–VG8** are **behavioral and carry a negative case** (a presence/liveness check is no gate): ingestion, scoring, best-effort determinism, idempotency, notification, teardown, secrets hygiene, threshold-is-config. Each maps to named positive + negative tests in [`tests/README.md`](tests/README.md).
 - **CI** runs ruff, the test suite with an 85% coverage floor, `terraform validate`, and a gitleaks secret-scan on every push.
 

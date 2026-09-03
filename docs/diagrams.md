@@ -8,7 +8,7 @@
 
 ## 1 · Full-stack architecture (target)
 
-The complete two-plane design (high-level). **What's live today is a subset — `v0.12.0`, running fully unattended** (daily 06:00 UTC EventBridge cron → one Lambda → fetch → dissect → gold → 7-factor score (+ shadow subscores/`code_total`, **boundary-resampled** near the cutoff, v0.11) → SES card-digest + a presigned S3 full-list report, on Aurora SLv2 via the RDS Data API + S3; **concurrent** dissect/score with a deadline guard; **config read from S3 at runtime**; a **`{"mode":"reassess"}` replay** path and a **`{"mode":"smoke"}` deploy gate**; **`score_event` + `application_event` lineage**; **3 CloudWatch alarms → SNS → email** (which fired for 38 days without being acted on — [B-5](ledgers/backlog.md)); Terraform state in an S3 backend; **full S3 audit persistence** (every stage's results → S3 JSONL: `silver/`/`gold/`/`scores/`/`runs/`, v0.12); a **local Streamlit control panel** (browse/curate/config, v0.12); deployed + live-validated); the analytical plane + the other operational boxes arrive by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
+The complete two-plane design (high-level). **What's live today is a subset — `v0.12.0`, running fully unattended** (daily 06:00 UTC EventBridge cron → one Lambda → fetch → dissect → gold → 7-factor score (+ shadow subscores/`code_total`, **boundary-resampled** near the cutoff, v0.11) → SES card-digest + a presigned S3 full-list report, on Aurora SLv2 via the RDS Data API + S3; **concurrent** dissect/score with a deadline guard; **config read from S3 at runtime**; a **`{"mode":"reassess"}` replay** path and a **`{"mode":"smoke"}` deploy gate**; **`score_event` + `application_event` lineage**; **3 CloudWatch alarms → SNS → email** (which fired for 38 days without being acted on — [B-5](ledgers/backlog.md)); Terraform state in an S3 backend; **full S3 audit persistence** (every stage's results → S3 JSONL: `silver/`/`gold/`/`scores/`/`runs/`, v0.12); a **local Streamlit control panel** (browse/curate/config, v0.12); and a **public outcome-capture endpoint** — a second Lambda behind a Function URL with `authorization_type = "NONE"`, where **the auth is an HMAC token, not the network**, so one click from the inbox records an outcome ([ADR-0035](adr/0035-outcome-capture-endpoint.md), shipped 2026-07-20; **the project's only internet-facing write surface**); deployed + live-validated); the analytical plane + the other operational boxes arrive by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
 
 ```mermaid
 flowchart TB
@@ -33,6 +33,7 @@ flowchart TB
     NT --> RPT[("S3 reports/{date}/jobs-{run_id}.html<br/>all scored jobs · presigned https URL (v0.10)")]
     SC -.->|"reassess (v0.4)<br/>{mode:reassess} · re-score existing · no fetch"| SC
     EB -.->|"{mode:smoke} deploy gate (v0.9)<br/>Data-API connect + alembic_version check"| ORC
+    CAP["capture Lambda (INV-001)<br/>PUBLIC Function URL · auth = HMAC token, not the network<br/>verify BEFORE any DB touch → 1 application_event"]
     PG[("Postgres — Aurora SLv2<br/>via RDS Data API · + pgvector")]
     S3[("S3<br/>raw + config (v0.3) + CVs + reports (v0.10)<br/>+ audit silver/gold/scores/runs (v0.12)")]
     SM["Secrets Manager"]
@@ -72,6 +73,11 @@ flowchart TB
   PANEL -.->|"config push"| S3
   NT --> NO
   NT --> US
+  NT -.->|"signed capture links<br/>injected per job (INV-001)"| CAP
+  RPT -.->|"signed capture links"| CAP
+  US -->|"one click from the inbox<br/>GET ?token=…"| CAP
+  CAP -->|"valid token only → 1 append-only row"| PG
+  SM -.->|"HMAC signing key<br/>(Terraform-owned)"| CAP
   PG --> EXP
   EXP --> US
   PG --> EL
