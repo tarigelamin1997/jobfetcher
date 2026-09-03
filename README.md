@@ -120,7 +120,7 @@ The CV tailor, multi-source clustering dedup, Step Functions, Notion, and the db
 | **Known trade-off** | Aurora runs **unencrypted at rest**, deliberately — a labeled decision, not an oversight ([ADR-0038](docs/adr/0038-aurora-unencrypted-at-rest.md)). The data is experimental and re-derivable; encryption is free but cannot be enabled in place, so turning it on destroys and recreates the cluster. Revisited the moment the data stops being throwaway. |
 | **Observability** | 3 CloudWatch alarms (dead-man on the daily rule · Lambda Errors · a returned `statusCode:500` via log-metric-filter) → 1 SNS topic → email; `{"mode":"smoke"}` post-deploy gate |
 | **AWS SDK** | boto3 |
-| **Tests** | pytest — **<!--fact:tests-->549<!--/fact--> collected: <!--fact:tests_unit-->482<!--/fact--> unit + <!--fact:tests_integration-->67<!--/fact--> integration** (integration needs Docker or `$JOBFETCHER_DB_URL`; live-key tests skip without a key), live smoke, ~95% coverage in CI (85% floor) |
+| **Tests** | pytest — **<!--fact:tests-->550<!--/fact--> collected: <!--fact:tests_unit-->482<!--/fact--> unit + <!--fact:tests_integration-->67<!--/fact--> integration** (integration needs Docker or `$JOBFETCHER_DB_URL`; live-key tests skip without a key), live smoke, ~95% coverage in CI (85% floor) |
 | **CI** | GitHub Actions — ruff + tests + 85% coverage floor + `terraform validate` + **gitleaks** secret-scan; pre-commit (gitleaks + ruff) |
 
 dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in sibling projects — not in this repo today. See the [decision journal](docs/01-session-decision-journal.md).
