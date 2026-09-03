@@ -1,6 +1,6 @@
 # ADR-0037 — Per-task reasoning budgets: extraction thinks nothing, scoring thinks a little
 
-**Status:** Accepted · **built 2026-09-01**, branch `feat/gold-rejection-lineage` · resolves [ERR-011](../ledgers/errors.md) · decided by Tarig 2026-09-01 · non-crucial by blast radius (no schema, no infra) but it **changes what the scorer does**, so it is recorded as a decision rather than a tuning tweak
+**Status:** Accepted · built 2026-09-01 · **deployed + live-validated 2026-09-02** (PR #36) · resolves [ERR-011](../ledgers/errors.md) · decided by Tarig 2026-09-01 · non-crucial by blast radius (no schema, no infra) but it **changes what the scorer does**, so it is recorded as a decision rather than a tuning tweak
 
 ## Context
 
