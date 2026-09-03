@@ -70,7 +70,11 @@ Still **not** adopted (coordination/scale ceremony — deferred, labeled): the f
 
 ### One canonical home per fact ([ERR-016](ledgers/errors.md))
 
-The system above says which *layer* owns which *kind* of writing. It did not say which **file owns a given fact** — so the same measurement was copy-pasted into many, and every release meant hand-syncing **~27,700 words** across six files. Measured 2026-09-03: `"286 rows"` appeared in **12** files, `"242 KB"` in 11, `"15.95"` in 10. Nothing failed when one copy went stale, so they did.
+The system above says which *layer* owns which *kind* of writing. It did not say which **file owns a given fact** — so the same content was copy-pasted into many, and every release meant hand-syncing **~27,700 words** across six files. Nothing failed when a copy went stale, so copies went stale.
+
+**A caveat on how that was measured, because the obvious metric misleads.** Counting files that mention `"286 rows"` (12) or `"15.95"` (10) overstates the problem, and clearing those counts would make the docs *worse*. Both are **historical measurements** — frozen the moment they were taken, incapable of going stale. Each appears in a different row of a different ledger (the ADR that decided it, the contract it validated, the procedure gate it passed, the backlog item it closed), where it is the evidence for *that* row's claim; stripping it to a link would make each row less self-contained, which is the opposite of what a ledger is for.
+
+**The duplication that actually cost something was the other two kinds:** *derived counts* typed as literals — now CI-guarded, so they cannot drift — and *release narrative* restated in full. `CLAUDE.md` had become a second CHANGELOG: eleven per-release paragraphs, ~15 numbers owned elsewhere. That is the one that got cut (3,166 → 1,832 words), and the rule below is what stops it growing back.
 
 | Fact class | Owner (states it in full) | Everyone else |
 |---|---|---|
@@ -90,3 +94,5 @@ The system above says which *layer* owns which *kind* of writing. It did not say
 - **Historical** — a measurement taken once, on a date (`286 rows over the Data API`, `avg spread 15.95`, `$0.0155/posting`). These are **correct forever as of their date** and must not be automated. The fix for these is *attribution*, not automation: state them once, with the date and the conditions, in the owning file — and link from anywhere else that needs them.
 
 Confusing the two is its own bug: automating a historical measurement would demand that history change, and typing a derived one guarantees it goes stale.
+
+**One labelled exception: [`README.md`](../README.md)'s *Proof* section.** It restates live-run measurements the CHANGELOG owns, and it stays. This repo is explicitly a portfolio piece as well as a tool; a reader deciding whether it is worth their time needs the evidence *in front of them*, not one click away. Removing it to satisfy a de-duplication rule would make the artifact worse to serve a rule that exists to make it better. Per the [defensibility rubric](00-design-philosophy.md), that is labelled here rather than left as an unexplained duplicate — and it is bounded: **dated, live-run results only.** Release narrative, contract shapes and unit state still link out.
