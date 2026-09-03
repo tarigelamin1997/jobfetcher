@@ -1,6 +1,6 @@
 # ADR-0036 — Gold-filter rejection lineage (bounding the read without freezing the decision)
 
-**Status:** Accepted · **built 2026-09-01**, branch `feat/gold-rejection-lineage` · **CRUCIAL tier** (schema migration `0007` — both human checkpoints required; the live deploy is a separate checkpoint) · resolves [ERR-010](../ledgers/errors.md)
+**Status:** Accepted · built 2026-09-01 · **deployed + live-validated 2026-09-02** (PR #36; migration `0007` applied over the Data API, final run `{'gold': 618, 'scored': 618, 'failed': 0}`) · **CRUCIAL tier** (schema migration — both human checkpoints required; the live deploy was a separate checkpoint, since passed) · resolves [ERR-010](../ledgers/errors.md)
 
 ## Context
 

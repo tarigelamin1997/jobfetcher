@@ -12,6 +12,11 @@ source: <backlog ref, e.g. B-4, or "P2 scan 2026-..."; who/what surfaced it>
      artifacts (query dumps, logs, before/after) in a sibling evidence/ folder. Relative links
      from here: ../../adr/ · ../../ledgers/ · ../../../src/ . Delete this comment. -->
 
+<!-- LINK-CHECK: the ../../adr/00NN-... targets below are deliberate placeholders, not broken
+     links — this is a template, so they cannot resolve until a real case is filled in. The
+     doc-audit (scripts/check_docs.py) allowlists this file for that reason; do not "fix" them.
+     Every OTHER link in a filled-in dossier must resolve. -->
+
 # INV-NNN · <title>
 
 **Status:** `<status>` · **Severity:** `<severity>` · **Owner of the fix:** _(a Surgeon, once handed off)_
