@@ -49,6 +49,14 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      # Doc audit (ERR-016). Fails the build on: a broken internal link, an
+      # unresolvable `plan §NN` citation, a guarded prose count that disagrees
+      # with the command that produces it, or a stale "not yet deployed" claim.
+      # This is the armed half of the project's second pillar — a standard not
+      # wired into a command is a suggestion, and wiring alone is not enough.
+      - name: Doc audit (check_docs)
+        run: python scripts/check_docs.py
+
       - name: Migrate schema (alembic)
         run: alembic upgrade head
 
