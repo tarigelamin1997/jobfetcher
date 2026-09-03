@@ -25,7 +25,7 @@ It does **not** auto-apply (external ATS automation is brittle and risky). It re
 A personal-scale tool built to **production standards**, and deliberately an exercise in **evolutionary architecture**:
 
 - It ships as a **minimal core first** (v0), then grows only by **solving the next real bottleneck** — every added piece of complexity is justified by a capability it unlocks and recorded in an ADR.
-- Each migration is a **clean, observable GitHub release** with a before/after diagram. You can read the architecture *evolve*.
+- Each migration is a **clean, observable GitHub release**: a semver tag, a CHANGELOG entry recording what was measured live, an ADR naming the rejected alternatives, and — where the topology changed — the updated Mermaid diagram in [`docs/diagrams.md`](docs/diagrams.md). You can read the architecture *evolve* through that trail. *(This bullet used to promise a **before/after diagram per release**. Fifteen releases shipped without one; the claim is [retracted rather than quietly dropped](docs/adr/0001-evolutionary-architecture.md).)*
 - It is **honest about scale**: at ~10–30 jobs/day nothing here is justified by load — so every choice is defended on *fit and judgment*, not buzzwords. Where something exists to demonstrate a skill, it is labeled as such.
 
 ---
