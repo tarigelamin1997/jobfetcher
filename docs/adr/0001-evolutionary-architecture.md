@@ -26,6 +26,6 @@ Build the **minimal working core (v0)** first, then grow through a **sequence of
 
 **Retracted, not quietly dropped.** Producing 15 retroactive diagram pairs now would violate the project's own rule that documentation is *constructed live, not reconstructed later* — they would be drawn from the code as it is today, which is exactly the reconstruction the first pillar rejects. What the repo actually maintains, and maintains well, is [`docs/diagrams.md`](../diagrams.md): a set of thematic Mermaid diagrams (architecture, ingestion, roadmap, dimensional model, replay, config, read/curate surfaces) **updated in place when a release changes the topology**. That is the honest version of the same intent — the architecture is still legible as it evolves; it is legible from the current diagram plus the CHANGELOG and the ADR, not from a per-release pair.
 
-The rest of the release discipline named here **is** kept: semver tags, a CHANGELOG entry, an ADR per real decision, and a migration script when data changes.
+The rest of the release discipline named here **is** kept: semver tags, a CHANGELOG entry, an ADR per real decision, and a migration script when data changes. This retraction is one instance of a class — see [ERR-016](../ledgers/errors.md), where the class itself is what got fixed.
 
 *This note is appended rather than edited into the text above, because what ADR-0001 believed in 2026-06 is the useful record; a rewrite would hide that the requirement was ever made.*

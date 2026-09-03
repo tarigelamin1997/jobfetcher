@@ -194,14 +194,19 @@ def check_stale_deploy() -> list[str]:
     ADR-0036 carried this in three places for a day after it went live (Category
     A). The phrasing is narrow on purpose: it flags the claim, and a human
     decides whether the thing has since shipped.
+
+    Quoted occurrences are skipped: the phrase inside quotes or backticks is
+    *naming* it (ERR-016 and /review-step both do) rather than *claiming* it.
+    The real offenders were unquoted and bold.
     """
     needles = ("not yet deployed", "not yet live-validated", "not deployed or live")
+    quoted = re.compile(r'"[^"]*"|`[^`]*`')
     bad = []
     for f in md_files():
         if rel(f).startswith("docs/session-log/"):
             continue  # verbatim historical record — never edited to look tidier
         for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-            low = line.lower()
+            low = quoted.sub("", line.lower())
             for n in needles:
                 if n in low:
                     bad.append(f"{rel(f)}:{i} — {n!r}; if it has shipped, say so")

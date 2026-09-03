@@ -187,3 +187,34 @@ Multiply by the [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduati
 **Connections:** [ERR-011](errors.md) / [ERR-014](errors.md) (both were balance failures wearing other costumes) · [ADR-0037](../adr/0037-per-task-reasoning-budgets.md) (the effort setting that drives the cost) · [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md) (the 3× resample multiplier) · [B-9](#) (the retry tail also spends).
 
 > **How this feeds the roadmap:** when the current program closes and P2 reopens, these entries are ranked (leverage = capability ÷ complexity) alongside the [roadmap](../03-roadmap.md) candidates (M2 dedup, M3 Step Functions, near-miss M4, CV tailoring). A graduated entry becomes a labeled release; a rejected one stays here with the reasoning.
+
+---
+
+## B-11 · The tree is 84 files from `ruff format` clean, and the gate that claimed to check it never ran
+
+**Logged:** 2026-09-03, during the documentation-debt clearing ([ERR-016](errors.md)). **Status:** open, contained, **documented honestly**. Not built — this is a code change and was deliberately left out of a docs-only unit.
+
+**What.** `.claude/commands/review-step.md` Check 1 stated that a build unit cannot close until *"`ruff check` and `ruff format --check` clean on the changed Python."* CI (`.github/workflows/ci.yml`) has only ever run `ruff check .`. Measured 2026-09-03:
+
+```
+$ python -m ruff format --check .
+84 files would be reformatted, 7 files already formatted
+```
+
+So the documented gate **would hard-fail on any unit that actually ran it** — which is how it survived: nobody ran it.
+
+**Why it matters, and it is not the formatting.** This is the third instance in two sessions of the same defect, and the pattern is the finding:
+
+| | Mechanism | Why it was decorative |
+|---|---|---|
+| [ERR-015](errors.md) | branch protection requiring a PR | `enforce_admins` was `false` — it exempted its only user |
+| **B-8** (above) | ~13 `# noqa: BLE001` suppressions | `BLE001` was never enabled — the suppressions suppressed nothing |
+| **B-11** | `/review-step` Check 1 | `ruff format --check` was never wired into anything, and could not have passed |
+
+Each looked like enforcement and was ornament. The project's second pillar says *a standard not wired into a command is a suggestion*; these say the harder half — **a standard can be wired and still be a suggestion if it is never armed, or armed against nobody.**
+
+**Fixed for now by telling the truth.** Check 1 now describes what is actually enforced (`ruff check`, with `ruff` pinned to `0.6.9`) and states plainly that `ruff format --check` is not run. That closes the honesty gap; it does **not** close the 84 files.
+
+**The remaining work (a code unit, not a docs one).** Either (a) run `ruff format` once across the tree, absorb the one-time diff, and add `ruff format --check` to CI so it stays clean — best done in the same unit as B-8's 262 lint errors, since both are one formatting-shaped diff against a pinned tool; or (b) decide formatting is not enforced here and delete the aspiration entirely. **Option (a) is recommended**, with the caveat that the diff will touch nearly every file and should therefore land alone, on its own PR, with no behavioural change mixed in.
+
+**Owning stage:** the next code/tooling unit — alongside **B-8** (same tool, same pin, same class of debt). Explicitly *not* the documentation unit that logged it: reformatting 84 files is a code change, and the docs-only scope was set deliberately.
