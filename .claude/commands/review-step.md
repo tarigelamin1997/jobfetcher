@@ -12,8 +12,13 @@ Gate the **code** of a build unit before it closes. Nothing here trusts that a c
 Run **in order**. Report **PASS / FAIL / SKIP** for each. This command is read-only — it reports, it does not fix.
 
 ### Check 1 — Lint / static (behavioral)
-- `ruff check` and `ruff format --check` clean on the changed Python.
+- `ruff check` clean on the changed Python. **This is what CI enforces** (`.github/workflows/ci.yml` → `ruff check .`), with `ruff` pinned to `0.6.9` in both `pyproject.toml` and `.pre-commit-config.yaml` so local and CI cannot disagree ([B-8](../../docs/ledgers/backlog.md)).
 - **FAIL** with the offending files otherwise.
+- ⚠️ **`ruff format --check` is NOT run and NOT enforced.** This check used to claim it was. It never has been — the tree is 84 files from format-clean, so running it would hard-fail every unit, and CI has only ever run `ruff check`. Rather than keep a gate nobody could pass, the gap is recorded as [**B-11**](../../docs/ledgers/backlog.md) with an owning stage. A documented gate that would fail if anyone ran it is the same shape as ERR-015 — a written standard more demanding than the enforced one — and is fixed the same way: by making the document tell the truth.
+
+### Check 1b — Doc audit
+- `python scripts/check_docs.py` clean: internal links resolve, no `plan §NN` citations, every guarded prose count matches its ground-truth command, no stale "not yet deployed" claims.
+- Also enforced by CI, so this is a pre-flight rather than the gate itself ([ERR-016](../../docs/ledgers/errors.md)).
 
 ### Check 2 — Secret scan
 - No secret / API key / material in the diff or repo (run the pre-commit secret scan; review `git diff --staged`).

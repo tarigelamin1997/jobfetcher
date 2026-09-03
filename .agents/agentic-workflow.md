@@ -74,7 +74,18 @@ flowchart LR
    - **`README.md` + `CLAUDE.md`** — if the unit changed what the system *is* (a new surface, a new resource, a changed count), fix it here. These are what a reader meets first.
    - **`02-architecture.md` + `diagrams.md`** — if the unit added or changed a component, it belongs in the as-built picture. A new internet-facing surface is never "just a detail".
 
-   This is a checklist, not a suggestion — the [second pillar](../docs/00-design-philosophy.md) is that *a standard not wired into a command is a suggestion*, and this list is the command.
+   **⚠️ This list was amended on 2026-09-01 to name those five docs, and closed with "this is a checklist, not a suggestion." Two days later four of the five still had zero mention of the public capture endpoint** ([ERR-016](../docs/ledgers/errors.md)). The amendment was written and immediately not followed. So the claim below is now stated precisely, split into what a machine enforces and what only a person can:
+
+   **Mechanical — CI fails the PR** ([`scripts/check_docs.py`](../scripts/check_docs.py), in the required `lint-and-test` job on a branch protected with `enforce_admins: true`):
+   - a broken internal link anywhere in the repo's markdown;
+   - a `plan §NN` citation (an unresolvable pointer being reintroduced);
+   - a **guarded count** that disagrees with its ground-truth command — so a unit that adds tests, a Terraform resource, an ADR or a release and leaves the prose behind **cannot merge**;
+   - a stale "not yet deployed" claim.
+   Run it yourself before pushing: `python scripts/check_docs.py`.
+
+   **Human — nothing checks this, and pretending otherwise is how the debt started.** No script can tell whether *this* unit added a component that belongs in the as-built picture, or changed what the system fundamentally *is*. **The judgement to make explicitly, in the PR body:** *did this unit add or change a surface, a resource, or a behaviour a first-time reader must know about? If yes — `README.md`, `CLAUDE.md`, `02-architecture.md`, `diagrams.md`.* Answer it in writing even when the answer is "no", because an unanswered question is what produced ERR-016; a written "no" is auditable, a skipped one is invisible.
+
+   The [second pillar](../docs/00-design-philosophy.md) says *a standard not wired into a command is a suggestion*. [ERR-015](../docs/ledgers/errors.md) added the harder half: **wiring is necessary and not sufficient — it has to be armed.** Half of this list is now armed. The other half is labelled as unarmed rather than dressed up as a gate.
 7. **Deploy + close-out** (see the deploy checkpoint below): the CHANGELOG `[Unreleased]` entry accrues; **no per-unit tag** — enhancements batch into an occasional `v0.12.x` patch tag ([versioning convention](../CHANGELOG.md)). Then **P2 reopens**.
 
 ---

@@ -67,3 +67,26 @@ Still **not** adopted (coordination/scale ceremony — deferred, labeled): the f
 | Bottleneck investigations | [investigations/](investigations/) | per investigation (a verified dossier between a backlog signal and an ADR decision — [ADR-0034](adr/0034-investigation-dossier-system.md)) |
 
 > The test this system must pass (the **knowledge-transfer test**): a fresh session can read these files and answer *"what is this, why is it built this way, what's the current state, and what do I do next?"* — without the original context window. If it can't, the docs are incomplete.
+
+### One canonical home per fact ([ERR-016](ledgers/errors.md))
+
+The system above says which *layer* owns which *kind* of writing. It did not say which **file owns a given fact** — so the same measurement was copy-pasted into many, and every release meant hand-syncing **~27,700 words** across six files. Measured 2026-09-03: `"286 rows"` appeared in **12** files, `"242 KB"` in 11, `"15.95"` in 10. Nothing failed when one copy went stale, so they did.
+
+| Fact class | Owner (states it in full) | Everyone else |
+|---|---|---|
+| Release narrative + the numbers measured live for a release | [`CHANGELOG.md`](../CHANGELOG.md) | one line + a link to the tag section |
+| Live build/unit state (what shipped, what's in flight) | [`ledgers/phase-index.md`](ledgers/phase-index.md) | link to the row |
+| Port / contract shapes | [`ledgers/interface-contracts.md`](ledgers/interface-contracts.md) | link to the row |
+| Locked decisions | [`ledgers/decisions-locked.md`](ledgers/decisions-locked.md) | link to the row |
+| Direction + open hypotheses | [`03-roadmap.md`](03-roadmap.md) | link |
+| Reasoning, reversals, the wrong turns | [`01-session-decision-journal.md`](01-session-decision-journal.md) + [ADRs](adr/) | link to the § / ADR |
+| Observed bottlenecks | [`ledgers/backlog.md`](ledgers/backlog.md) | link to the B-N |
+
+**`README.md` and `CLAUDE.md` own nothing.** They are the two entry points, so they carry *orientation* — what this is, what's deployed, where to look — and link out for detail. When they restate a per-release measurement they become a second copy that has to be synced, which is exactly how the debt accumulated.
+
+**Two kinds of number, handled differently:**
+
+- **Derived** — a count that a command can produce right now (tests, Terraform resources, releases, ADRs, ERR entries). **Never trust a typed literal.** Wrap it in a non-rendering marker — `<!--fact:tests-->549<!--/fact-->` — and [`scripts/check_docs.py`](../scripts/check_docs.py) diffs it against the real command in CI. A stale one fails the build. `python scripts/check_docs.py --list` prints the live values.
+- **Historical** — a measurement taken once, on a date (`286 rows over the Data API`, `avg spread 15.95`, `$0.0155/posting`). These are **correct forever as of their date** and must not be automated. The fix for these is *attribution*, not automation: state them once, with the date and the conditions, in the owning file — and link from anywhere else that needs them.
+
+Confusing the two is its own bug: automating a historical measurement would demand that history change, and typing a derived one guarantees it goes stale.
