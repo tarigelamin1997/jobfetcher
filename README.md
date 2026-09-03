@@ -2,7 +2,7 @@
 
 **A serverless job-matching pipeline that fetches roles, scores them against your real profile with an LLM, and emails you a daily shortlist — built as an *evolutionary architecture* you can watch grow, one deliberate, documented migration at a time.**
 
-> **Status: `v0.12.1` SHIPPED (2026-09-02 — the outage release; `v0.12.0` 2026-07-17).** The minimal core (`v0.1.0`) is live on AWS; fourteen bottleneck-driven releases have shipped on top of it, each a clean release — and as of `v0.9.0` the pipeline **runs itself fully unattended** (the daily 06:00 UTC EventBridge cron flew solo end-to-end on 2026-07-10, digest delivered with nobody watching).
+> **Status: `v0.12.1` SHIPPED (2026-09-02 — the outage release; `v0.12.0` 2026-07-17).** The minimal core (`v0.1.0`) is live on AWS, and **<!--fact:releases-->15<!--/fact--> releases** have shipped in all — each a clean, tagged release — and as of `v0.9.0` the pipeline **runs itself fully unattended** (the daily 06:00 UTC EventBridge cron flew solo end-to-end on 2026-07-10, digest delivered with nobody watching).
 >
 > **⚠️ Correction (2026-09-02) — the unattended claim above was true, then stopped being true, and nobody noticed for 38 days.** The pipeline returned `statusCode: 500` on **every run from 2026-07-25 to 2026-09-01**; the last digest went out **2026-07-24**. Three independent faults shared one symptom: the gold-filter read crossed the RDS Data API's 1 MB cap, the LLM account ran out of credit, and reasoning tokens consumed the whole `max_tokens` so the API returned HTTP 200 with empty content. The alarms fired on all 38 days and reached the operator — **detection was never the gap**; a signal arriving every morning had become indistinguishable from the product.
 >
@@ -116,11 +116,11 @@ The CV tailor, multi-source clustering dedup, Step Functions, Notion, and the db
 | **LLM** | OpenAI-compatible API, **provider + model in config** ([ADR-0017](docs/adr/0017-llm-transport-openai-compatible-deepseek.md)); v0 = **DeepSeek** (`deepseek-v4-flash` dissect · `deepseek-v4-pro` score). Bedrock parked. |
 | **Email** | SES (HTML + plaintext digest) |
 | **Secrets** | Secrets Manager — `jobfetcher/deepseek`, `jobfetcher/jsearch` (CLI-created data-source keys) + the capture-endpoint HMAC signing key (**generated and owned by Terraform**, never in outputs or logs) |
-| **IaC** | Terraform ≥ 1.10 — **32 resources**, us-east-1, least-privilege IAM (no Bedrock); **S3 remote state** (`backend "s3"`, native `use_lockfile` locking, deliberately unmanaged state bucket) |
+| **IaC** | Terraform ≥ 1.10 — **<!--fact:tf_resources-->32<!--/fact--> resources**, us-east-1, least-privilege IAM (no Bedrock); **S3 remote state** (`backend "s3"`, native `use_lockfile` locking, deliberately unmanaged state bucket) |
 | **Known trade-off** | Aurora runs **unencrypted at rest**, deliberately — a labeled decision, not an oversight ([ADR-0038](docs/adr/0038-aurora-unencrypted-at-rest.md)). The data is experimental and re-derivable; encryption is free but cannot be enabled in place, so turning it on destroys and recreates the cluster. Revisited the moment the data stops being throwaway. |
 | **Observability** | 3 CloudWatch alarms (dead-man on the daily rule · Lambda Errors · a returned `statusCode:500` via log-metric-filter) → 1 SNS topic → email; `{"mode":"smoke"}` post-deploy gate |
 | **AWS SDK** | boto3 |
-| **Tests** | pytest — **549 collected: 482 unit + 67 integration** (integration needs Docker or `$JOBFETCHER_DB_URL`; live-key tests skip without a key), live smoke, ~95% coverage in CI (85% floor) |
+| **Tests** | pytest — **<!--fact:tests-->549<!--/fact--> collected: <!--fact:tests_unit-->482<!--/fact--> unit + <!--fact:tests_integration-->67<!--/fact--> integration** (integration needs Docker or `$JOBFETCHER_DB_URL`; live-key tests skip without a key), live smoke, ~95% coverage in CI (85% floor) |
 | **CI** | GitHub Actions — ruff + tests + 85% coverage floor + `terraform validate` + **gitleaks** secret-scan; pre-commit (gitleaks + ruff) |
 
 dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in sibling projects — not in this repo today. See the [decision journal](docs/01-session-decision-journal.md).
@@ -146,7 +146,7 @@ dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in s
 ```bash
 python scripts/build_lambda.py        # package the Lambda artifact
 terraform -chdir=terraform init       # S3 remote-state backend (unmanaged bucket, native locking)
-terraform -chdir=terraform apply      # ~32 resources (Aurora + Data API, S3, Lambda, EventBridge, SES, IAM, alarms + SNS)
+terraform -chdir=terraform apply      # 32 resources (Aurora + Data API, S3, Lambda, EventBridge, SES, IAM, alarms + SNS)
 alembic upgrade head                  # create the schema on Aurora, over the Data API
 # invoke {"mode":"smoke"} → 200 (deploy gate); EventBridge then fires daily at 06:00 UTC → statusCode 200
 ```
@@ -215,7 +215,7 @@ LocalStack can't mock the Aurora Data API, so integration DB tests use a **real 
 
 ## Roadmap
 
-`v0.1.0` is the **irreducible working core**. Everything after it is chosen by the **bottleneck-decision protocol**, not a fixed plan: ship → use → surface the top-3 bottlenecks to the next real capability → rank by leverage (capability ÷ complexity) → break the biggest with the minimal migration → repeat. **The protocol has already overruled the plan:** the pre-drawn *M1 = CV tailoring* hypothesis lost to real use — live running surfaced pipeline throughput/reliability as the biggest bottleneck, so **M1 became pipeline hardening** and CV tailoring was re-queued. Fourteen releases have shipped; the still-future queue below is *direction, not contract* — re-derived after each release. Full protocol + migration table in [`docs/03-roadmap.md`](docs/03-roadmap.md).
+`v0.1.0` is the **irreducible working core**. Everything after it is chosen by the **bottleneck-decision protocol**, not a fixed plan: ship → use → surface the top-3 bottlenecks to the next real capability → rank by leverage (capability ÷ complexity) → break the biggest with the minimal migration → repeat. **The protocol has already overruled the plan:** the pre-drawn *M1 = CV tailoring* hypothesis lost to real use — live running surfaced pipeline throughput/reliability as the biggest bottleneck, so **M1 became pipeline hardening** and CV tailoring was re-queued. <!--fact:releases-->15<!--/fact--> releases have shipped; the still-future queue below is *direction, not contract* — re-derived after each release. Full protocol + migration table in [`docs/03-roadmap.md`](docs/03-roadmap.md).
 
 ```mermaid
 flowchart LR

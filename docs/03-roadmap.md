@@ -6,7 +6,7 @@
 
 ## What we actually commit to
 
-1. **v0 — the minimal working core** — ✅ **SHIPPED (tag `v0.1.0`, 2026-06-29):** built, deployed to AWS, validated live end-to-end, torn down to ~$0 (see [04-v0-build-plan](04-v0-build-plan.md)). **Everything past here is re-derived from real v0 usage via the protocol below** — the M1–M8 list is direction, not commitment. **Twelve releases have now shipped past v0.1** (`v0.2.0`→`v0.12.0`, all live-validated on the deployed stack — the tool now runs **fully unattended**, a daily 06:00 UTC cron with nobody watching), and what shipped **diverged from the pre-drawn M1–M8** exactly as the P2 protocol predicts — see the table below.
+1. **v0 — the minimal working core** — ✅ **SHIPPED (tag `v0.1.0`, 2026-06-29):** built, deployed to AWS, validated live end-to-end, torn down to ~$0 (see [04-v0-build-plan](04-v0-build-plan.md)). **Everything past here is re-derived from real v0 usage via the protocol below** — the M1–M8 list is direction, not commitment. **<!--fact:releases-->15<!--/fact--> releases have now shipped in all** (`v0.2.0`→`v0.12.0`, all live-validated on the deployed stack — the tool now runs **fully unattended**, a daily 06:00 UTC cron with nobody watching), and what shipped **diverged from the pre-drawn M1–M8** exactly as the P2 protocol predicts — see the table below.
 2. **The migratable architecture** — built so migrations stay clean and observable (requirements below).
 3. **Release discipline** — every migration is a clean, semver-tagged, documented GitHub release.
 
