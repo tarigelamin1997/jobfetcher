@@ -1,7 +1,7 @@
 # ADR-0001 — Evolutionary architecture: minimal v0 + bottleneck-driven migrations
 
 ## Status
-Accepted
+Accepted · **one stated Consequence — a before/after diagram per release — was retracted 2026-09-03 after 15 releases produced none; see the Retrospective at the foot of this file ([ERR-016](../ledgers/errors.md)). The decision itself stands.**
 
 ## Context
 JobFetcher must be both a daily tool and a portfolio piece, and the desired end-state is a full system (LLM scoring + warehouse/dbt + serverless/IaC + streaming/CDC). Building that all at once conflicts with two hard requirements: value is needed in **weeks**, and the design must stay **minimal and defensible** (no bloat, no resume-driven complexity). A pre-drawn multi-phase plan also assumes we can predict the right sequence before writing any code — we can't.
