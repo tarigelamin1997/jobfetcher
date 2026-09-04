@@ -1,7 +1,7 @@
 ---
 id: INV-003
 title: A run that fetches nothing is indistinguishable from a run with nothing to fetch
-status: handoff-ready   # open | verifying | verified | handoff-ready | in-progress | fixed | killed
+status: fixed           # open | verifying | verified | handoff-ready | in-progress | fixed | killed
 severity: non-crucial   # rungs 1–2 (src-only observability). Rung 3 adds live infra → crucial.
 logged: 2026-09-04
 updated: 2026-09-04
@@ -12,7 +12,7 @@ source: live-stack review during the ERR-016 documentation audit, 2026-09-04; no
 
 # INV-003 · A silent fetch stop reports success
 
-**Status:** `handoff-ready` · **Severity:** `non-crucial` (rungs 1–2) · **Owner of the fix:** _(a Surgeon, once handed off)_
+**Status:** `fixed` (rungs 1–2 + the capacity fix; rung 3 open as [B-12](../../ledgers/backlog.md)) · **Severity:** `non-crucial` (rungs 1–2) · **Owner of the fix:** _(a Surgeon, once handed off)_
 
 > The pipeline has ingested **zero** postings for three consecutive days while returning `statusCode: 200`, emailing a digest every morning, and holding all three CloudWatch alarms in `OK`.
 
@@ -172,12 +172,16 @@ Behavioral, with a negative case. **The negative case is the whole point** — i
   2. **Confirm the trigger** from the RapidAPI dashboard and record it here. Rungs 1–2 are worth shipping either way.
 - **On fix:** fill the **Resolution — as-built** section below → set `status: fixed`.
 
-## Resolution — as-built _(filled at close, when the fix ships)_
+## Resolution — as-built _(2026-09-04)_
 
-> ⏳ **Pending** — not yet built.
+> ✅ **Fixed** for the blindness and the capacity mismatch. **Rung 3 (announcement) deliberately NOT built** — see below.
 
-- **What shipped:** _(the as-built, in prose)_
-- **Rung taken · divergence from the Fix plan:** _(which rung; any deviation + why)_
-- **Key files + decisions:** _(where the code lives; the load-bearing choices)_
-- **Links:** PR #… · ADR … · CHANGELOG `[vX.Y.Z]` · commit `<sha>`
-- **Extending / editing later:** _(seams and gotchas)_
+- **What shipped.** (a) **PR #63** — both silent stops log at WARNING with the reason, the request count and the query they died on; the reason exits the generator on `JSearchSourceAdapter.last_stop_reason` and lands in the run summary as **`fetch_stopped`**. (b) **Config, pushed live** — Oman dropped (165 postings fetched for 7 matches: a 4.2% hit rate vs 29–36% elsewhere) and `request_budget_per_run` 25 → 16 so the cap can actually fire. (c) **PR #64** — `is_fetch_day` / `FETCH_EVERY_N_DAYS`: the Lambda still runs **daily**, the sweep every 3rd day (15 × ~10 = ~150 requests against the 200/month tier).
+- **The trigger, confirmed.** Not a one-off. The RapidAPI dashboard read **200 calls / 11 active days**, and the audit trail showed a two-month cycle: ingest ~11 days, die ~19, reset on the 22nd. The sweep was sized **2.7× its quota**. Written up as [ERR-017](../../ledgers/errors.md).
+- **Rung taken · divergence from the Fix plan.** Rungs 1–2 as written. **Rung 3 diverged and the divergence is the interesting part:** the plan proposed an every-3-days *cron*. Building it surfaced that the dead-man alarm watches a **24-hour** window and cannot be widened (`period × evaluation_periods ≤ 86400`), so a 3-day cron fires on ~20 legitimate off-days a month — the alert fatigue that let ERR-010 run 38 days. **Decoupling "how often the Lambda runs" from "how often it calls the source" removed the need for any infra change at all.**
+- **Key files + decisions.** [`adapters/jsearch_source.py`](../../../src/jobfetcher/adapters/jsearch_source.py) (`STOP_RATE_LIMITED` / `STOP_BUDGET_EXHAUSTED`, reset per sweep) · [`core/ingest.py`](../../../src/jobfetcher/core/ingest.py) (`FETCH_EVERY_N_DAYS`, `SOURCE_MONTHLY_QUOTA`, `is_fetch_day`, `next_fetch_day`, `skip_fetch`) · [`handlers/pipeline.py`](../../../src/jobfetcher/handlers/pipeline.py) (the gate + `$JOBFETCHER_FETCH_EVERY_N_DAYS` override). `ingest` reads the stop reason via `getattr`, so the `SourceAdapter` port is unchanged and any adapter omitting it still works.
+- **Links:** PR #62 (this dossier) · PR #63 (legibility) · PR #64 (cadence) · [ERR-017](../../ledgers/errors.md) · [B-12](../../ledgers/backlog.md).
+- **⚠️ Two things a later phase must know.**
+  1. **The code is merged but the deployed Lambda still runs the 2026-09-02 build.** A `build_lambda.py` + `terraform apply` is outstanding, and **nothing can be live-validated until the quota resets ~2026-09-22** — until then every run fetches zero regardless.
+  2. **This is diagnosable, not announced.** A `200` with `fetched: 0` still trips no alarm; it takes someone looking. That is B-12, and it is the same shape as B-5.
+- **Extending later.** Raise `FETCH_EVERY_N_DAYS` and the RapidAPI plan **together** — the arithmetic is the point, and the skip message computes it live from the spec, so it stays honest on its own. `$JOBFETCHER_FETCH_EVERY_N_DAYS` overrides the cadence without a redeploy (1 = every day; the integration suite pins it there so tests never depend on the calendar).

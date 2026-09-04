@@ -223,7 +223,9 @@ Each looked like enforcement and was ornament. The project's second pillar says 
 
 ## B-12 · A run that fetches nothing reports success — no log, no counter, no alarm ⚠️ **LIVE**
 
-**Logged:** 2026-09-04, from a live-stack review during the [ERR-016](errors.md) documentation audit — **not** reported by any alarm. **Status:** open, **actively failing**. Investigated: **[INV-003](../investigations/INV-003-silent-fetch-stop/README.md)** (`handoff-ready`).
+**Logged:** 2026-09-04, from a live-stack review during the [ERR-016](errors.md) documentation audit — **not** reported by any alarm. **Status:** **partially closed 2026-09-04** — the blindness and the capacity mismatch are fixed ([ERR-017](errors.md), PRs #63/#64, config live); **what remains open is ANNOUNCEMENT.** Investigated: **[INV-003](../investigations/INV-003-silent-fetch-stop/README.md)** (`fixed`).
+
+**What still isn't solved.** A `200` with `fetched: 0` is now *diagnosable* — `fetch_stopped` says `rate_limited` / `budget_exhausted` / `not_a_fetch_day` in the durable run summary — but it is still not *announced*. No alarm covers "green but empty", so it takes someone looking. Rung 3 of the dossier (a `PIPELINE_ALARM`-style marker reusing INV-002's metric-filter wiring, or saying it in the digest) is deferred because it is live infra and must be **proven by making it fire**, not asserted. Same shape as **B-5**.
 
 **What.** Since 2026-09-02 the daily pipeline has returned `statusCode: 200` with `fetched: 0` on **three consecutive days**, no `raw/` object has landed since 2026-09-01, and all three CloudWatch alarms sit in `OK`. A digest still goes out each morning carrying 257 previously-scored jobs, so the tool looks alive from the inbox.
 
