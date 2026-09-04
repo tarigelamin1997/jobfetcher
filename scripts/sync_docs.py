@@ -90,9 +90,24 @@ def gen_migrations() -> str:
     return ", ".join(f"`{n}`" for n in names)
 
 
+def gen_alembic_head() -> str:
+    """The newest migration's revision id — what a correct deploy reports.
+
+    Lives in three places for real (terraform/lambda.tf, handlers/pipeline.py, and
+    the migration files themselves — backlog B-7). This generator makes the DOC
+    copy follow the migration directory automatically; keeping the other two in
+    step is still B-7's job.
+    """
+    names = sorted(p.stem for p in (ROOT / "migrations" / "versions").glob("0*.py"))
+    if not names:
+        raise RuntimeError("no migrations found")
+    return names[-1]
+
+
 GENERATORS = {
     "current_release": ("the newest ## [vX.Y.Z] heading in CHANGELOG.md", gen_current_release),
     "migrations": ("migrations/versions/0*.py", gen_migrations),
+    "alembic_head": ("the newest migrations/versions/0*.py", gen_alembic_head),
 }
 
 
