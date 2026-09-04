@@ -70,6 +70,69 @@ _DEFAULT_NEAR_MISS_BAND = 10
 DEFAULT_RESAMPLE_N = 3
 DEFAULT_RESAMPLE_TRIGGER_MARGIN = 16
 
+# ---------------------------------------------------------------- the JSearch fetch cadence
+# The Lambda runs EVERY day. The JSearch sweep does not. These are deliberately decoupled:
+#
+#   why the Lambda still runs daily  the dead-man alarm watches the EventBridge rule's
+#                                    Invocations over a 24-HOUR window, and a CloudWatch alarm
+#                                    cannot look back further than that (period x
+#                                    evaluation_periods <= 86400, see terraform/alarms.tf). Move
+#                                    the cron to every 3rd day and the alarm fires on ~20
+#                                    legitimate off-days a month — the alert fatigue that let
+#                                    ERR-010 run for 38 days. So the schedule stays daily.
+#   why the sweep is every 3rd day   the JSearch (RapidAPI) free tier is 200 requests/MONTH.
+#                                    One sweep = job_titles x countries x max_pages_per_query
+#                                    = 3 x 5 x 1 = 15 requests. Daily would need ~450/month,
+#                                    2.25x the quota — which is why the tool silently ingested
+#                                    nothing for ~19 days of every month (ERR-017). Every 3rd
+#                                    day is ~10 sweeps = ~150 requests, inside 200 with margin.
+#
+# A non-fetch day is NOT a degraded run: scoring, the digest and the report all still work off
+# already-landed postings. Only new intake pauses.
+#
+# Raise this (or the quota) together, never separately — the arithmetic is the whole point.
+FETCH_EVERY_N_DAYS = 3
+
+# The source's monthly request allowance, used only to EXPLAIN the cadence in the skip message.
+# Not enforced here (the provider enforces it, with a 429) — stated so the log can do the
+# arithmetic in front of the reader instead of asserting a number someone has to trust.
+SOURCE_MONTHLY_QUOTA = 200
+
+# Why a sweep did not happen at all. Sits alongside the adapter's own stop reasons
+# (STOP_RATE_LIMITED / STOP_BUDGET_EXHAUSTED) in the run summary's `fetch_stopped`.
+SKIP_NOT_A_FETCH_DAY = "not_a_fetch_day"
+
+
+def _sweep_cost(spec: "SearchSpec") -> int:
+    """Requests one full sweep costs: titles x countries x pages. The number that has to fit
+    inside the source's monthly quota — see FETCH_EVERY_N_DAYS."""
+    return (
+        len(spec.targeting.job_titles)
+        * len(spec.targeting.countries)
+        * spec.budget.max_pages_per_query
+    )
+
+
+def is_fetch_day(run_date: "date", *, every_n_days: int = FETCH_EVERY_N_DAYS) -> bool:
+    """Is `run_date` a day the JSearch sweep should run?
+
+    Uses the proleptic ordinal so the cadence is **stable across month boundaries** — a
+    day-of-month rule (1,4,7,…,28) silently stretches to a 4-day gap at the end of a 31-day
+    month. `every_n_days <= 1` means every day (the cadence is off).
+    """
+    return every_n_days <= 1 or run_date.toordinal() % every_n_days == 0
+
+
+def next_fetch_day(run_date: "date", *, every_n_days: int = FETCH_EVERY_N_DAYS) -> "date":
+    """The first fetch day strictly after `run_date` — so a skip message can tell the reader
+    when intake resumes, instead of leaving them to work out the cadence."""
+    from datetime import timedelta
+
+    day = run_date + timedelta(days=1)
+    while not is_fetch_day(day, every_n_days=every_n_days):
+        day += timedelta(days=1)
+    return day
+
 log = logging.getLogger(__name__)
 
 # LLM calls are pure I/O — this many run concurrently per stage (H-2). DB writes always stay
@@ -262,6 +325,9 @@ def ingest(
     max_workers: int = DEFAULT_MAX_WORKERS,
     deadline: Deadline | None = None,
     audit_store: "S3AuditStore | None" = None,
+    skip_fetch: str | None = None,
+    run_date_for_cadence: "date | None" = None,
+    every_n_days: int = FETCH_EVERY_N_DAYS,
 ) -> dict[str, int | str | None]:
     """End-to-end Step-4 run: fetch→bronze, then derive silver for each *distinct, new*
     posting. Returns a small summary of counts. `bronzed` == distinct ids landed this run;
@@ -273,14 +339,20 @@ def ingest(
     **Concurrency model (H-2):** dissections (pure LLM I/O) run on up to `max_workers`
     threads; every `repo` write stays on the main thread — the Data-API dialect's
     thread-safety is never relied on."""
-    landed = fetch_to_bronze(
-        spec,
-        run_id=run_id,
-        source=source,
-        source_adapter=source_adapter,
-        raw_store=raw_store,
-        repo=repo,
-    )
+    # `skip_fetch` (a reason string) means "don't call the source at all this run" — the
+    # scheduled-cadence pause, not a failure. Everything downstream is untouched: scoring, the
+    # digest and the report all still run off already-landed postings.
+    if skip_fetch:
+        landed: list[tuple[str, dict[str, Any], str | None]] = []
+    else:
+        landed = fetch_to_bronze(
+            spec,
+            run_id=run_id,
+            source=source,
+            source_adapter=source_adapter,
+            raw_store=raw_store,
+            repo=repo,
+        )
     silvered = 0
     skipped = 0
     already = 0
@@ -362,8 +434,32 @@ def ingest(
     #
     # This single key is what makes a zero-fetch day diagnosable from runs/*.json alone,
     # instead of identical to a quiet day.
-    fetch_stopped = getattr(source_adapter, "last_stop_reason", None)
-    if fetch_stopped:
+    fetch_stopped = skip_fetch or getattr(source_adapter, "last_stop_reason", None)
+    if fetch_stopped == SKIP_NOT_A_FETCH_DAY:
+        # A PLANNED pause, not a fault — say so in full, at INFO, so anyone reading the log or
+        # the run summary understands the whole situation without opening the code or the docs.
+        log.info(
+            "fetch_stopped=%s — the JSearch sweep did NOT run today, ON PURPOSE. Why: the "
+            "JSearch plan allows %d requests per MONTH, and one full sweep costs "
+            "%d requests (%d job title(s) x %d countries x %d page(s)), so sweeping every day "
+            "would need ~%d/month and would exhaust the whole month's quota in ~%d days — "
+            "which is exactly what silently happened, for ~19 days of every month, until "
+            "2026-09-04 (ERR-017). The sweep therefore runs every %d days (~%d/month, ~%d "
+            "requests). NOTHING IS BROKEN: "
+            "scoring, the digest and the full-list report all still ran against the postings "
+            "already collected. New job intake resumes on %s. To change this, raise the "
+            "RapidAPI plan and FETCH_EVERY_N_DAYS together — never one without the other.",
+            fetch_stopped,
+            SOURCE_MONTHLY_QUOTA,
+            _sweep_cost(spec), len(spec.targeting.job_titles), len(spec.targeting.countries),
+            spec.budget.max_pages_per_query, _sweep_cost(spec) * 30,
+            SOURCE_MONTHLY_QUOTA // max(_sweep_cost(spec), 1),
+            every_n_days,
+            30 // max(every_n_days, 1), _sweep_cost(spec) * (30 // max(every_n_days, 1)),
+            next_fetch_day(run_date_for_cadence, every_n_days=every_n_days).isoformat()
+            if run_date_for_cadence else "the next scheduled fetch day",
+        )
+    elif fetch_stopped:
         log.warning(
             "ingest: fetch stopped early (run_id=%s, reason=%s) — %d posting(s) landed; the "
             "query matrix was not fully searched, so this run's counts are a FLOOR, not the "

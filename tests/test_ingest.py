@@ -449,3 +449,95 @@ def test_ingest_tolerates_a_source_without_the_attribute():
         dissector=_dissector(),
     )
     assert summary["fetched"] == 1 and summary["fetch_stopped"] is None
+
+
+# ------------------------------------------------ INV-003 / ERR-017: the fetch cadence
+# The Lambda runs daily (the dead-man alarm watches a 24h window and cannot be widened);
+# the JSearch sweep runs every Nth day because the free tier is 200 requests/MONTH.
+
+
+def test_is_fetch_day_is_every_nth_day_and_stable_across_month_boundaries():
+    from datetime import date, timedelta
+
+    from jobfetcher.core.ingest import is_fetch_day, next_fetch_day
+
+    # exactly one day in three, with no drift at the 31->1 boundary that a day-of-month
+    # rule (1,4,7,...,28) would silently stretch into a 4-day gap
+    days = [date(2026, 8, 20) + timedelta(days=i) for i in range(40)]
+    hits = [d for d in days if is_fetch_day(d)]
+    gaps = {(b - a).days for a, b in zip(hits, hits[1:])}
+    assert gaps == {3}, f"cadence drifted: {sorted(gaps)}"
+
+    # next_fetch_day is strictly in the future and is itself a fetch day
+    for d in days[:5]:
+        nxt = next_fetch_day(d)
+        assert nxt > d and is_fetch_day(nxt)
+
+
+def test_is_fetch_day_disabled_means_every_day():
+    from datetime import date, timedelta
+
+    from jobfetcher.core.ingest import is_fetch_day
+
+    # negative: n<=1 turns the cadence OFF — every day fetches (the pre-cadence behaviour)
+    assert all(is_fetch_day(date(2026, 9, 1) + timedelta(days=i), every_n_days=1) for i in range(7))
+
+
+def test_skip_fetch_never_touches_the_source_and_explains_itself(caplog):
+    from datetime import date
+
+    from jobfetcher.core.ingest import SKIP_NOT_A_FETCH_DAY
+
+    class ExplodingSource:
+        def fetch(self, spec, *, run_id):
+            raise AssertionError("the source must NOT be called on a non-fetch day")
+
+    repo, store = FakeRepo(), FakeRawStore()
+    with caplog.at_level("INFO"):
+        summary = ingest(
+            _spec(), run_id="r", source_adapter=ExplodingSource(), raw_store=store, repo=repo,
+            dissector=_dissector(), skip_fetch=SKIP_NOT_A_FETCH_DAY,
+            run_date_for_cadence=date(2026, 9, 5),
+        )
+    assert summary["fetched"] == 0
+    assert summary["fetch_stopped"] == SKIP_NOT_A_FETCH_DAY
+    # the message must stand on its own: what happened, why, that nothing is broken, when it resumes
+    msg = caplog.text
+    assert "ON PURPOSE" in msg and "NOTHING IS BROKEN" in msg
+    assert "200 requests per MONTH" in msg
+    assert "resumes on" in msg
+
+
+def test_a_planned_skip_is_not_reported_as_a_failure(caplog):
+    # negative: the cadence pause must NOT be logged at WARNING like a rate-limit stop —
+    # a routine pause that pages like a fault is how alert fatigue starts (B-5).
+    from datetime import date
+
+    from jobfetcher.core.ingest import SKIP_NOT_A_FETCH_DAY
+
+    repo, store = FakeRepo(), FakeRawStore()
+    with caplog.at_level("INFO"):
+        ingest(
+            _spec(), run_id="r", source_adapter=FakeSource([]), raw_store=store, repo=repo,
+            dissector=_dissector(), skip_fetch=SKIP_NOT_A_FETCH_DAY,
+            run_date_for_cadence=date(2026, 9, 5),
+        )
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_skip_message_reports_the_ACTIVE_cadence_not_the_default(caplog):
+    # If the cadence is overridden, the explanation must describe what is actually happening.
+    # A message that confidently states the default while a different value is in force is
+    # worse than no message — it is the stale-number failure this project keeps hitting.
+    from datetime import date
+
+    from jobfetcher.core.ingest import SKIP_NOT_A_FETCH_DAY
+
+    with caplog.at_level("INFO"):
+        ingest(
+            _spec(), run_id="r", source_adapter=FakeSource([]), raw_store=FakeRawStore(),
+            repo=FakeRepo(), dissector=_dissector(), skip_fetch=SKIP_NOT_A_FETCH_DAY,
+            run_date_for_cadence=date(2026, 9, 5), every_n_days=7,
+        )
+    assert "runs every 7 days" in caplog.text
+    assert "runs every 3 days" not in caplog.text
