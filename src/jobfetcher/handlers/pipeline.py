@@ -47,9 +47,12 @@ from ..core.dissector import Dissector
 from ..core.ingest import (
     DEFAULT_MAX_WORKERS,
     DEFAULT_USER_ID,
+    FETCH_EVERY_N_DAYS,
+    SKIP_NOT_A_FETCH_DAY,
     Deadline,
     apply_gold_filter,
     ingest,
+    is_fetch_day,
     notify,
     reassess,
     score_gold,
@@ -482,7 +485,28 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             return reassess_summary
 
         # --- the pipeline, in sequence (each stage is idempotent via its own upserts) ---
-        rlog.info("stage=ingest start run_date=%s", run_date.isoformat())
+        # The Lambda runs daily (the dead-man alarm needs it to); the JSearch sweep does not
+        # — it costs quota, and the free tier is monthly. See ingest.FETCH_EVERY_N_DAYS for the
+        # arithmetic. A non-fetch day still scores, digests and reports off existing postings.
+        # `$JOBFETCHER_FETCH_EVERY_N_DAYS` overrides the cadence; unset = the module default.
+        # 1 disables it (every run fetches) — which is what the integration tests set, so the
+        # suite never depends on whether today's date happens to land on a fetch day.
+        try:
+            every_n = int(env.get("JOBFETCHER_FETCH_EVERY_N_DAYS", "") or FETCH_EVERY_N_DAYS)
+        except ValueError:
+            rlog.warning(
+                "JOBFETCHER_FETCH_EVERY_N_DAYS=%r is not an integer — falling back to %d",
+                env.get("JOBFETCHER_FETCH_EVERY_N_DAYS"), FETCH_EVERY_N_DAYS,
+            )
+            every_n = FETCH_EVERY_N_DAYS
+        skip_fetch = (
+            None if is_fetch_day(run_date, every_n_days=every_n) else SKIP_NOT_A_FETCH_DAY
+        )
+        rlog.info(
+            "stage=ingest start run_date=%s fetch=%s",
+            run_date.isoformat(),
+            "yes" if skip_fetch is None else f"SKIPPED ({skip_fetch})",
+        )
         ingest_counts = ingest(
             spec,
             run_id=run_id,
@@ -494,6 +518,9 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             max_workers=max_workers,
             deadline=deadline,
             audit_store=audit_store,
+            skip_fetch=skip_fetch,
+            run_date_for_cadence=run_date,
+            every_n_days=every_n,
         )
         rlog.info("stage=ingest done %s", ingest_counts)
 

@@ -28,6 +28,13 @@ from moto import mock_aws  # noqa: E402
 
 RUN_DATE = date(2026, 6, 28)
 
+# The JSearch sweep runs every Nth day in production (ingest.FETCH_EVERY_N_DAYS — the free
+# tier is 200 requests/MONTH). These tests assert on FETCHED postings, so they pin the
+# cadence OFF: without this the suite would pass or fail depending on whether RUN_DATE
+# happens to land on a fetch day, which is exactly the kind of hidden coupling that makes a
+# gate meaningless. The cadence itself is covered by unit tests in test_ingest.py.
+FETCH_EVERY_N_DAYS_OFF = "1"
+
 
 # --------------------------------------------------------------------------- DB fixtures
 def _alembic_upgrade(url: str) -> None:
@@ -208,6 +215,9 @@ def patched(monkeypatch, repo, db_url):
     engine. Returns nothing — the handler builds its own adapters; we patch the symbols it uses."""
     import jobfetcher.handlers.pipeline as pipe
 
+    # Cadence OFF: these tests assert on fetched postings, so they must not depend on whether
+    # RUN_DATE lands on a production fetch day (see FETCH_EVERY_N_DAYS_OFF above).
+    monkeypatch.setenv("JOBFETCHER_FETCH_EVERY_N_DAYS", FETCH_EVERY_N_DAYS_OFF)
     # DB: reuse the test repo's engine (so assertions read the same state the handler wrote).
     monkeypatch.setattr(pipe, "PostgresRepository", lambda url: repo)  # noqa: ARG005
     # Source + LLM clients + S3 + SES.
