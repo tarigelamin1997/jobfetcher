@@ -335,3 +335,58 @@ def test_fetch_page_omits_employment_types_when_empty(monkeypatch):
     captured = _capture_fetch_url(monkeypatch)
     jsearch_source._fetch_page("data engineer", "sa", 1, _spec(employment_types=()), "k")
     assert "employment_types" not in captured["url"]
+
+
+# --------------------------------------------------------- INV-003: a stop must be legible
+# The defect these cover: BOTH early stops used to be a bare `return`, so a quota-exhausted
+# sweep and a sweep that genuinely found nothing were byte-for-byte identical to every caller,
+# log and alarm. The negative case below is the real gate — if a cut-off run and a quiet run
+# still look the same, logging more has fixed nothing.
+
+
+def test_fetch_429_records_stop_reason(monkeypatch, caplog):
+    # positive: a 429 sets the reason AND says so at WARNING, naming the request count.
+    err = urllib.error.HTTPError("u", 429, "rate", None, io.BytesIO(b""))
+    _patch_pages(monkeypatch, [err])
+    src = JSearchSourceAdapter(api_key="k")
+    with caplog.at_level("WARNING"):
+        out = list(src.fetch(_spec(max_pages=5), run_id="r"))
+    assert out == []
+    assert src.last_stop_reason == jsearch_source.STOP_RATE_LIMITED
+    assert "429" in caplog.text and "quota" in caplog.text.lower()
+
+
+def test_fetch_empty_result_records_NO_stop_reason(monkeypatch):
+    # THE NEGATIVE CASE, and the point of the whole unit: a genuinely empty source is NOT an
+    # early stop. Zero because there was nothing must stay distinguishable from zero because
+    # we were cut off — otherwise the run summary is still a coin-flip.
+    _patch_pages(monkeypatch, [{"data": []}])
+    src = JSearchSourceAdapter(api_key="k")
+    out = list(src.fetch(_spec(), run_id="r"))
+    assert out == []                      # same visible result as the 429 case above...
+    assert src.last_stop_reason is None    # ...and this is what tells them apart
+
+
+def test_fetch_budget_cap_records_stop_reason(monkeypatch, caplog):
+    # the other silent return: our own request budget. Same treatment, distinct reason.
+    _patch_pages(monkeypatch, [_full_page(10)] * 5)
+    src = JSearchSourceAdapter(api_key="k")
+    with caplog.at_level("WARNING"):
+        out = list(src.fetch(_spec(max_pages=5, budget=2), run_id="r"))
+    assert len(out) == 20  # exactly the 2 budgeted requests' worth
+    assert src.last_stop_reason == jsearch_source.STOP_BUDGET_EXHAUSTED
+    assert "budget" in caplog.text.lower()
+    # and the two reasons are not the same string — an operator must be able to act differently
+    assert jsearch_source.STOP_BUDGET_EXHAUSTED != jsearch_source.STOP_RATE_LIMITED
+
+
+def test_stop_reason_resets_between_sweeps(monkeypatch):
+    # negative: a stale reason from a previous run must never be reported against a clean one.
+    err = urllib.error.HTTPError("u", 429, "rate", None, io.BytesIO(b""))
+    src = JSearchSourceAdapter(api_key="k")
+    _patch_pages(monkeypatch, [err])
+    list(src.fetch(_spec(), run_id="r1"))
+    assert src.last_stop_reason == jsearch_source.STOP_RATE_LIMITED
+    _patch_pages(monkeypatch, [{"data": []}])
+    list(src.fetch(_spec(), run_id="r2"))
+    assert src.last_stop_reason is None
