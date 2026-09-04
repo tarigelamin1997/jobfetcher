@@ -45,6 +45,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows consoles default to cp1252 and mangle this output (and would crash on
+# characters outside it). Force utf-8 so local runs read the same as CI.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Files whose broken links are deliberate. `_TEMPLATE.md` ships placeholder
