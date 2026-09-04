@@ -218,3 +218,22 @@ Each looked like enforcement and was ornament. The project's second pillar says 
 **The remaining work (a code unit, not a docs one).** Either (a) run `ruff format` once across the tree, absorb the one-time diff, and add `ruff format --check` to CI so it stays clean — best done in the same unit as B-8's 262 lint errors, since both are one formatting-shaped diff against a pinned tool; or (b) decide formatting is not enforced here and delete the aspiration entirely. **Option (a) is recommended**, with the caveat that the diff will touch nearly every file and should therefore land alone, on its own PR, with no behavioural change mixed in.
 
 **Owning stage:** the next code/tooling unit — alongside **B-8** (same tool, same pin, same class of debt). Explicitly *not* the documentation unit that logged it: reformatting 84 files is a code change, and the docs-only scope was set deliberately.
+
+---
+
+## B-12 · A run that fetches nothing reports success — no log, no counter, no alarm ⚠️ **LIVE**
+
+**Logged:** 2026-09-04, from a live-stack review during the [ERR-016](errors.md) documentation audit — **not** reported by any alarm. **Status:** open, **actively failing**. Investigated: **[INV-003](../investigations/INV-003-silent-fetch-stop/README.md)** (`handoff-ready`).
+
+**What.** Since 2026-09-02 the daily pipeline has returned `statusCode: 200` with `fetched: 0` on **three consecutive days**, no `raw/` object has landed since 2026-09-01, and all three CloudWatch alarms sit in `OK`. A digest still goes out each morning carrying 257 previously-scored jobs, so the tool looks alive from the inbox.
+
+**Why it matters.** Two faults, and separating them is the point:
+
+1. **The trigger** — JSearch returning HTTP 429 (quota / subscription / rate-limit). Fixed outside the codebase.
+2. **The blindness** — a run cut off at the first request is byte-for-byte identical to a run with nothing new to fetch. `adapters/jsearch_source.py:190` handles the 429 with a **bare `return`**: no log, no counter, no signal. It sits **four lines below** a comment insisting a broken credential must *"FAIL LOUDLY, else a rotated key turns into a silent zero-count 'success'"* — the author guarded that exact failure mode for auth and left it open for quota.
+
+Only #2 is engineering work, and only #2 stops the next occurrence. **Fixing the quota alone leaves the trap armed.** The prior "nobody noticed" ([ERR-010](errors.md)) ran 38 days *while firing an alarm every morning*; this one fires nothing at all.
+
+**Not the cause** (checked, not assumed): the request budget (25 vs 18 — cannot fire first) · a config change (`search_config.yml` unchanged since 2026-07-08) · dedup (`already: 0`) · the 429 *stop behaviour*, which is correct and covered by a passing test. Only its silence is the defect.
+
+**Next.** Rungs, gate and blast radius are in the dossier. Recommended stopping point is **rungs 1–2** (`src/`-only: log the stop, record the reason in the run summary) — non-crucial, no infra. **Rung 3** (making a zero-fetch day *noticed* rather than merely findable) touches `terraform/alarms.tf` and is Tarig's call. Related to but distinct from **B-5**: this is a failure with no signal; B-5 is a signal nobody escalates.
