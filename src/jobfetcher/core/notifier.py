@@ -208,6 +208,47 @@ def _badge_color(fit_category: str | None) -> str:
     return _BADGE_COLORS.get((fit_category or "").strip(), _BADGE_DEFAULT)
 
 
+# ------------------------------------------------------------------- digest staleness (B-5)
+# How many days without a delivered digest before the pipeline says so IN THE DIGEST ITSELF.
+#
+# WHY THIS EXISTS. The `returned-500` alarm fired 29 times during the 38-day outage, to a
+# confirmed email subscription, and was ignored 29 times (INV-004). The detector worked; the
+# response did not, because day 29's notification was byte-identical to day 1's. CloudWatch
+# CANNOT fix this — an alarm's evaluation window is capped at 24 hours (period x
+# evaluation_periods <= 86400), so "failing N days running" is inexpressible there.
+#
+# So the escalation lives here, where the pipeline can see across days via `run_log`. The
+# measure is deliberately the PRODUCT OUTCOME — "did a shortlist actually reach the human?" —
+# not any internal stage: ERR-010's pipeline ran, and returned 500, every day for 38 days.
+#
+# 3 days: a digest normally goes out daily (a zero-match day still sends an honest one,
+# ADR-0027), so 3 consecutive silent days is well outside normal and still early enough to act.
+DIGEST_STALENESS_WARN_DAYS = 3
+
+
+def _staleness_banner(stale_days: int | None) -> tuple[str, str]:
+    """`(text, html)` for the escalation banner, or `("", "")` when nothing is wrong.
+
+    Deliberately silent below the threshold: a banner that appears on ordinary days is not an
+    escalation, it is furniture, and the reader stops seeing it within a week (INV-004 VG-a).
+    """
+    if stale_days is None or stale_days < DIGEST_STALENESS_WARN_DAYS:
+        return "", ""
+    msg = (
+        f"WARNING: this is the first shortlist to reach you in {stale_days} days. "
+        f"The pipeline may have been running and delivering nothing — check the run summaries "
+        f"in S3 runs/ for `fetch_stopped` before trusting today's results as a full picture."
+    )
+    html = (
+        '<div style="background:#fce8e6;border-left:4px solid #d93025;padding:12px 14px;'
+        'margin:0 0 16px;border-radius:4px;">'
+        f'<strong style="color:#c5221f;">&#9888; {stale_days} days since your last digest.</strong>'
+        f'<div style="color:#3c4043;margin-top:6px;">{escape(msg.split(". ", 1)[1])}</div>'
+        "</div>"
+    )
+    return msg, html
+
+
 def render_digest(
     items: "list[ShortlistItem]",
     below_count: int,
@@ -217,6 +258,7 @@ def render_digest(
     since: "datetime | None" = None,
     full_list_url: str | None = None,
     capture_link: "CaptureLink | None" = None,
+    stale_days: int | None = None,
 ) -> tuple[str, str, str]:
     """Render `(subject, html_body, text_body)` for the daily digest.
 
@@ -286,7 +328,14 @@ def render_digest(
                 f"(nothing new crossed your threshold of {threshold})."
             )
         text_body = f"{line}\n"
-        html_body = _html_shell(day, f'<p style="color:#3c4043;">{escape(line)}</p>')
+        # The zero-match path is EXACTLY the shape a silently-broken pipeline produces, so
+        # the banner matters most here: it separates a quiet week from having received
+        # nothing at all for 38 days.
+        stale_text, stale_html = _staleness_banner(stale_days)
+        if stale_text:
+            subject = f"⚠ {subject}"
+            text_body = f"{stale_text}\n\n{text_body}"
+        html_body = _html_shell(day, stale_html + f'<p style="color:#3c4043;">{escape(line)}</p>')
         return subject, html_body, text_body
 
     if n == 0:
@@ -350,7 +399,13 @@ def render_digest(
         )
     else:
         footer_html = f'<p style="color:#80868b;font-size:13px;margin:8px 0 0;">{escape(footer)}</p>'
-    html_body = _html_shell(day, summary + new_html + open_html + footer_html)
+    stale_text, stale_html = _staleness_banner(stale_days)
+    if stale_text:
+        # In the SUBJECT too: the inbox list is where triage happens, and an escalation that
+        # lives only in the body loses to a body nobody opens (INV-004).
+        subject = f"⚠ {subject}"
+        text_body = f"{stale_text}\n\n{text_body}"
+    html_body = _html_shell(day, stale_html + summary + new_html + open_html + footer_html)
     return subject, html_body, text_body
 
 

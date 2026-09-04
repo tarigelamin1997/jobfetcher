@@ -24,6 +24,7 @@ from jobfetcher.core.notifier import (
     split_new_and_still_open,
 )
 from jobfetcher.core.ports import NotifierError, ShortlistItem
+from unittest.mock import ANY  # staleness has its own dedicated tests below
 
 _CAPTURE_KEY = b"digest-capture-key"
 
@@ -645,7 +646,7 @@ def test_notify_sends_and_counts():
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier,
                  recipient_email="to@x.com", run_date=date(2026, 6, 27))
-    assert out == {"surfaced": 2, "below_threshold": 4, "sent": 1}
+    assert out == {"surfaced": 2, "below_threshold": 4, "sent": 1, "days_since_last_digest": ANY}
     assert len(notifier.sent) == 1
     sent = notifier.sent[0]
     assert sent["recipients"] == ["to@x.com"]
@@ -658,7 +659,7 @@ def test_notify_zero_matches_still_sends():
     repo = _FakeRepo(threshold=60, surfaced=[], below=5)
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com")
-    assert out == {"surfaced": 0, "below_threshold": 5, "sent": 1}
+    assert out == {"surfaced": 0, "below_threshold": 5, "sent": 1, "days_since_last_digest": ANY}
     assert len(notifier.sent) == 1
     assert "no matches" in notifier.sent[0]["subject"].lower()
 
@@ -735,7 +736,7 @@ def test_notify_threads_since_and_max_age_to_shortlist():
     # the previously-surfaced 90 is STILL OPEN → the digest honestly reports no new matches
     assert "no new matches since 2026-06-20" in notifier.sent[0]["subject"]
     assert "1 earlier match still open" in notifier.sent[0]["html"]
-    assert out == {"surfaced": 1, "below_threshold": 0, "sent": 1}  # counts unchanged
+    assert out == {"surfaced": 1, "below_threshold": 0, "sent": 1, "days_since_last_digest": ANY}  # counts unchanged
 
 
 def test_notify_default_max_age_is_none_unbounded():
@@ -754,7 +755,7 @@ def test_notify_with_report_store_builds_and_embeds_link():
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
                  run_date=date(2026, 6, 27), report_store=store)
-    assert out == {"surfaced": 1, "below_threshold": 4, "sent": 1}
+    assert out == {"surfaced": 1, "below_threshold": 4, "sent": 1, "days_since_last_digest": ANY}
     # uploaded once, at reports/{run_date}/jobs-{run_id}.html, with real HTML
     assert len(store.puts) == 1
     assert store.puts[0]["key"] == "reports/2026-06-27/jobs-r.html"
@@ -798,7 +799,7 @@ def test_notify_zero_scored_with_report_store_still_sends():
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
                  run_date=date(2026, 6, 27), report_store=store)
-    assert out == {"surfaced": 0, "below_threshold": 0, "sent": 1}
+    assert out == {"surfaced": 0, "below_threshold": 0, "sent": 1, "days_since_last_digest": ANY}
     assert "no matches" in notifier.sent[0]["subject"].lower()
 
 
@@ -817,3 +818,64 @@ def test_notify_threads_max_age_to_get_all_scored():
     notify(run_id="r", repo=repo, notifier=_FakeNotifier(), recipient_email="to@x.com",
            report_store=_FakeReportStore(), max_age_days=90)
     assert repo.seen_all_max_age == 90
+
+
+# ------------------------------------------------- B-5 / INV-004: digest staleness escalation
+# The returned-500 alarm fired 29 times during the 38-day outage and was ignored 29 times.
+# The escalation therefore lives in the digest — the one channel with a proven read rate —
+# and its whole value depends on STAYING SILENT on ordinary days.
+
+
+def test_staleness_is_silent_on_a_normal_day():
+    # THE NEGATIVE CASE, and the point of the feature: a banner that shows up every morning is
+    # furniture, not an escalation, and stops being seen within a week.
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, text = render_digest([], 0, threshold=60, date=date(2026, 9, 4), stale_days=1)
+    assert "⚠" not in subject
+    assert "days since" not in text.lower() and "days since" not in html.lower()
+
+
+def test_staleness_warns_in_subject_and_body_when_stale():
+    from jobfetcher.core.notifier import DIGEST_STALENESS_WARN_DAYS, render_digest
+
+    subject, html, text = render_digest(
+        [], 0, threshold=60, date=date(2026, 9, 4),
+        stale_days=DIGEST_STALENESS_WARN_DAYS + 35,
+    )
+    # the SUBJECT matters most — the inbox list is where triage actually happens
+    assert subject.startswith("⚠")
+    assert "38 days" in text and "38 days" in html
+
+
+def test_staleness_never_reported_when_no_digest_was_ever_sent():
+    # negative: a first-ever run has no basis to judge. `None` must not read as maximally
+    # stale and page on day one.
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, text = render_digest([], 0, threshold=60, date=date(2026, 9, 4), stale_days=None)
+    assert "⚠" not in subject and "days since" not in text.lower()
+
+
+def test_staleness_appears_on_the_zero_match_path_too():
+    # the zero-match email is EXACTLY what a silently-broken pipeline produces, so the banner
+    # must survive that early return — the path most likely to carry the bad news.
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, _ = render_digest([], 0, threshold=60, date=date(2026, 9, 4), stale_days=38)
+    assert subject.startswith("⚠") and "38 days" in html
+
+
+def test_digest_staleness_days_counts_from_delivery_not_from_running():
+    from datetime import datetime, timezone
+
+    from jobfetcher.core.ingest import digest_staleness_days
+
+    assert digest_staleness_days(None) is None                      # never sent -> no basis
+    sent = datetime(2026, 7, 24, 6, 0, tzinfo=timezone.utc)
+    # 38 days is the real ERR-010 number: the pipeline RAN every one of those days and
+    # returned 500. Staleness must count delivered digests, never completed runs.
+    assert digest_staleness_days(sent, today=date(2026, 8, 31)) == 38
+    # negative: a future/again-today timestamp clamps to 0 rather than going negative
+    assert digest_staleness_days(sent, today=date(2026, 7, 24)) == 0
+    assert digest_staleness_days(sent, today=date(2026, 7, 1)) == 0

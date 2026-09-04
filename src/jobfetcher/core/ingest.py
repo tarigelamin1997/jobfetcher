@@ -19,7 +19,7 @@ from ..adapters.jsearch_source import QUERY_COUNTRY_KEY, jd_and_metadata_from_js
 from .clean import clean
 from .dissector import DissectionError
 from .fingerprint import fingerprint
-from .notifier import render_digest
+from .notifier import DIGEST_STALENESS_WARN_DAYS, render_digest
 from .ports import FilterError, LlmBillingError, LlmError, NotifierError, RepositoryError
 from .profile import Profile
 from .report import render_full_list
@@ -97,6 +97,23 @@ FETCH_EVERY_N_DAYS = 3
 # Not enforced here (the provider enforces it, with a 429) — stated so the log can do the
 # arithmetic in front of the reader instead of asserting a number someone has to trust.
 SOURCE_MONTHLY_QUOTA = 200
+
+
+
+def digest_staleness_days(
+    last_sent: "datetime | None", *, today: "date | None" = None
+) -> int | None:
+    """Whole days since a digest was actually DELIVERED, or `None` if none ever was.
+
+    `None` is not "infinitely stale" — a first-ever run must not escalate on day one, so the
+    caller treats it as "no basis to judge" rather than as an alarm (INV-004 gate VG-b).
+    """
+    if last_sent is None:
+        return None
+    ref = today or date.today()
+    sent_on = last_sent.date() if isinstance(last_sent, datetime) else last_sent
+    return max((ref - sent_on).days, 0)
+
 
 # Why a sweep did not happen at all. Sits alongside the adapter's own stop reasons
 # (STOP_RATE_LIMITED / STOP_BUDGET_EXHAUSTED) in the run summary's `fetch_stopped`.
@@ -1090,6 +1107,10 @@ def notify(
     # against the one config knob — the Repository no longer re-derives its own constant.
     since = repo.get_last_digest_sent_at(user_id=user_id)
     the_date = run_date or date.today()
+    # Escalation (B-5 / INV-004): computed from the `since` already read above — no extra
+    # query. Deliberately measured BEFORE this run's own send is marked, so it answers "how
+    # long had it been broken when this digest went out?".
+    stale_days = digest_staleness_days(since, today=the_date)
     items, below = repo.get_scored_shortlist(
         threshold=threshold, since=since, max_age_days=max_age_days
     )
@@ -1125,7 +1146,7 @@ def notify(
 
     subject, html_body, text_body = render_digest(
         items, below, threshold=threshold, date=the_date, since=since,
-        full_list_url=full_list_url, capture_link=capture_link,
+        full_list_url=full_list_url, capture_link=capture_link, stale_days=stale_days,
     )
     # A send failure propagates (NotifierError) — the v0 surface is the email; a failed send is
     # a failed run, not a swallowed warning (mirrors the loud DB-failure stance in score_gold).
@@ -1135,7 +1156,23 @@ def notify(
         text_body=text_body,
         recipients=[recipient_email],
     )
+    if stale_days is not None and stale_days >= DIGEST_STALENESS_WARN_DAYS:
+        # WARNING, not INFO: this is the one condition that means the product stopped
+        # reaching the user. It is also in the digest body — this line is for the log trail.
+        log.warning(
+            "DIGEST STALENESS: %d days since a digest was last delivered (threshold %d). "
+            "The pipeline has been running without getting results to the user — check "
+            "runs/*.json for `fetch_stopped` and the statusCode history before assuming "
+            "today's send fixes it.",
+            stale_days, DIGEST_STALENESS_WARN_DAYS,
+        )
     log.info(
-        "notify: run_id=%s surfaced=%d below=%d sent=1", run_id, len(items), below
+        "notify: run_id=%s surfaced=%d below=%d sent=1 days_since_last_digest=%s",
+        run_id, len(items), below, stale_days,
     )
-    return {"surfaced": len(items), "below_threshold": below, "sent": 1}
+    return {
+        "surfaced": len(items),
+        "below_threshold": below,
+        "sent": 1,
+        "days_since_last_digest": stale_days,
+    }
