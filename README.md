@@ -56,7 +56,7 @@ flowchart LR
   SM -.-> CAP
   B -. raw .-> S3[("S3<br/>raw · audit · reports · config")]
   RPT -. presigned .-> S3
-  S & G & SC -. audit jsonl v0.12<br/>silver/gold/scores .-> S3
+  S & G & SC -. "audit jsonl v0.12<br/>silver/gold/scores" .-> S3
   H -. run summary → runs/ .-> S3
   B <--> PG[("Aurora Serverless v2<br/>+ RDS Data API")]
   S <--> PG
