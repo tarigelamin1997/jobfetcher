@@ -79,6 +79,8 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 ## B-5 · A daily alarm is not an alarm — nothing escalates a *persistent* failure ⚠️
 
+> **Investigated 2026-09-04 → [INV-004](../investigations/INV-004-alarm-escalation/README.md) (`handoff-ready`).** An audit of all three alarms produced the number that settles it: `returned-500` fired **29 times** during the 38-day outage, to a confirmed email subscription, and was ignored every time. The dead-man has **never** fired and is therefore untested. CloudWatch cannot express "failing N days running" at all (24h evaluation ceiling), so escalation has to come from the pipeline reading `run_log.digest_sent_at` — which `get_last_digest_sent_at` already exposes. **The dossier also sequences [B-12](#b-12--a-run-that-fetches-nothing-reports-success--no-log-no-counter-no-alarm-️-live) behind this one:** adding a fourth alarm to an inbox that ignored 29 makes things worse, not better.
+
 **Logged:** 2026-09-01, from [ERR-010](errors.md). **Status:** open — the real residual gap from the 38-day outage. Not built.
 
 **What.** The `pipeline-returned-500` alarm ([INV-002](../investigations/INV-002-silent-500-alarm/README.md)) worked exactly as designed: it fired on **all 38** days of the outage and SNS delivered **two emails per day** (ALARM + OK) to the operator's inbox — confirmed in Gmail. The pipeline still sat dead for 38 days.
