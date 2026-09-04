@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """Doc audit — the gate that keeps the repo honest about itself.
 
-WHAT: four checks over the markdown in this repo, run by CI on every PR.
+WHAT: five checks over the markdown in this repo, run by CI on every PR.
       (1) every internal link resolves
       (2) no unresolvable `plan §NN` citations
       (3) every *guarded* prose count agrees with the command that produces it
       (4) no stale "not yet deployed" claim on a shipped decision
+      (5) mermaid edge labels are quoted (an unquoted one renders as a red
+          error box on GitHub — it hit the README's own architecture diagram)
 
 WHY:  the project's first pillar is "the repo is the memory: any session resumes
       from these files alone." That was measurably false — see ERR-016. The debt
@@ -218,11 +220,55 @@ def check_stale_deploy() -> list[str]:
     return bad
 
 
+def check_mermaid_edge_labels() -> list[str]:
+    """Mermaid edge labels containing markup or slashes MUST be quoted.
+
+    WHY THIS EXISTS: two diagrams — including the README's front-page architecture — rendered
+    as a red "Unable to render rich display" box on GitHub for an unknown length of time, and
+    nobody noticed. Both were the same defect: an UNQUOTED edge label in the
+    `A -. text .-> B` form containing `<br/>` and `/`, which mermaid's lexer rejects.
+
+    This is a targeted heuristic, NOT a mermaid parser — it catches the shape that actually
+    broke, twice, with no new dependency. A full parse needs a node toolchain in CI (mermaid +
+    jsdom); that is a bigger call, and the validator used to find these lives in the PR notes.
+    Quoting an edge label is always safe, so the rule is simply: quote it.
+    """
+    edge = re.compile(
+        r"""(?:-\.|--|==)\s+          # a link opener followed by a bare label
+            (?!["|>])                 # already quoted / already a pipe-form label -> fine
+            ([^"|
+]*?)               # the label text
+            \s+(?:\.->|-->|==>)""",   # the closing arrow
+        re.X,
+    )
+    # Narrowed to angle brackets ONLY, and narrowed on evidence: the two real breakages both
+    # carried `<br/>`, while `run summary → runs/` and `errors / dead-man` were flagged by a
+    # wider rule and then confirmed FINE by an actual mermaid parse. A gate with false
+    # positives trains people to ignore it — which is the failure this repo keeps re-learning.
+    risky = re.compile(r"[<>]")
+    bad = []
+    for f in md_files():
+        text = f.read_text(encoding="utf-8", errors="replace")
+        for block in re.finditer(r"```mermaid\n(.*?)```", text, re.S):
+            start = text[: block.start()].count("\n") + 1
+            for i, line in enumerate(block.group(1).split("\n"), 1):
+                for m in edge.finditer(line):
+                    label = m.group(1).strip()
+                    if label and risky.search(label):
+                        bad.append(
+                            f"{rel(f)}:{start + i} — unquoted mermaid edge label "
+                            f"{label!r} contains markup (< or >); wrap it in double quotes "
+                            "or GitHub renders the whole diagram as an error box"
+                        )
+    return bad
+
+
 CHECKS = [
     ("internal links resolve", check_links),
     ("plan §NN citations are links", check_plan_refs),
     ("guarded counts match ground truth", check_facts),
     ("no stale deployment claims", check_stale_deploy),
+    ("mermaid edge labels are quoted", check_mermaid_edge_labels),
 ]
 
 

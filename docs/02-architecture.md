@@ -20,7 +20,7 @@ flowchart TB
     SCORE <--> PG
     CV <--> PG
     NOTIFY <--> PG
-    DEDUP & SCORE -. audit jsonl v0.12\nsilver/gold/scores .-> S3
+    DEDUP & SCORE -. "audit jsonl v0.12<br/>silver/gold/scores" .-> S3
     NOTIFY -. report + run summary .-> S3
   end
   subgraph AN["ANALYTICAL PLANE — DE depth"]
