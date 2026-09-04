@@ -105,7 +105,7 @@ recipient_email = "<you@example.com>"         # verified in step 5 (sandbox need
 ```bash
 python scripts/build_lambda.py                 # package the Lambda (vendors Linux wheels; no Docker)
 terraform -chdir=terraform init                # connects to YOUR S3 backend
-terraform -chdir=terraform apply               # ~32 resources; also SEEDS your config/*.local.yml → S3
+terraform -chdir=terraform apply               # <!--fact:tf_resources-->32<!--/fact--> resources; also SEEDS your config/*.local.yml → S3
 
 # migrate the schema on Aurora, over the Data API. Grab the ARNs terraform just created:
 aws lambda get-function-configuration --function-name jobfetcher-dev-pipeline --region us-east-1 \
@@ -126,7 +126,9 @@ Then **confirm the SNS alarm email** AWS sends to your recipient address (click 
 AWS_MAX_ATTEMPTS=1 aws lambda invoke --function-name jobfetcher-dev-pipeline \
   --cli-binary-format raw-in-base64-out --cli-read-timeout 120 \
   --payload '{"mode":"smoke"}' smoke-out.json && cat smoke-out.json
-# → {"statusCode": 200, "mode": "smoke", "alembic_version": "0006_subscores", ...}   200 or you stop.
+# → {"statusCode": 200, "mode": "smoke", "alembic_version": "<!--gen:alembic_head-->0007_gold_filter_hash<!--/gen-->", ...}   200 or you stop.
+# The version above is generated from migrations/versions/ — if your run prints something
+# older, YOUR deploy is behind, not this doc. A 400 means exactly that mismatch.
 
 # a real run now (or just wait for the 06:00 UTC cron):
 AWS_MAX_ATTEMPTS=1 aws lambda invoke --function-name jobfetcher-dev-pipeline \
@@ -138,6 +140,42 @@ A `statusCode 200` and a **digest email** means you're live. *(New senders often
 ```bash
 python scripts/export.py            # → export/jobs.sqlite + jobs.csv — open in Datasette / DB Browser / Excel
 ```
+
+## 10b · What you just made public — read this before walking away
+
+`terraform apply` created **one internet-facing endpoint**: a second Lambda
+(`jobfetcher-dev-capture`) behind a **Lambda Function URL with `authorization_type = "NONE"`**.
+It backs the "✓ Mark applied" links in your digest, so one click from the inbox records an
+outcome ([ADR-0035](adr/0035-outcome-capture-endpoint.md) · [INV-001](investigations/INV-001-dark-feedback-loop/README.md)).
+
+**"NONE" means unauthenticated at the network layer — the auth is the token, not the URL.**
+Every request must carry a short-lived **HMAC signature** scoped to exactly one
+`{posting_id, status}` pair, with a 30-day TTL. Verification runs in constant time **before
+any database call**, so a forged, expired, or tampered token gets a `400` having written
+**zero rows**. The signing key is generated and owned by Terraform in Secrets Manager and
+never appears in outputs or logs.
+
+What that does and doesn't buy you:
+
+- **Bounded blast radius by design** — single-status, posting-scoped, expiring tokens; least-privilege IAM (Data API + its two secrets + Logs, nothing else); the account's 10-execution concurrency ceiling caps abuse. *(A per-function reservation was intended and removed at apply: AWS requires ≥10 unreserved, and the account limit is 10.)*
+- **One accepted trade-off, decided deliberately:** a one-click `GET` can be pre-fetched by an email security scanner, producing a spurious `applied`. The outcome log is append-only and `scripts/track.py override` corrects it; a confirmation interstitial is the documented fast-follow if it ever happens in practice.
+- **The URL is not in this repo on purpose.** Retrieve yours with:
+
+```bash
+aws lambda get-function-url-config --function-name jobfetcher-dev-capture   --region us-east-1 --query FunctionUrl --output text
+```
+
+If you would rather not expose it at all, remove `terraform/capture.tf` before your first
+`apply` — the pipeline runs without it and the digest simply renders no capture links (the
+renderers degrade to no-link when the base URL or key is missing). You lose outcome capture,
+which is what M7 scoring calibration is built on.
+
+### Your Secrets Manager will show four secrets, not two
+
+You created two (`jobfetcher/deepseek`, `jobfetcher/jsearch`). Terraform creates two more:
+`jobfetcher/capture-token` (the HMAC signing key above) and an `rds!cluster-…` entry — the
+Aurora master password, from `manage_master_user_password = true`, which both Lambdas read
+via `$DB_SECRET_ARN`. **Don't hand-delete the `rds!` one; it belongs to the cluster.**
 
 ## 11 · Teardown (back to ~$0)
 
