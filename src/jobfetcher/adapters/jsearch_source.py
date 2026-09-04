@@ -36,6 +36,17 @@ _AUTH_FAIL_CODES = (401, 403)  # bad/missing key or subscription failure → HAR
 _RATE_LIMIT_CODE = 429  # rate/quota → stop the sweep gracefully (land what we got)
 _POLITE_SLEEP_S = 0.5
 
+# Why a sweep ended before exhausting its query matrix. `None` = it ran to completion.
+# These are the *reasons* behind a zero-or-short fetch, exposed on the adapter as
+# `last_stop_reason` so the caller can put them in the run summary (INV-003).
+#
+# WHY THIS EXISTS: both stops below used to be a bare `return` — no log, no counter, no
+# signal. A quota-exhausted run and a run with genuinely nothing new were byte-for-byte
+# identical in the logs, the summary and every alarm. That cost 3 silent days in Sept 2026
+# and, once the audit trail was read properly, ~19 dead days a month since July (ERR-017).
+STOP_RATE_LIMITED = "rate_limited"  # the source said 429 — quota or rate cap
+STOP_BUDGET_EXHAUSTED = "budget_exhausted"  # our own request_budget_per_run cap
+
 # Transient side-channel key the adapter attaches to each yielded job to carry the
 # authoritative *query* country (C3). Popped off before the raw payload is persisted to
 # bronze, so the stored raw is never mutated. Underscore-prefixed → won't collide with a
@@ -155,6 +166,10 @@ class JSearchSourceAdapter:
 
     def __init__(self, *, api_key: str | None = None) -> None:
         self._api_key = api_key
+        # Why the LAST fetch() stopped early, or None if it completed its matrix. Read by
+        # `core.ingest` after the generator is drained; additive, so any other SourceAdapter
+        # that doesn't set it simply reports no reason.
+        self.last_stop_reason: str | None = None
 
     def _key(self, spec: SearchSpec) -> str:
         if not self._api_key:
@@ -168,12 +183,22 @@ class JSearchSourceAdapter:
         cap = spec.budget.request_budget_per_run
         max_pages = spec.budget.max_pages_per_query
         made = 0
+        self.last_stop_reason = None  # reset per sweep — a stale reason is worse than none
 
         for title in spec.targeting.job_titles:
             for country in spec.targeting.countries:
                 for page in range(1, max_pages + 1):
                     if made >= cap:
-                        return  # request budget exhausted — stop the whole sweep
+                        # Stop, but SAY SO. A silent return here is indistinguishable from
+                        # "the source had nothing new" (INV-003).
+                        self.last_stop_reason = STOP_BUDGET_EXHAUSTED
+                        log.warning(
+                            "JSearch sweep stopped: request budget exhausted after %d "
+                            "request(s) (request_budget_per_run=%d). Stopped at '%s'/%s p%s "
+                            "— the rest of the query matrix was NOT searched.",
+                            made, cap, title, country, page,
+                        )
+                        return
                     made += 1  # count EVERY billed request attempt, success or error
                     try:
                         data = _fetch_page(title, country, page, spec, key)
@@ -187,6 +212,18 @@ class JSearchSourceAdapter:
                                 "key is missing, wrong, revoked, or the subscription lapsed"
                             ) from exc
                         if exc.code == _RATE_LIMIT_CODE:  # 429 quota/rate → stop politely
+                            # Politely, but NOT silently. This bare `return` sat four lines
+                            # below the comment above demanding a broken credential "FAIL
+                            # LOUDLY, else a rotated key turns into a silent zero-count
+                            # 'success'" — and then did exactly that for quota (INV-003).
+                            self.last_stop_reason = STOP_RATE_LIMITED
+                            log.warning(
+                                "JSearch sweep stopped: HTTP 429 (rate limit or monthly "
+                                "quota exhausted) after %d request(s). Stopped at '%s'/%s "
+                                "p%s — the rest of the query matrix was NOT searched. Check "
+                                "the RapidAPI dashboard: the free tier is 200 requests/month.",
+                                made, title, country, page,
+                            )
                             return
                         log.warning(
                             "JSearch HTTP %s for '%s'/%s p%s — skipping query",

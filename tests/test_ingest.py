@@ -294,7 +294,9 @@ def test_ingest_end_to_end_summary():
         _spec(), run_id="r", source_adapter=src, raw_store=store, repo=repo,
         dissector=_dissector(),
     )
-    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0}
+    # `fetch_stopped: None` = the sweep worked through its whole query matrix, so these
+    # counts are the day's real supply rather than a floor (INV-003).
+    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
     assert set(repo.postings) == {"jsearch:a", "jsearch:b"}
 
 
@@ -310,7 +312,7 @@ def test_ingest_counts_dissection_skips():
         _spec(), run_id="r", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=_D(FakeLlm()),
     )
-    assert summary == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 1, "already": 0, "deferred": 0, "billing_blocked": 0}
+    assert summary == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 1, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
 
 
 def test_ingest_rerun_does_not_redissect_existing_posting():
@@ -332,14 +334,14 @@ def test_ingest_rerun_does_not_redissect_existing_posting():
         _spec(), run_id="r1", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=dissector,
     )
-    assert first == {"fetched": 1, "bronzed": 1, "silvered": 1, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0}
+    assert first == {"fetched": 1, "bronzed": 1, "silvered": 1, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
     assert dissector.calls == 1
 
     second = ingest(
         _spec(), run_id="r2", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=dissector,
     )
-    assert second == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 0, "already": 1, "deferred": 0, "billing_blocked": 0}
+    assert second == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 0, "already": 1, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
     assert dissector.calls == 1  # NOT re-dissected on the re-run
 
 
@@ -366,7 +368,7 @@ def test_ingest_counts_billing_failures_separately_from_skips(caplog):
 
     assert summary == {
         "fetched": 2, "bronzed": 2, "silvered": 0, "skipped": 0, "already": 0,
-        "deferred": 0, "billing_blocked": 2,
+        "deferred": 0, "billing_blocked": 2, "fetch_stopped": None,
     }
     # exactly one line for two blocked postings, and it names the fix
     billing_lines = [r for r in caplog.records if "OUT OF CREDIT" in r.getMessage()]
@@ -389,3 +391,61 @@ def test_ingest_billing_failure_does_not_crash_the_run():
     )
     assert summary["billing_blocked"] == 1
     assert repo.postings == {}  # nothing landed in silver
+
+
+# ------------------------------------------------- INV-003: the summary must say WHY zero
+# `runs/{date}/{run_id}.json` is the durable record an operator reads days later. It must
+# distinguish "the source had nothing" from "we were cut off" — three days of green,
+# empty runs went unnoticed in Sept 2026 precisely because it could not.
+
+
+class StoppedSource(FakeSource):
+    """A source that yields what it has and then reports it stopped early."""
+
+    def __init__(self, jobs, reason):
+        super().__init__(jobs)
+        self.last_stop_reason = reason
+
+
+def test_ingest_summary_records_why_the_fetch_stopped(caplog):
+    repo, store = FakeRepo(), FakeRawStore()
+    src = StoppedSource([], "rate_limited")
+    with caplog.at_level("WARNING"):
+        summary = ingest(
+            _spec(), run_id="r", source_adapter=src, raw_store=store, repo=repo,
+            dissector=_dissector(),
+        )
+    assert summary["fetched"] == 0
+    assert summary["fetch_stopped"] == "rate_limited"
+    assert "stopped early" in caplog.text and "rate_limited" in caplog.text
+
+
+def test_ingest_summary_distinguishes_cut_off_from_genuinely_empty():
+    # THE GATE. Both runs fetch zero. Only the run summary can tell them apart — and it must,
+    # from the persisted JSON alone, with no log access and no live system.
+    repo, store = FakeRepo(), FakeRawStore()
+    cut_off = ingest(
+        _spec(), run_id="r1", source_adapter=StoppedSource([], "rate_limited"),
+        raw_store=store, repo=repo, dissector=_dissector(),
+    )
+    quiet = ingest(
+        _spec(), run_id="r2", source_adapter=FakeSource([]),
+        raw_store=FakeRawStore(), repo=FakeRepo(), dissector=_dissector(),
+    )
+    assert cut_off["fetched"] == quiet["fetched"] == 0      # identical on the old contract...
+    assert cut_off != quiet                                  # ...and distinguishable now
+    assert cut_off["fetch_stopped"] == "rate_limited"
+    assert quiet["fetch_stopped"] is None
+
+
+def test_ingest_tolerates_a_source_without_the_attribute():
+    # negative: `SourceAdapter` does NOT require `last_stop_reason`. A fake or a future
+    # adapter that omits it must not crash the run — it simply reports no reason.
+    repo, store = FakeRepo(), FakeRawStore()
+    src = FakeSource([_job("a")])
+    assert not hasattr(src, "last_stop_reason")
+    summary = ingest(
+        _spec(), run_id="r", source_adapter=src, raw_store=store, repo=repo,
+        dissector=_dissector(),
+    )
+    assert summary["fetched"] == 1 and summary["fetch_stopped"] is None

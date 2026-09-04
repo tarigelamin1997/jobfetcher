@@ -2,7 +2,7 @@
 
 > The test suite is the **negative-case engine for the [v0 validation gate](../docs/04-v0-build-plan.md#v0-validation-gate-behavioral--negative--a-presence-check-is-no-gate)**: every gate is *behavioral* and carries a *negative* case (a presence/liveness check is no gate). This file maps the gates (VG1–VG8) to the tests that enforce them, lists the pyramid layers, and shows how to run each.
 
-**Current state:** **<!--fact:tests_unit-->482<!--/fact--> unit + <!--fact:tests_integration-->67<!--/fact--> integration** (<!--fact:tests-->549<!--/fact--> collected; live-key tests skip without a key) · `ruff` clean · **~95% coverage** (measured 2026-07-10 at v0.10.0 — a historical figure, not a live one; the CI floor is 85% and is enforced on every run). The three test counts above are **guarded**: [`scripts/check_docs.py`](../scripts/check_docs.py) diffs them against `pytest --collect-only` in CI, so they cannot go stale again ([ERR-016](../docs/ledgers/errors.md)). They previously read "385 unit + ~47 integration".
+**Current state:** **<!--fact:tests_unit-->489<!--/fact--> unit + <!--fact:tests_integration-->67<!--/fact--> integration** (<!--fact:tests-->556<!--/fact--> collected; live-key tests skip without a key) · `ruff` clean · **~95% coverage** (measured 2026-07-10 at v0.10.0 — a historical figure, not a live one; the CI floor is 85% and is enforced on every run). The three test counts above are **guarded**: [`scripts/check_docs.py`](../scripts/check_docs.py) diffs them against `pytest --collect-only` in CI, so they cannot go stale again ([ERR-016](../docs/ledgers/errors.md)). They previously read "385 unit + ~47 integration".
 
 ## The pyramid + how to run
 

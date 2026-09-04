@@ -262,7 +262,7 @@ def ingest(
     max_workers: int = DEFAULT_MAX_WORKERS,
     deadline: Deadline | None = None,
     audit_store: "S3AuditStore | None" = None,
-) -> dict[str, int]:
+) -> dict[str, int | str | None]:
     """End-to-end Step-4 run: fetch→bronze, then derive silver for each *distinct, new*
     posting. Returns a small summary of counts. `bronzed` == distinct ids landed this run;
     `silvered` + `skipped` + `already` + `deferred` partition them: `skipped` = dissection
@@ -355,6 +355,24 @@ def ingest(
             billing_blocked,
         )
 
+    # Why the sweep ended, if it ended early (INV-003). `None` = it worked through its whole
+    # query matrix, so `fetched: 0` genuinely means "the source had nothing new". Read
+    # defensively via getattr: the `SourceAdapter` port does not require this attribute, so a
+    # fake or a future adapter that omits it simply reports no reason.
+    #
+    # This single key is what makes a zero-fetch day diagnosable from runs/*.json alone,
+    # instead of identical to a quiet day.
+    fetch_stopped = getattr(source_adapter, "last_stop_reason", None)
+    if fetch_stopped:
+        log.warning(
+            "ingest: fetch stopped early (run_id=%s, reason=%s) — %d posting(s) landed; the "
+            "query matrix was not fully searched, so this run's counts are a FLOOR, not the "
+            "day's true supply.",
+            run_id,
+            fetch_stopped,
+            len(landed),
+        )
+
     return {
         "fetched": len(landed),
         "bronzed": len(landed),
@@ -363,6 +381,7 @@ def ingest(
         "already": already,
         "deferred": deferred,
         "billing_blocked": billing_blocked,
+        "fetch_stopped": fetch_stopped,
     }
 
 
