@@ -112,7 +112,28 @@ Behavioral, with a negative case. The negative case is the one that matters: an 
 
 This is the [ERR-015](../../ledgers/errors.md) shape: a mechanism that looks real, that everyone assumes works, and that has never been made to fire. ERR-015 was closed by pushing a commit and *being rejected*; ERR-016's gate by pushing a regression and *watching CI go red*. The dead-man deserves the same treatment and has not had it.
 
-**How to test it** (deliberately not done here — it is a live infra action needing approval): disable the EventBridge rule for long enough for a 24-hour window to close with no invocation, confirm the email arrives, re-enable. The cost is one skipped run; the alternative is trusting an untested detector on the one failure mode nothing else covers. **Not urgent, but it should be scheduled rather than remembered.**
+**⚠️ HALF-TESTED 2026-09-04 — and be precise about which half.**
+
+```bash
+aws cloudwatch set-alarm-state --alarm-name jobfetcher-dev-pipeline-dead-man   --state-value ALARM --state-reason "INV-004 deliberate test"
+# then, AWS/SNS on the jobfetcher-dev-alarms topic:
+#   NumberOfNotificationsDelivered = 1.0
+#   NumberOfNotificationsFailed    = 0.0
+```
+
+**PROVEN:** the notification path. The alarm enters `ALARM` → SNS publishes → the confirmed
+email subscription delivers. That had never once been exercised in the alarm's life. It was
+restored to `OK` immediately after, and the EventBridge schedule was never touched.
+
+**STILL NOT PROVEN — and the distinction matters:** the *detection* half. `set-alarm-state`
+**bypasses metric evaluation entirely**, so this says nothing about whether a genuinely
+missing invocation drives the alarm into `ALARM` — i.e. whether `treat_missing_data:
+breaching` on the sparse `AWS/Events Invocations` metric behaves as designed.
+
+**Do not read this as "the dead-man works."** Read it as: *if it ever fires, the email will
+reach you.* Whether it fires when it should is still an assumption.
+
+**How to finish the test** (needs ~2 days and one skipped run, so it must be scheduled): disable the EventBridge rule for long enough for a 24-hour window to close with no invocation, confirm the email arrives, re-enable. The cost is one skipped run; the alternative is trusting an untested detector on the one failure mode nothing else covers. **Not urgent, but it should be scheduled rather than remembered.**
 
 ## ⚠️ Separate finding — the capture endpoint has no monitoring at all
 
