@@ -408,3 +408,14 @@ This is the one place the architecture grows a **public, internet-facing write e
 A stage failure that the handler *returns* as `statusCode:500` is a **successful invocation** to Lambda, so the `AWS/Lambda Errors` alarm never counted it ([INV-002](investigations/INV-002-silent-500-alarm/README.md)). `handlers/pipeline.py` now emits a distinctive **`PIPELINE_ALARM`** marker on the failure path, **mode-gated to the unattended daily run** — smoke (where a pre-migration 500 is *expected*) and reassess (manual) are excluded, so the alarm never cries wolf. `terraform/alarms.tf` adds a managed pipeline log group (30d retention) + a log-metric-filter on `"PIPELINE_ALARM"` → `JobFetcher/Pipeline/PipelineReturned500` → **the third alarm**, reusing the existing SNS topic. No migration, no new dependency.
 
 **Read this next to [ERR-010](ledgers/errors.md):** this detector shipped 2026-07-21 and then fired on **all 38 days** of the outage that began four days later, delivering two emails a day — and nothing happened. Detection was never the gap. What is still missing is *escalation of a persistent alarm*, tracked as [B-5](ledgers/backlog.md).
+
+### INV-003 / ERR-017 — the fetch cadence, and a stop that says why (2026-09-04)
+
+The pipeline ingested on **28 of 62 days** while returning `statusCode: 200` every morning. Two faults, and the fix keeps them apart:
+
+- **Capacity.** JSearch's free tier is **200 requests/month**. One sweep costs `job_titles × countries × max_pages_per_query`; at 3 × 6 × 1 = 18 run daily that is ~540/month — **2.7× the quota** — so it burned the month in ~11 days and sat dead for ~19. Now: Oman dropped (165 postings fetched for **7** matches — a 4.2% hit rate) and the sweep runs every **`FETCH_EVERY_N_DAYS`** (3), so `3 × 5 × 1 = 15` × ~10 sweeps ≈ **150/month**.
+- **Legibility.** A 429 was swallowed by a bare `return`. The run summary now carries **`fetch_stopped`** — `rate_limited` · `budget_exhausted` · `not_a_fetch_day` · `None` — so a zero-fetch day is diagnosable from `runs/{run_date}/{run_id}.json` alone.
+
+**The Lambda still runs daily, and that is a constraint, not an oversight.** The dead-man alarm watches the EventBridge rule's `Invocations` over a 24-hour window, and a CloudWatch alarm cannot look back further (`period × evaluation_periods ≤ 86400`). Moving the *cron* to every 3 days would fire it on ~20 legitimate off-days a month — the alert fatigue that let [ERR-010](ledgers/errors.md) run for 38 days. So **how often the Lambda runs** and **how often it calls the source** are deliberately decoupled: the schedule stays daily, the sweep does not. This needed no infra change.
+
+**Still open:** a green-but-empty run is diagnosable but **not announced** — no alarm covers that shape ([B-12](ledgers/backlog.md), the same shape as [B-5](ledgers/backlog.md)).
