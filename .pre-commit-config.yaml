@@ -5,7 +5,7 @@
 #
 # gitleaks is the VG7 secret scan (mirrored in the CI `secret-scan` job); ruff lints (matching
 # the CI `ruff check .` gate). NOTE: `ruff-format` is intentionally NOT a hook — the existing
-# tree predates ruff-format and isn't format-clean, so adding it now would reformat ~54 files
+# tree predates ruff-format and isn't format-clean, so adding it now would reformat 84 files (measured 2026-09-04; it said ~54 for months — see B-11)
 # (out of scope for minimal CI; noise on every commit). The project's standard is `ruff check`
 # (lint); a deliberate one-time `ruff format` can adopt the formatter later if wanted.
 repos:
@@ -19,3 +19,23 @@ repos:
     hooks:
       - id: ruff
         args: [--fix]
+
+  # Doc propagation + audit (ERR-016). sync_docs --write brings generated blocks
+  # current on every commit, so a release/migration change lands everywhere it is
+  # restated without anyone remembering to. check_docs then verifies links,
+  # citations and guarded counts. Both also run in CI — that is the armed layer,
+  # because these hooks can be skipped with `git commit --no-verify`.
+  - repo: local
+    hooks:
+      - id: sync-docs
+        name: sync generated doc blocks
+        entry: python scripts/sync_docs.py --write
+        language: system
+        pass_filenames: false
+        files: '\.(md|py)$|^CHANGELOG\.md$'
+      - id: check-docs
+        name: doc audit (links, citations, guarded counts)
+        entry: python scripts/check_docs.py
+        language: system
+        pass_filenames: false
+        files: '\.md$'

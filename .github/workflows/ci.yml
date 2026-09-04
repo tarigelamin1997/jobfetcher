@@ -57,6 +57,14 @@ jobs:
       - name: Doc audit (check_docs)
         run: python scripts/check_docs.py
 
+      # Doc propagation (ERR-016). Fails if a generated block is stale — i.e. if
+      # someone changed a source of truth (a release, a migration) without the
+      # docs following. `sync_docs.py --write` fixes it; the pre-commit hook runs
+      # that automatically. This step is the ARMED half: a hook is bypassable with
+      # `--no-verify` (ERR-015's exact shape), a required status check is not.
+      - name: Doc propagation (sync_docs)
+        run: python scripts/sync_docs.py --check
+
       - name: Migrate schema (alembic)
         run: alembic upgrade head
 
