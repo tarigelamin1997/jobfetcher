@@ -111,11 +111,11 @@ The CV tailor, multi-source clustering dedup, Step Functions, Notion, and the db
 |---|---|
 | **Language** | Python 3.11 · Pydantic 2 |
 | **Compute** | AWS Lambda, outside any VPC — the scheduled pipeline handler (EventBridge daily cron) **plus a second handler from the same zip behind a public Function URL** for outcome capture ([ADR-0035](docs/adr/0035-outcome-capture-endpoint.md)) |
-| **Store** | Aurora Serverless v2 (scale-to-0) via the **RDS Data API** · S3 (raw bronze payloads · runtime config YAMLs · the **`silver/`/`gold/`/`scores/`/`runs/` audit trail** (v0.12.0) · presigned reports) |
+| **Store** | Aurora Serverless v2 (**0–2 ACU**: `min_capacity = 0` scale-to-0, `max_capacity` from `var.db_max_acu`, default 2) via the **RDS Data API** · S3 (raw bronze payloads · runtime config YAMLs · the **`silver/`/`gold/`/`scores/`/`runs/` audit trail** (v0.12.0) · presigned reports) |
 | **DB access** | SQLAlchemy 2 + `sqlalchemy-aurora-data-api` behind a `Repository` port · Alembic migrations |
 | **LLM** | OpenAI-compatible API, **provider + model in config** ([ADR-0017](docs/adr/0017-llm-transport-openai-compatible-deepseek.md)); v0 = **DeepSeek** (`deepseek-v4-flash` dissect · `deepseek-v4-pro` score). Bedrock parked. |
 | **Email** | SES (HTML + plaintext digest) |
-| **Secrets** | Secrets Manager — `jobfetcher/deepseek`, `jobfetcher/jsearch` (CLI-created data-source keys) + the capture-endpoint HMAC signing key (**generated and owned by Terraform**, never in outputs or logs) |
+| **Secrets** | Secrets Manager — **four**, and only two are yours to create. `jobfetcher/deepseek` + `jobfetcher/jsearch` are **CLI-created data-source keys**; `jobfetcher/capture-token` (the HMAC signing key) and `rds!cluster-…` (the Aurora master password, from `manage_master_user_password = true`) are **generated and owned by Terraform** — never in outputs or logs, and both Lambdas read the DB one via `$DB_SECRET_ARN`. Don't hand-delete the `rds!` secret; it belongs to the cluster. |
 | **IaC** | Terraform ≥ 1.10 — **<!--fact:tf_resources-->32<!--/fact--> resources**, us-east-1, least-privilege IAM (no Bedrock); **S3 remote state** (`backend "s3"`, native `use_lockfile` locking, deliberately unmanaged state bucket) |
 | **Known trade-off** | Aurora runs **unencrypted at rest**, deliberately — a labeled decision, not an oversight ([ADR-0038](docs/adr/0038-aurora-unencrypted-at-rest.md)). The data is experimental and re-derivable; encryption is free but cannot be enabled in place, so turning it on destroys and recreates the cluster. Revisited the moment the data stops being throwaway. |
 | **Observability** | 3 CloudWatch alarms (dead-man on the daily rule · Lambda Errors · a returned `statusCode:500` via log-metric-filter) → 1 SNS topic → email; `{"mode":"smoke"}` post-deploy gate |
@@ -134,7 +134,7 @@ dbt / Snowflake / Debezium-CDC / Spark are documented *scale-paths* or live in s
 ### Prerequisites
 
 - An **AWS session** for the `jobfetcher-dev` IAM user (region us-east-1).
-- Two **Secrets Manager** secrets: `jobfetcher/deepseek` (DeepSeek API key) and `jobfetcher/jsearch` (JSearch API key).
+- Two **Secrets Manager** secrets **you create**: `jobfetcher/deepseek` (DeepSeek API key) and `jobfetcher/jsearch` (JSearch API key). *(Terraform creates two more on `apply` — the capture-endpoint signing key and the Aurora master password — so a healthy account shows four. You don't manage those.)*
 - **SES** sender + recipient addresses verified (sandbox is fine for personal use).
 - Your config: copy the committed samples to the gitignored local files and fill them in —
   - `config/search_config.sample.yml` → `config/search_config.local.yml` (the per-user [`SearchSpec`](src/jobfetcher/core/search_spec.py); every field required, fails loudly on anything missing/invalid).
