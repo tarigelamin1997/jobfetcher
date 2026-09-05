@@ -90,7 +90,7 @@ The system above says which *layer* owns which *kind* of writing. It did not say
 
 **Two kinds of number, handled differently:**
 
-- **Derived** — a count that a command can produce right now (tests, Terraform resources, releases, ADRs, ERR entries). **Never trust a typed literal.** Wrap it in a non-rendering marker — `<!--fact:tests-->607<!--/fact-->` — and [`scripts/check_docs.py`](../scripts/check_docs.py) diffs it against the real command in CI. A stale one fails the build. `python scripts/check_docs.py --list` prints the live values.
+- **Derived** — a count that a command can produce right now (tests, Terraform resources, releases, ADRs, ERR entries). **Never trust a typed literal.** Wrap it in a non-rendering marker — `<!--fact:tests-->626<!--/fact-->` — and [`scripts/check_docs.py`](../scripts/check_docs.py) diffs it against the real command in CI. A stale one fails the build. `python scripts/check_docs.py --list` prints the live values.
 - **Historical** — a measurement taken once, on a date (`286 rows over the Data API`, `avg spread 15.95`, `$0.0155/posting`). These are **correct forever as of their date** and must not be automated. The fix for these is *attribution*, not automation: state them once, with the date and the conditions, in the owning file — and link from anywhere else that needs them.
 
 Confusing the two is its own bug: automating a historical measurement would demand that history change, and typing a derived one guarantees it goes stale.
