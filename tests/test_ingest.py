@@ -4,6 +4,7 @@ end-to-end ingest summary. Each carries a negative."""
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any
 
 from jobfetcher.core.dissector import Dissector, DissectionError
@@ -296,7 +297,7 @@ def test_ingest_end_to_end_summary():
     )
     # `fetch_stopped: None` = the sweep worked through its whole query matrix, so these
     # counts are the day's real supply rather than a floor (INV-003).
-    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
+    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None, "fetch_failed_queries": 0}
     assert set(repo.postings) == {"jsearch:a", "jsearch:b"}
 
 
@@ -312,7 +313,7 @@ def test_ingest_counts_dissection_skips():
         _spec(), run_id="r", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=_D(FakeLlm()),
     )
-    assert summary == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 1, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
+    assert summary == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 1, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None, "fetch_failed_queries": 0}
 
 
 def test_ingest_rerun_does_not_redissect_existing_posting():
@@ -334,14 +335,14 @@ def test_ingest_rerun_does_not_redissect_existing_posting():
         _spec(), run_id="r1", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=dissector,
     )
-    assert first == {"fetched": 1, "bronzed": 1, "silvered": 1, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
+    assert first == {"fetched": 1, "bronzed": 1, "silvered": 1, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None, "fetch_failed_queries": 0}
     assert dissector.calls == 1
 
     second = ingest(
         _spec(), run_id="r2", source_adapter=FakeSource([_job("a")]),
         raw_store=store, repo=repo, dissector=dissector,
     )
-    assert second == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 0, "already": 1, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
+    assert second == {"fetched": 1, "bronzed": 1, "silvered": 0, "skipped": 0, "already": 1, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None, "fetch_failed_queries": 0}
     assert dissector.calls == 1  # NOT re-dissected on the re-run
 
 
@@ -369,6 +370,7 @@ def test_ingest_counts_billing_failures_separately_from_skips(caplog):
     assert summary == {
         "fetched": 2, "bronzed": 2, "silvered": 0, "skipped": 0, "already": 0,
         "deferred": 0, "billing_blocked": 2, "fetch_stopped": None,
+        "fetch_failed_queries": 0,
     }
     # exactly one line for two blocked postings, and it names the fix
     billing_lines = [r for r in caplog.records if "OUT OF CREDIT" in r.getMessage()]
@@ -438,6 +440,93 @@ def test_ingest_summary_distinguishes_cut_off_from_genuinely_empty():
     assert quiet["fetch_stopped"] is None
 
 
+class LazyStoppedSource(FakeSource):
+    """A source shaped like the REAL adapter: `fetch()` is a generator, so `last_stop_reason` is
+    set *during* iteration, not at construction.
+
+    `StoppedSource` above sets the reason in `__init__`, which makes every test using it blind to
+    the one ordering bug this design can have — moving `ingest`'s read of `last_stop_reason` to
+    before the sweep still passes. Verified by mutation: with the read hoisted above
+    `fetch_to_bronze`, every `StoppedSource` test stayed green while a real 429 would report
+    `fetch_stopped: None` in production."""
+
+    def __init__(self, jobs, reason):
+        super().__init__(jobs)
+        self._reason = reason
+        self.last_stop_reason = None
+
+    def fetch(self, spec, *, run_id):
+        self.last_stop_reason = None  # reset per sweep, exactly as the real adapter does
+        yield from list(super().fetch(spec, run_id=run_id))
+        self.last_stop_reason = self._reason  # ...and only decided once the sweep is over
+
+
+def test_the_stop_reason_is_read_AFTER_the_sweep_not_before():
+    # THE ORDERING GATE. `fetch()` is a generator: the reason does not exist until the sweep has
+    # run. If `ingest` reads it too early it gets None, and a quota-dead run reports itself as a
+    # quiet one — ERR-017 all over again, with a green suite.
+    repo, store = FakeRepo(), FakeRawStore()
+    summary = ingest(
+        _spec(), run_id="r", source_adapter=LazyStoppedSource([_job("a")], "rate_limited"),
+        raw_store=store, repo=repo, dissector=_dissector(),
+    )
+    assert summary["fetched"] == 1
+    assert summary["fetch_stopped"] == "rate_limited"
+
+
+def test_a_matrix_lost_to_upstream_errors_is_not_reported_as_a_quiet_day(caplog):
+    # THE BLOCKER (Examiner B1). A 429 and a budget stop were reported; the two OTHER ways a
+    # query ends early — a non-429 HTTP error and a transient error — set no reason at all. So a
+    # sweep that lost every query to HTTP 503 returned a summary byte-identical to a day the
+    # source genuinely had nothing. `fetch_stopped: None` is DEFINED as "the whole matrix was
+    # searched"; that made it a lie.
+    class PartiallyBrokenSource(FakeSource):
+        def __init__(self, jobs, failed):
+            super().__init__(jobs)
+            self.last_stop_reason = None
+            self.last_failed_queries = 0
+            self._failed = failed
+
+        def fetch(self, spec, *, run_id):
+            self.last_stop_reason = None
+            self.last_failed_queries = 0
+            yield from list(super().fetch(spec, run_id=run_id))
+            self.last_failed_queries = self._failed
+
+    with caplog.at_level("WARNING"):
+        broken = ingest(
+            _spec(), run_id="r1", source_adapter=PartiallyBrokenSource([], failed=15),
+            raw_store=FakeRawStore(), repo=FakeRepo(), dissector=_dissector(),
+        )
+    quiet = ingest(
+        _spec(), run_id="r2", source_adapter=PartiallyBrokenSource([], failed=0),
+        raw_store=FakeRawStore(), repo=FakeRepo(), dissector=_dissector(),
+    )
+    assert broken["fetched"] == quiet["fetched"] == 0   # identical on the old contract...
+    assert broken != quiet                              # ...and distinguishable now
+    assert broken["fetch_stopped"] == "partial_errors"
+    assert broken["fetch_failed_queries"] == 15
+    # negative: a sweep that completed cleanly must NOT be tarred with a reason
+    assert quiet["fetch_stopped"] is None
+    assert quiet["fetch_failed_queries"] == 0
+    assert "never searched" in caplog.text
+
+
+def test_a_skip_day_never_reports_a_previous_sweeps_counters():
+    # negative: on a skip day the generator is never created, so the adapter's reset never runs
+    # and whatever sits on the instance describes an EARLIER sweep. Reporting that against a run
+    # which made zero requests would be the same class of lie the key exists to prevent.
+    stale = LazyStoppedSource([], "rate_limited")
+    stale.last_stop_reason = "rate_limited"      # left over from a prior run
+    stale.last_failed_queries = 9
+    summary = ingest(
+        _spec(), run_id="r", source_adapter=stale, raw_store=FakeRawStore(),
+        repo=FakeRepo(), dissector=_dissector(), run_date=_NON_FETCH_DAY,
+    )
+    assert summary["fetch_stopped"] == "not_a_fetch_day"
+    assert summary["fetch_failed_queries"] == 0
+
+
 def test_ingest_tolerates_a_source_without_the_attribute():
     # negative: `SourceAdapter` does NOT require `last_stop_reason`. A fake or a future
     # adapter that omits it must not crash the run — it simply reports no reason.
@@ -483,9 +572,27 @@ def test_is_fetch_day_disabled_means_every_day():
     assert all(is_fetch_day(date(2026, 9, 1) + timedelta(days=i), every_n_days=1) for i in range(7))
 
 
-def test_skip_fetch_never_touches_the_source_and_explains_itself(caplog):
+def test_next_fetch_day_survives_an_absurd_cadence_instead_of_crashing_the_run():
+    # negative (Examiner M1): the previous day-by-day walk raised OverflowError at date.max for
+    # any `every_n_days` past the calendar's range — and because logging evaluates its %-args
+    # eagerly, that crash reached the caller EVEN WITH LOGGING OFF, turning a nonsense config
+    # value into a statusCode:500 and an operator page. A knob nobody should set must not page.
     from datetime import date
 
+    from jobfetcher.core.ingest import next_fetch_day
+
+    assert next_fetch_day(date(2026, 9, 5), every_n_days=4_000_000) is None  # no crash
+    # and it still answers correctly in the normal range
+    assert next_fetch_day(date(2026, 9, 5), every_n_days=3) == date(2026, 9, 7)
+    assert next_fetch_day(date(2026, 9, 7), every_n_days=3) == date(2026, 9, 10)  # strictly after
+
+
+# `date(2026, 9, 5).toordinal() % 3 == 1` and `% 7 == 6` — a non-fetch day for both cadences.
+_NON_FETCH_DAY = date(2026, 9, 5)
+_FETCH_DAY = date(2026, 9, 7)  # ordinal % 3 == 0
+
+
+def test_a_non_fetch_day_never_touches_the_source_and_explains_itself(caplog):
     from jobfetcher.core.ingest import SKIP_NOT_A_FETCH_DAY
 
     class ExplodingSource:
@@ -496,8 +603,7 @@ def test_skip_fetch_never_touches_the_source_and_explains_itself(caplog):
     with caplog.at_level("INFO"):
         summary = ingest(
             _spec(), run_id="r", source_adapter=ExplodingSource(), raw_store=store, repo=repo,
-            dissector=_dissector(), skip_fetch=SKIP_NOT_A_FETCH_DAY,
-            run_date_for_cadence=date(2026, 9, 5),
+            dissector=_dissector(), run_date=_NON_FETCH_DAY,
         )
     assert summary["fetched"] == 0
     assert summary["fetch_stopped"] == SKIP_NOT_A_FETCH_DAY
@@ -505,22 +611,31 @@ def test_skip_fetch_never_touches_the_source_and_explains_itself(caplog):
     msg = caplog.text
     assert "ON PURPOSE" in msg and "NOTHING IS BROKEN" in msg
     assert "200 requests per MONTH" in msg
-    assert "resumes on" in msg
+    assert "resumes on 2026-09-07" in msg
+
+
+def test_a_fetch_day_does_sweep(caplog):
+    # THE OTHER DIRECTION, and the half that was missing: proving the skip works proves nothing
+    # if the cadence never lets a sweep through. Without this, `skip_fetch = SKIP_...` hardcoded
+    # (i.e. never fetching again) passes the suite.
+    repo, store = FakeRepo(), FakeRawStore()
+    src = FakeSource([_job("a")])
+    summary = ingest(
+        _spec(), run_id="r", source_adapter=src, raw_store=store, repo=repo,
+        dissector=_dissector(), run_date=_FETCH_DAY,
+    )
+    assert summary["fetched"] == 1
+    assert summary["fetch_stopped"] is None
 
 
 def test_a_planned_skip_is_not_reported_as_a_failure(caplog):
     # negative: the cadence pause must NOT be logged at WARNING like a rate-limit stop —
     # a routine pause that pages like a fault is how alert fatigue starts (B-5).
-    from datetime import date
-
-    from jobfetcher.core.ingest import SKIP_NOT_A_FETCH_DAY
-
     repo, store = FakeRepo(), FakeRawStore()
     with caplog.at_level("INFO"):
         ingest(
             _spec(), run_id="r", source_adapter=FakeSource([]), raw_store=store, repo=repo,
-            dissector=_dissector(), skip_fetch=SKIP_NOT_A_FETCH_DAY,
-            run_date_for_cadence=date(2026, 9, 5),
+            dissector=_dissector(), run_date=_NON_FETCH_DAY,
         )
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
@@ -529,15 +644,29 @@ def test_skip_message_reports_the_ACTIVE_cadence_not_the_default(caplog):
     # If the cadence is overridden, the explanation must describe what is actually happening.
     # A message that confidently states the default while a different value is in force is
     # worse than no message — it is the stale-number failure this project keeps hitting.
-    from datetime import date
-
-    from jobfetcher.core.ingest import SKIP_NOT_A_FETCH_DAY
-
     with caplog.at_level("INFO"):
         ingest(
             _spec(), run_id="r", source_adapter=FakeSource([]), raw_store=FakeRawStore(),
-            repo=FakeRepo(), dissector=_dissector(), skip_fetch=SKIP_NOT_A_FETCH_DAY,
-            run_date_for_cadence=date(2026, 9, 5), every_n_days=7,
+            repo=FakeRepo(), dissector=_dissector(),
+            run_date=_NON_FETCH_DAY, every_n_days=7,
         )
     assert "runs every 7 days" in caplog.text
     assert "runs every 3 days" not in caplog.text
+
+
+def test_the_skip_message_does_not_contradict_its_own_arithmetic(caplog):
+    # Examiner S1. The message used to derive "~13 days" to exhaust the quota and then assert,
+    # in the very next clause, "~19 days of every month" with no intake — 13 + 19 = 32 in a
+    # 30-day month. `~19` was a PRE-FIX literal (the 6-country, 18-request sweep) surviving
+    # inside a message whose commit claimed "none is typed". Every number must be derived.
+    with caplog.at_level("INFO"):
+        ingest(
+            _spec(), run_id="r", source_adapter=FakeSource([]), raw_store=FakeRawStore(),
+            repo=FakeRepo(), dissector=_dissector(), run_date=_NON_FETCH_DAY,
+        )
+    msg = caplog.text
+    # `_spec()` is 1 title x 1 country x 1 page = 1 request/sweep -> 200 days to exhaust, so
+    # the dead-day figure must clamp to 0 rather than print a negative.
+    assert "in ~200 days" in msg
+    assert "leave ~0 days a month" in msg
+    assert "~19 days" not in msg, "a pre-fix literal is back in a message that derives the rest"

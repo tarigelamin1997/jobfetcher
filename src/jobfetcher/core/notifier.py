@@ -234,16 +234,28 @@ def _staleness_banner(stale_days: int | None) -> tuple[str, str]:
     """
     if stale_days is None or stale_days < DIGEST_STALENESS_WARN_DAYS:
         return "", ""
-    msg = (
-        f"WARNING: this is the first shortlist to reach you in {stale_days} days. "
-        f"The pipeline may have been running and delivering nothing — check the run summaries "
-        f"in S3 runs/ for `fetch_stopped` before trusting today's results as a full picture."
+    # "digest", not "shortlist": this banner renders on the ZERO-MATCH path too — the very path
+    # a silently-broken pipeline produces, and the one the design calls out as mattering most.
+    # Saying "the first SHORTLIST to reach you" there contradicted the line directly beneath it
+    # ("No new matches since …"), which is a poor way to open a message about being misled.
+    headline = f"this is the first digest to reach you in {stale_days} days"
+    detail = (
+        "The pipeline may have been running and delivering nothing — check the run summaries "
+        "in S3 runs/ for `fetch_stopped` before trusting today's results as a full picture."
     )
+    msg = f"WARNING: {headline}. {detail}"
+    # `stale_days` is escaped like every other interpolated value. It is an int today, but
+    # `render_digest(stale_days=...)` is a public keyword with no runtime check, and this
+    # module's own contract is that everything interpolated is escaped first. Building the two
+    # halves separately also retires the `msg.split(". ", 1)[1]` index — an unguarded lookup in
+    # the UNGUARDED render path, where an IndexError would mean `statusCode: 500` and no email
+    # at all: the exact failure this banner exists to announce.
+    days = escape(str(stale_days))
     html = (
         '<div style="background:#fce8e6;border-left:4px solid #d93025;padding:12px 14px;'
         'margin:0 0 16px;border-radius:4px;">'
-        f'<strong style="color:#c5221f;">&#9888; {stale_days} days since your last digest.</strong>'
-        f'<div style="color:#3c4043;margin-top:6px;">{escape(msg.split(". ", 1)[1])}</div>'
+        f'<strong style="color:#c5221f;">&#9888; {days} days since your last digest.</strong>'
+        f'<div style="color:#3c4043;margin-top:6px;">{escape(detail)}</div>'
         "</div>"
     )
     return msg, html

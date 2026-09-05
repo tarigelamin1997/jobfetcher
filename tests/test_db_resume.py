@@ -227,6 +227,11 @@ def _wire_handler(monkeypatch, tmp_path, calls: list[str], *, wait=None):
         def was_digest_sent(self, **kw):  # noqa: ARG002
             return True  # notify is skipped — not under test here
 
+        def get_last_digest_sent_at(self, **kw):  # noqa: ARG002
+            # The notify-SKIP path still reports staleness now (it is a day no digest went out,
+            # so it is a day staleness accrues). No prior send here.
+            return None
+
     fake_repo = _FakeRepo()
 
     def _fake_wait(engine):

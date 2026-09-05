@@ -47,6 +47,19 @@ _POLITE_SLEEP_S = 0.5
 STOP_RATE_LIMITED = "rate_limited"  # the source said 429 — quota or rate cap
 STOP_BUDGET_EXHAUSTED = "budget_exhausted"  # our own request_budget_per_run cap
 
+# The third way a sweep ends short, and the one the first pass missed: neither stop above fired,
+# but one or more queries gave up on an upstream error (a 5xx, a network blip, a gateway HTML
+# page, a read timeout) and their remaining pages were never searched. The sweep "completed" its
+# loop while having searched less than its matrix.
+#
+# WHY THIS EXISTS: `fetch_stopped: None` is defined — in this module, in `core.ingest` and in
+# `docs/ledgers/interface-contracts.md` — as "the whole query matrix was searched, so `fetched: 0`
+# genuinely means the source had nothing new". Without this reason, a sweep that lost ALL 15 of
+# its queries to HTTP 503 returned a run summary byte-for-byte identical to a quiet day. That is
+# the ERR-017 signature (a dead fetch indistinguishable from an empty one) reached through a
+# different door: the two `break`s below, four lines apart, each silent about what they skipped.
+STOP_PARTIAL_ERRORS = "partial_errors"
+
 # Transient side-channel key the adapter attaches to each yielded job to carry the
 # authoritative *query* country (C3). Popped off before the raw payload is persisted to
 # bronze, so the stored raw is never mutated. Underscore-prefixed → won't collide with a
@@ -170,6 +183,11 @@ class JSearchSourceAdapter:
         # `core.ingest` after the generator is drained; additive, so any other SourceAdapter
         # that doesn't set it simply reports no reason.
         self.last_stop_reason: str | None = None
+        # How many (title, country) queries of the LAST fetch() ended on an upstream error
+        # instead of running out their pages. Distinct from `last_stop_reason`: these do NOT
+        # stop the sweep — the matrix keeps going — but they DO mean part of it went unsearched,
+        # so `fetched: 0` is not evidence the source was empty. See STOP_PARTIAL_ERRORS.
+        self.last_failed_queries: int = 0
 
     def _key(self, spec: SearchSpec) -> str:
         if not self._api_key:
@@ -184,6 +202,7 @@ class JSearchSourceAdapter:
         max_pages = spec.budget.max_pages_per_query
         made = 0
         self.last_stop_reason = None  # reset per sweep — a stale reason is worse than none
+        self.last_failed_queries = 0  # ditto: a stale count would over-report today's damage
 
         for title in spec.targeting.job_titles:
             for country in spec.targeting.countries:
@@ -225,8 +244,10 @@ class JSearchSourceAdapter:
                                 made, title, country, page,
                             )
                             return
+                        self.last_failed_queries += 1
                         log.warning(
-                            "JSearch HTTP %s for '%s'/%s p%s — skipping query",
+                            "JSearch HTTP %s for '%s'/%s p%s — skipping query "
+                            "(this query's remaining pages were NOT searched)",
                             exc.code, title, country, page,
                         )
                         break  # other HTTP error → skip the rest of this query's pages
@@ -236,13 +257,28 @@ class JSearchSourceAdapter:
                         TimeoutError,           # bare read timeout (not a URLError on 3.11)
                         socket.timeout,         # older-style socket timeout
                     ) as exc:
+                        self.last_failed_queries += 1
                         log.warning(
-                            "JSearch transient error for '%s'/%s p%s (%s) — skipping query",
+                            "JSearch transient error for '%s'/%s p%s (%s) — skipping query "
+                            "(this query's remaining pages were NOT searched)",
                             title, country, page, type(exc).__name__,
                         )
                         break  # transient → skip the rest of this query's pages
 
-                    # B1: tolerate a malformed `data` shape — land what's valid, never crash
+                    # B1: tolerate a malformed `data` shape — land what's valid, never crash.
+                    # The TOP-LEVEL body is checked first: `_fetch_page` returns whatever
+                    # `json.loads` produced, and a 200 whose body is a bare list/null/string/
+                    # number (a gateway or CDN error page that happens to be valid JSON) would
+                    # otherwise raise AttributeError on `.get` and kill the whole run — losing
+                    # the day's scoring, digest and report, not just this query.
+                    if not isinstance(data, dict):
+                        self.last_failed_queries += 1
+                        log.warning(
+                            "JSearch response body is %s, not a JSON object, for '%s'/%s p%s "
+                            "— skipping query",
+                            type(data).__name__, title, country, page,
+                        )
+                        break
                     raw_data = data.get("data")
                     if not isinstance(raw_data, list):
                         if raw_data is not None:

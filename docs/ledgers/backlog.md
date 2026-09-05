@@ -241,3 +241,21 @@ Only #2 is engineering work, and only #2 stops the next occurrence. **Fixing the
 **Not the cause** (checked, not assumed): the request budget (25 vs 18 — cannot fire first) · a config change (`search_config.yml` unchanged since 2026-07-08) · dedup (`already: 0`) · the 429 *stop behaviour*, which is correct and covered by a passing test. Only its silence is the defect.
 
 **Next.** Rungs, gate and blast radius are in the dossier. Recommended stopping point is **rungs 1–2** (`src/`-only: log the stop, record the reason in the run summary) — non-crucial, no infra. **Rung 3** (making a zero-fetch day *noticed* rather than merely findable) touches `terraform/alarms.tf` and is Tarig's call. Related to but distinct from **B-5**: this is a failure with no signal; B-5 is a signal nobody escalates.
+
+## B-13 · Two cadence knobs an operator can reach but not keep
+
+**Logged:** 2026-09-05, from a fresh Examiner pass on PR #64 (see [CHANGELOG](../../CHANGELOG.md) "what a fresh adversarial Examiner found"). **Status:** open — **not** in PR #70's blast radius, deliberately.
+
+**What.** `terraform/lambda.tf` lists `LOG_LEVEL` and `PIPELINE_MAX_WORKERS` in the Lambda's `environment.variables` **specifically so the knobs are IaC-visible** — the file says so in a comment. `JOBFETCHER_FETCH_EVERY_N_DAYS` is not listed. Because Terraform manages `environment.variables` as a whole map, an operator who sets the override in the Lambda console — the path [INV-003](../investigations/INV-003-silent-fetch-stop/README.md) advertises as "overrides the cadence without a redeploy" — has it **silently removed by the next `terraform apply`**. The documented escape hatch works exactly until the next deploy, then stops, with nothing announcing it.
+
+**Why it matters.** Not urgent (the default is correct and the quota maths depends on it staying 3), but it is a documented capability that quietly does not hold, and the failure is invisible: the cadence reverts to 3 and the run summary says `not_a_fetch_day`, which looks entirely normal.
+
+**Next.** One line in `terraform/lambda.tf`, with the comment the other two carry. **Terraform is Tarig's call** — proposed, not applied.
+
+## B-14 · No way to force a sweep on an off-day
+
+**Logged:** 2026-09-05, same Examiner pass. **Status:** open — **declined for PR #70 as a feature, not a defect** (P1).
+
+**What.** The cadence reads `run_date` + the env knob only. An operator wanting to spend the ~50 spare monthly requests on an off-day must either edit Lambda config (see **B-13**) or fake `run_date` — which doubles as the `run_log` send-once key and the report's S3 prefix, so a faked date writes `mark_digest_sent` against a day the run did not happen on. An `event['force_fetch']` boolean would be ~2 lines.
+
+**Why it matters — and why it waited.** It is a convenience with no observed bottleneck behind it: nobody has yet needed an off-day sweep. Recorded so the option is not rediscovered from scratch, per P2 — a candidate, not a commitment.

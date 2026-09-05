@@ -51,6 +51,7 @@ from ..core.ingest import (
     SKIP_NOT_A_FETCH_DAY,
     Deadline,
     apply_gold_filter,
+    digest_staleness_days,
     ingest,
     is_fetch_day,
     notify,
@@ -499,13 +500,15 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 env.get("JOBFETCHER_FETCH_EVERY_N_DAYS"), FETCH_EVERY_N_DAYS,
             )
             every_n = FETCH_EVERY_N_DAYS
-        skip_fetch = (
-            None if is_fetch_day(run_date, every_n_days=every_n) else SKIP_NOT_A_FETCH_DAY
-        )
+        # The cadence DECISION lives in `ingest` (one input, one decision, one explanation);
+        # this call is the same pure function on the same two values purely so the start line
+        # says what is about to happen. They cannot disagree.
         rlog.info(
             "stage=ingest start run_date=%s fetch=%s",
             run_date.isoformat(),
-            "yes" if skip_fetch is None else f"SKIPPED ({skip_fetch})",
+            "yes"
+            if is_fetch_day(run_date, every_n_days=every_n)
+            else f"SKIPPED ({SKIP_NOT_A_FETCH_DAY})",
         )
         ingest_counts = ingest(
             spec,
@@ -518,8 +521,7 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             max_workers=max_workers,
             deadline=deadline,
             audit_store=audit_store,
-            skip_fetch=skip_fetch,
-            run_date_for_cadence=run_date,
+            run_date=run_date,
             every_n_days=every_n,
         )
         rlog.info("stage=ingest done %s", ingest_counts)
@@ -553,6 +555,28 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         # or if this run is PARTIAL (deadline deferred work) — an early digest would trip the
         # send-once guard with an incomplete shortlist; the completing re-run sends it.
         partial = bool(ingest_counts.get("deferred") or score_counts.get("deferred"))
+
+        def _skipped_notify_counts() -> dict[str, int | None]:
+            """The `notify` summary for a run that did NOT send, with the SAME key set as a run
+            that did.
+
+            `runs/{date}/{run_id}.json` is the forensic record, and a consumer reading
+            `notify.days_since_last_digest` used to get three different shapes across the corpus
+            — an int, a null, or a missing key — with no way to tell "notify was skipped" from
+            "written by an older build". Worse, the missing-key shape landed on exactly the runs
+            that MATTER: a partial or already-sent run is a run on which no digest went out, so
+            it is a day that *increments* staleness, and it was the one shape that dropped the
+            number. The value is free — `get_last_digest_sent_at` is the same single read the
+            send path makes."""
+            return {
+                "surfaced": 0,
+                "below_threshold": 0,
+                "sent": 0,
+                "days_since_last_digest": digest_staleness_days(
+                    repo.get_last_digest_sent_at(user_id=user_id), today=run_date
+                ),
+            }
+
         if partial:
             rlog.warning(
                 "stage=notify skipped — partial run (deferred: ingest=%s score=%s); "
@@ -560,10 +584,10 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 ingest_counts.get("deferred", 0),
                 score_counts.get("deferred", 0),
             )
-            notify_counts: dict[str, int] = {"surfaced": 0, "below_threshold": 0, "sent": 0}
+            notify_counts: dict[str, int | None] = _skipped_notify_counts()
         elif repo.was_digest_sent(user_id=user_id, run_date=run_date):
             rlog.info("stage=notify skipped — digest already sent for %s", run_date.isoformat())
-            notify_counts = {"surfaced": 0, "below_threshold": 0, "sent": 0}
+            notify_counts = _skipped_notify_counts()
         else:
             rlog.info("stage=notify start recipient=%s", recipient)
             # INV-001: the "Mark applied" capture links. `build_capture_link` reads the base URL

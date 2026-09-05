@@ -197,7 +197,7 @@ def test_full_ingest_end_to_end(repo, raw_store):
     )
     # `fetch_stopped: None` = the sweep completed its query matrix, so these counts are the
     # real supply rather than a floor (INV-003).
-    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None}
+    assert summary == {"fetched": 2, "bronzed": 2, "silvered": 2, "skipped": 0, "already": 0, "deferred": 0, "billing_blocked": 0, "fetch_stopped": None, "fetch_failed_queries": 0}
     assert repo.get_posting(f"jsearch:{id1}") is not None
 
 
