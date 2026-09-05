@@ -390,3 +390,103 @@ def test_stop_reason_resets_between_sweeps(monkeypatch):
     _patch_pages(monkeypatch, [{"data": []}])
     list(src.fetch(_spec(), run_id="r2"))
     assert src.last_stop_reason is None
+
+
+# ------------------------------- Examiner findings on PR #63: the OTHER ways a sweep ends short
+# A 429 and a budget stop were made legible. The two `break`s four lines apart — a non-429 HTTP
+# error and a transient error — were not: they end a query early, skip its remaining pages, and
+# said nothing at all. A sweep that lost its whole matrix that way reported `fetch_stopped: None`,
+# which is DEFINED as "the whole matrix was searched". Same lie as ERR-017, different door.
+
+
+def test_failed_queries_are_counted_so_a_lost_matrix_is_not_a_quiet_day(monkeypatch):
+    err = urllib.error.HTTPError("u", 503, "boom", None, io.BytesIO(b""))
+    _patch_pages(monkeypatch, [err, err, err])
+    src = JSearchSourceAdapter(api_key="k")
+    out = list(src.fetch(_spec(titles=("a", "b", "c"), max_pages=1), run_id="r"))
+    assert out == []
+    # the sweep "completed" its loop — no stop reason — but searched none of its matrix
+    assert src.last_stop_reason is None
+    assert src.last_failed_queries == 3
+
+
+def test_transient_errors_are_counted_too(monkeypatch):
+    _patch_pages(monkeypatch, [TimeoutError(), {"data": [_job("ok")]}])
+    src = JSearchSourceAdapter(api_key="k")
+    out = list(src.fetch(_spec(titles=("a", "b"), max_pages=1), run_id="r"))
+    assert [j["job_id"] for j in out] == ["ok"]
+    assert src.last_failed_queries == 1  # one of the two queries was lost
+
+
+def test_failed_query_count_resets_between_sweeps(monkeypatch):
+    # negative, mirroring the stop-reason reset: yesterday's damage must not be reported today.
+    err = urllib.error.HTTPError("u", 503, "boom", None, io.BytesIO(b""))
+    src = JSearchSourceAdapter(api_key="k")
+    _patch_pages(monkeypatch, [err])
+    list(src.fetch(_spec(max_pages=1), run_id="r1"))
+    assert src.last_failed_queries == 1
+    _patch_pages(monkeypatch, [{"data": []}])
+    list(src.fetch(_spec(max_pages=1), run_id="r2"))
+    assert src.last_failed_queries == 0
+
+
+def test_a_clean_sweep_reports_zero_failed_queries(monkeypatch):
+    # negative: a healthy sweep must not be tarred with a failure count.
+    _patch_pages(monkeypatch, [{"data": [_job("a")]}])
+    src = JSearchSourceAdapter(api_key="k")
+    list(src.fetch(_spec(max_pages=1), run_id="r"))
+    assert src.last_failed_queries == 0 and src.last_stop_reason is None
+
+
+@pytest.mark.parametrize("body", [[], None, "gateway error", 42])
+def test_fetch_non_object_body_skips_query_instead_of_killing_the_run(monkeypatch, body):
+    # negative (Examiner S1): the code tolerated any shape of `body["data"]` but never checked
+    # that `body` itself was a JSON object. A 200 whose body is a bare list/null/string/number —
+    # a CDN or gateway error page that happens to be valid JSON — raised AttributeError out of
+    # the generator and killed the whole run: no scoring, no digest, no report for the day.
+    _patch_pages(monkeypatch, [body, {"data": [_job("ok")]}])
+    src = JSearchSourceAdapter(api_key="k")
+    out = list(src.fetch(_spec(titles=("a", "b"), max_pages=1), run_id="r"))
+    assert [j["job_id"] for j in out] == ["ok"]  # the run survived and the good query landed
+    assert src.last_failed_queries == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "label"),
+    [
+        ({"data": {"unexpected": "object"}}, "data is a dict"),
+        ({"data": "boom"}, "data is a string"),
+        ({"data": None}, "data is null"),
+        ({"status": "ERROR", "error": {"message": "quota"}}, "no data key at all"),
+    ],
+)
+def test_a_query_lost_to_a_malformed_data_body_is_counted_and_logged(
+    monkeypatch, caplog, body, label
+):
+    # The re-verification pass found the hole the FIRST fix left: three break paths were counted
+    # and this one was not, so a 200 whose `data` is unusable ended the query early, left its
+    # remaining pages unsearched, and still reported `fetch_stopped: None` — which is DEFINED as
+    # "the whole matrix was searched".
+    #
+    # `no data key at all` is the worst of the set: `{"status":"ERROR", ...}` is the most
+    # plausible shape of an application-level upstream error returned with HTTP 200, and the old
+    # `if raw_data is not None` guard suppressed even the warning — total silence.
+    _patch_pages(monkeypatch, [body] * 3)
+    src = JSearchSourceAdapter(api_key="k")
+    with caplog.at_level("WARNING"):
+        out = list(src.fetch(_spec(titles=("a", "b", "c"), max_pages=2), run_id="r"))
+    assert out == []
+    assert src.last_failed_queries == 3, label
+    assert "not a list" in caplog.text  # never silent, not even for an absent key
+
+
+def test_a_genuinely_empty_page_is_not_counted_as_a_failure(monkeypatch):
+    # THE NEGATIVE that keeps `partial_errors` meaningful. An empty result really is
+    # `{"data": []}` — a list. If that were counted, every quiet day would report
+    # `partial_errors` and the reason would become furniture, which is the failure mode the
+    # whole escalation design is trying to avoid.
+    _patch_pages(monkeypatch, [{"data": []}] * 3)
+    src = JSearchSourceAdapter(api_key="k")
+    out = list(src.fetch(_spec(titles=("a", "b", "c"), max_pages=1), run_id="r"))
+    assert out == []
+    assert src.last_failed_queries == 0 and src.last_stop_reason is None

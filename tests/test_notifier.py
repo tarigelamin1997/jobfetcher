@@ -24,7 +24,6 @@ from jobfetcher.core.notifier import (
     split_new_and_still_open,
 )
 from jobfetcher.core.ports import NotifierError, ShortlistItem
-from unittest.mock import ANY  # staleness has its own dedicated tests below
 
 _CAPTURE_KEY = b"digest-capture-key"
 
@@ -646,7 +645,7 @@ def test_notify_sends_and_counts():
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier,
                  recipient_email="to@x.com", run_date=date(2026, 6, 27))
-    assert out == {"surfaced": 2, "below_threshold": 4, "sent": 1, "days_since_last_digest": ANY}
+    assert out == {"surfaced": 2, "below_threshold": 4, "sent": 1, "days_since_last_digest": None}
     assert len(notifier.sent) == 1
     sent = notifier.sent[0]
     assert sent["recipients"] == ["to@x.com"]
@@ -659,7 +658,7 @@ def test_notify_zero_matches_still_sends():
     repo = _FakeRepo(threshold=60, surfaced=[], below=5)
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com")
-    assert out == {"surfaced": 0, "below_threshold": 5, "sent": 1, "days_since_last_digest": ANY}
+    assert out == {"surfaced": 0, "below_threshold": 5, "sent": 1, "days_since_last_digest": None}
     assert len(notifier.sent) == 1
     assert "no matches" in notifier.sent[0]["subject"].lower()
 
@@ -736,7 +735,37 @@ def test_notify_threads_since_and_max_age_to_shortlist():
     # the previously-surfaced 90 is STILL OPEN → the digest honestly reports no new matches
     assert "no new matches since 2026-06-20" in notifier.sent[0]["subject"]
     assert "1 earlier match still open" in notifier.sent[0]["html"]
-    assert out == {"surfaced": 1, "below_threshold": 0, "sent": 1, "days_since_last_digest": ANY}  # counts unchanged
+    assert out == {"surfaced": 1, "below_threshold": 0, "sent": 1, "days_since_last_digest": 7}
+
+
+def test_notify_actually_wires_staleness_into_the_email_it_sends():
+    # THE SEAM (Examiner B3). Computing `days_since_last_digest` for the run summary and
+    # RENDERING it in the digest are two different things, and only the second reaches the user.
+    # Proven necessary by mutation: dropping `stale_days=stale_days` from notify's
+    # render_digest(...) call deletes the whole escalation from every real email — and the suite
+    # stayed 100% green, because the returned dict was all anyone asserted.
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90, scored_at=_STALE)], below=0,
+                     last_sent=_SINCE)
+    notifier = _FakeNotifier()
+    out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+                 run_date=date(2026, 6, 30))  # 10 days after _SINCE -> well past the 3-day warn
+    assert out["days_since_last_digest"] == 10          # the summary carries it...
+    sent = notifier.sent[0]
+    assert _banner_present(sent["subject"], sent["html"], sent["text"])  # ...and so does the EMAIL
+    assert "10 days" in sent["text"] and "10 days" in sent["html"]
+
+
+def test_notify_sends_no_banner_when_the_digest_is_current():
+    # negative: the same seam, the other way. A healthy daily cadence must render nothing.
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90, scored_at=_STALE)], below=0,
+                     last_sent=_SINCE)
+    notifier = _FakeNotifier()
+    out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+                 run_date=date(2026, 6, 21))  # 1 day after _SINCE
+    assert out["days_since_last_digest"] == 1
+    sent = notifier.sent[0]
+    assert not _banner_present(sent["subject"], sent["html"], sent["text"])
+    assert "⚠" not in sent["subject"]
 
 
 def test_notify_default_max_age_is_none_unbounded():
@@ -755,7 +784,7 @@ def test_notify_with_report_store_builds_and_embeds_link():
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
                  run_date=date(2026, 6, 27), report_store=store)
-    assert out == {"surfaced": 1, "below_threshold": 4, "sent": 1, "days_since_last_digest": ANY}
+    assert out == {"surfaced": 1, "below_threshold": 4, "sent": 1, "days_since_last_digest": None}
     # uploaded once, at reports/{run_date}/jobs-{run_id}.html, with real HTML
     assert len(store.puts) == 1
     assert store.puts[0]["key"] == "reports/2026-06-27/jobs-r.html"
@@ -799,7 +828,7 @@ def test_notify_zero_scored_with_report_store_still_sends():
     notifier = _FakeNotifier()
     out = notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
                  run_date=date(2026, 6, 27), report_store=store)
-    assert out == {"surfaced": 0, "below_threshold": 0, "sent": 1, "days_since_last_digest": ANY}
+    assert out == {"surfaced": 0, "below_threshold": 0, "sent": 1, "days_since_last_digest": None}
     assert "no matches" in notifier.sent[0]["subject"].lower()
 
 
@@ -826,14 +855,26 @@ def test_notify_threads_max_age_to_get_all_scored():
 # and its whole value depends on STAYING SILENT on ordinary days.
 
 
+def _banner_present(subject: str, html: str, text: str) -> bool:
+    """Is the escalation actually visible, in all three places it must be?
+
+    Replaces the assertion this suite used to make — `"days since" not in text` — which could
+    NEVER fail: that substring only ever existed in the HTML, so the plaintext half of both
+    negative tests would have passed with the banner fully present."""
+    return subject.startswith("⚠") and "days since your last digest" in html and (
+        "WARNING:" in text and "to reach you in" in text
+    )
+
+
 def test_staleness_is_silent_on_a_normal_day():
     # THE NEGATIVE CASE, and the point of the feature: a banner that shows up every morning is
     # furniture, not an escalation, and stops being seen within a week.
     from jobfetcher.core.notifier import render_digest
 
     subject, html, text = render_digest([], 0, threshold=60, date=date(2026, 9, 4), stale_days=1)
+    assert not _banner_present(subject, html, text)
     assert "⚠" not in subject
-    assert "days since" not in text.lower() and "days since" not in html.lower()
+    assert "WARNING" not in text and "days since" not in html.lower()
 
 
 def test_staleness_warns_in_subject_and_body_when_stale():
@@ -844,7 +885,7 @@ def test_staleness_warns_in_subject_and_body_when_stale():
         stale_days=DIGEST_STALENESS_WARN_DAYS + 35,
     )
     # the SUBJECT matters most — the inbox list is where triage actually happens
-    assert subject.startswith("⚠")
+    assert _banner_present(subject, html, text)
     assert "38 days" in text and "38 days" in html
 
 
@@ -854,19 +895,42 @@ def test_staleness_never_reported_when_no_digest_was_ever_sent():
     from jobfetcher.core.notifier import render_digest
 
     subject, html, text = render_digest([], 0, threshold=60, date=date(2026, 9, 4), stale_days=None)
-    assert "⚠" not in subject and "days since" not in text.lower()
+    assert not _banner_present(subject, html, text)
+    assert "⚠" not in subject and "WARNING" not in text and "days since" not in html.lower()
 
 
-def test_staleness_appears_on_the_zero_match_path_too():
-    # the zero-match email is EXACTLY what a silently-broken pipeline produces, so the banner
-    # must survive that early return — the path most likely to carry the bad news.
+def test_staleness_appears_on_the_MAIN_render_path_not_only_the_zero_match_one():
+    # Examiner B3. Every staleness test in this file passed `items=[]`, so all four landed on
+    # render_digest's zero-match EARLY RETURN — the main path's banner and ⚠ subject were
+    # untested. Proven by mutation: stripping them from the main path left the suite green,
+    # while any day with matches is precisely a day the reader would see nothing wrong.
     from jobfetcher.core.notifier import render_digest
 
-    subject, html, _ = render_digest([], 0, threshold=60, date=date(2026, 9, 4), stale_days=38)
-    assert subject.startswith("⚠") and "38 days" in html
+    subject, html, text = render_digest(
+        [_item(90), _item(70, "p2")], below_count=4, threshold=60,
+        date=date(2026, 9, 4), stale_days=38,
+    )
+    assert "2 new matches" in subject   # the ordinary subject is still there...
+    assert _banner_present(subject, html, text)  # ...with the escalation in front of it
+    assert "38 days" in text and "38 days" in html
 
 
-def test_digest_staleness_days_counts_from_delivery_not_from_running():
+def test_the_staleness_banner_does_not_contradict_the_email_it_sits_on():
+    # Examiner S4. On the zero-match path there IS no shortlist, so "the first shortlist to
+    # reach you in 38 days" directly above "No new matches since ..." told the reader two
+    # incompatible things — on the recovery-day path the design singles out as mattering most.
+    from jobfetcher.core.notifier import render_digest
+
+    _, _, text = render_digest([], 0, threshold=60, date=date(2026, 9, 1), stale_days=38)
+    assert "first digest to reach you in 38 days" in text
+    assert "shortlist to reach you" not in text
+
+
+def test_digest_staleness_days_counts_whole_days_since_the_recorded_delivery():
+    # (Renamed: the old name promised "from delivery, not from running", which THIS function
+    # cannot possibly test — it takes a datetime and has no access to run history. That property
+    # lives in get_last_digest_sent_at + mark_digest_sent and is proven in the integration
+    # suite's VG-c test, not here. A name that claims an untested property is worse than none.)
     from datetime import datetime, timezone
 
     from jobfetcher.core.ingest import digest_staleness_days
@@ -879,3 +943,40 @@ def test_digest_staleness_days_counts_from_delivery_not_from_running():
     # negative: a future/again-today timestamp clamps to 0 rather than going negative
     assert digest_staleness_days(sent, today=date(2026, 7, 24)) == 0
     assert digest_staleness_days(sent, today=date(2026, 7, 1)) == 0
+
+
+def test_a_future_dated_delivery_is_clamped_but_NOT_silent(caplog):
+    # Examiner minor: clamping to 0 is the right answer (never escalate on nonsense) but silence
+    # was the wrong behaviour. One future-dated run_log row poisons MAX(digest_sent_at) and
+    # switches the escalation off for as long as it stays in the future — the exact silent
+    # failure this feature exists to end.
+    from datetime import datetime, timezone
+
+    from jobfetcher.core.ingest import digest_staleness_days
+
+    sent = datetime(2027, 1, 1, 6, 0, tzinfo=timezone.utc)
+    with caplog.at_level("WARNING"):
+        assert digest_staleness_days(sent, today=date(2026, 9, 5)) == 0
+    assert "NEGATIVE" in caplog.text and "DISABLED" in caplog.text
+    # negative: an ordinary healthy day must stay quiet — a warning every morning is furniture
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        digest_staleness_days(
+            datetime(2026, 9, 4, 6, 0, tzinfo=timezone.utc), today=date(2026, 9, 5)
+        )
+    assert caplog.text == ""
+
+
+def test_staleness_is_the_same_for_one_instant_in_two_timezones():
+    # negative: the SAME instant carried with a different offset must not yield a different
+    # answer. `.date()` on a raw aware datetime gave 0 in UTC and 1 at UTC-5.
+    from datetime import datetime, timedelta, timezone
+
+    from jobfetcher.core.ingest import digest_staleness_days
+
+    instant = datetime(2026, 9, 5, 4, 30, tzinfo=timezone.utc)
+    shifted = instant.astimezone(timezone(timedelta(hours=-5)))
+    assert instant == shifted  # the same moment, written two ways
+    assert digest_staleness_days(instant, today=date(2026, 9, 5)) == digest_staleness_days(
+        shifted, today=date(2026, 9, 5)
+    )

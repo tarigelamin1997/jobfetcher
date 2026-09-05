@@ -12,10 +12,14 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
-from ..adapters.jsearch_source import QUERY_COUNTRY_KEY, jd_and_metadata_from_jsearch
+from ..adapters.jsearch_source import (
+    QUERY_COUNTRY_KEY,
+    STOP_PARTIAL_ERRORS,
+    jd_and_metadata_from_jsearch,
+)
 from .clean import clean
 from .dissector import DissectionError
 from .fingerprint import fingerprint
@@ -82,10 +86,15 @@ DEFAULT_RESAMPLE_TRIGGER_MARGIN = 16
 #                                    ERR-010 run for 38 days. So the schedule stays daily.
 #   why the sweep is every 3rd day   the JSearch (RapidAPI) free tier is 200 requests/MONTH.
 #                                    One sweep = job_titles x countries x max_pages_per_query
-#                                    = 3 x 5 x 1 = 15 requests. Daily would need ~450/month,
-#                                    2.25x the quota — which is why the tool silently ingested
-#                                    nothing for ~19 days of every month (ERR-017). Every 3rd
-#                                    day is ~10 sweeps = ~150 requests, inside 200 with margin.
+#                                    (`_sweep_cost`, computed from the live spec — deliberately
+#                                    NOT written out as digits here, because a config edit would
+#                                    silently falsify them). Sweeping DAILY costs ~30x that,
+#                                    which is how the tool silently ingested nothing for most of
+#                                    every month until 2026-09-04 (ERR-017 — then a 6-country
+#                                    sweep of 18 requests/day, ~540/month against the 200 cap,
+#                                    exhausting it in ~11 days and leaving ~19 dead).
+#                                    Every 3rd day is ~10 sweeps/month, which at the current
+#                                    5-country spec fits inside 200 with margin.
 #
 # A non-fetch day is NOT a degraded run: scoring, the digest and the report all still work off
 # already-landed postings. Only new intake pauses.
@@ -98,6 +107,11 @@ FETCH_EVERY_N_DAYS = 3
 # arithmetic in front of the reader instead of asserting a number someone has to trust.
 SOURCE_MONTHLY_QUOTA = 200
 
+# Why a sweep did not happen at all. Sits alongside the adapter's own stop reasons
+# (STOP_RATE_LIMITED / STOP_BUDGET_EXHAUSTED / STOP_PARTIAL_ERRORS) in `fetch_stopped`.
+SKIP_NOT_A_FETCH_DAY = "not_a_fetch_day"
+
+log = logging.getLogger(__name__)
 
 
 def digest_staleness_days(
@@ -107,17 +121,40 @@ def digest_staleness_days(
 
     `None` is not "infinitely stale" — a first-ever run must not escalate on day one, so the
     caller treats it as "no basis to judge" rather than as an alarm (INV-004 gate VG-b).
+
+    `today` defaults to the UTC date, matching the pipeline's own clock (`resolve_run_date`);
+    the local `date.today()` it used before could disagree with every real caller by a day.
     """
     if last_sent is None:
         return None
-    ref = today or date.today()
-    sent_on = last_sent.date() if isinstance(last_sent, datetime) else last_sent
-    return max((ref - sent_on).days, 0)
-
-
-# Why a sweep did not happen at all. Sits alongside the adapter's own stop reasons
-# (STOP_RATE_LIMITED / STOP_BUDGET_EXHAUSTED) in the run summary's `fetch_stopped`.
-SKIP_NOT_A_FETCH_DAY = "not_a_fetch_day"
+    ref = today or datetime.now(timezone.utc).date()
+    if isinstance(last_sent, datetime):
+        # Normalize to UTC before taking the calendar day: the SAME INSTANT carried with a
+        # different offset must not produce a different staleness. The deployed Data-API dialect
+        # returns naive UTC and Lambda runs TZ=UTC, so this is belt-and-braces in production —
+        # but this function is public and "one instant, two answers" is not worth keeping.
+        if last_sent.tzinfo is not None:
+            last_sent = last_sent.astimezone(timezone.utc)
+        sent_on = last_sent.date()
+    else:
+        sent_on = last_sent
+    delta = (ref - sent_on).days
+    if delta < 0:
+        # A delivery recorded AFTER this run's date is impossible: clock skew between Aurora's
+        # now() and the Lambda's UTC clock, a manual/backfill insert, or a replay of an older
+        # run_date. Clamping to 0 is the right ANSWER (never escalate on nonsense); staying
+        # SILENT was the wrong behaviour — one future-dated `run_log` row poisons
+        # MAX(digest_sent_at) and switches the escalation off for as long as it stays in the
+        # future. That is the exact silent-failure shape this feature exists to end (INV-004).
+        log.warning(
+            "digest staleness is NEGATIVE (%d days): the last recorded delivery (%s) is after "
+            "this run's date (%s). Clamped to 0, so nothing escalates — but the staleness "
+            "escalation is effectively DISABLED until that timestamp is in the past. Check "
+            "run_log.digest_sent_at for a future-dated or backfilled row.",
+            delta, sent_on.isoformat(), ref.isoformat(),
+        )
+        return 0
+    return delta
 
 
 def _sweep_cost(spec: "SearchSpec") -> int:
@@ -140,17 +177,30 @@ def is_fetch_day(run_date: "date", *, every_n_days: int = FETCH_EVERY_N_DAYS) ->
     return every_n_days <= 1 or run_date.toordinal() % every_n_days == 0
 
 
-def next_fetch_day(run_date: "date", *, every_n_days: int = FETCH_EVERY_N_DAYS) -> "date":
-    """The first fetch day strictly after `run_date` — so a skip message can tell the reader
-    when intake resumes, instead of leaving them to work out the cadence."""
-    from datetime import timedelta
+def next_fetch_day(
+    run_date: "date", *, every_n_days: int = FETCH_EVERY_N_DAYS
+) -> "date | None":
+    """The first fetch day strictly after `run_date`, so a skip message can tell the reader when
+    intake resumes instead of leaving them to work out the cadence. `None` when no representable
+    fetch day exists (an absurd `every_n_days` whose next multiple falls past `date.max`).
 
-    day = run_date + timedelta(days=1)
-    while not is_fetch_day(day, every_n_days=every_n_days):
-        day += timedelta(days=1)
-    return day
-
-log = logging.getLogger(__name__)
+    **Closed-form, deliberately not a walk.** The day-by-day loop this replaces raised
+    `OverflowError` at `date.max` for `every_n_days > date.max.toordinal()` — and because
+    `logging` evaluates its `%`-arguments eagerly, that crash reached the caller *even with
+    logging disabled*, turning a nonsense config value into a `statusCode: 500` and an operator
+    page. A knob nobody should set must not be able to page anybody.
+    """
+    if every_n_days <= 1:  # cadence off — tomorrow is a fetch day
+        # `date.max` has no tomorrow. Unreachable in production (a skip only happens when
+        # `every_n_days >= 2`, and `resolve_run_date` never yields 9999-12-31), but the
+        # function promises `None` when no representable fetch day exists — so it must
+        # actually deliver that on every branch, not just the closed-form one.
+        return None if run_date == date.max else run_date + timedelta(days=1)
+    # The smallest multiple of `every_n_days` strictly greater than today's ordinal.
+    ordinal = (run_date.toordinal() // every_n_days + 1) * every_n_days
+    if ordinal > date.max.toordinal():
+        return None
+    return date.fromordinal(ordinal)
 
 # LLM calls are pure I/O — this many run concurrently per stage (H-2). DB writes always stay
 # on the main thread (the Data-API dialect's thread-safety is deliberately not relied on).
@@ -342,8 +392,7 @@ def ingest(
     max_workers: int = DEFAULT_MAX_WORKERS,
     deadline: Deadline | None = None,
     audit_store: "S3AuditStore | None" = None,
-    skip_fetch: str | None = None,
-    run_date_for_cadence: "date | None" = None,
+    run_date: "date | None" = None,
     every_n_days: int = FETCH_EVERY_N_DAYS,
 ) -> dict[str, int | str | None]:
     """End-to-end Step-4 run: fetch→bronze, then derive silver for each *distinct, new*
@@ -353,13 +402,25 @@ def ingest(
     LLM call), `deferred` = not attempted because the `deadline` passed (the next idempotent
     run picks them up).
 
+    **The fetch cadence is decided HERE, from `run_date` + `every_n_days`** (`is_fetch_day`) —
+    not handed in by the caller. Previously the caller passed the *decision* (`skip_fetch`) AND
+    the two inputs that only ever fed the explanation, so the three could disagree: a caller
+    could produce a message reading "the sweep therefore runs every 1 days (~450 requests)…
+    NOTHING IS BROKEN" on a day it had just been told to skip. One input, one decision, one
+    explanation — the incoherent combination is now unrepresentable. `run_date=None` means "no
+    cadence, always fetch" (what the unit tests want).
+
     **Concurrency model (H-2):** dissections (pure LLM I/O) run on up to `max_workers`
     threads; every `repo` write stays on the main thread — the Data-API dialect's
     thread-safety is never relied on."""
-    # `skip_fetch` (a reason string) means "don't call the source at all this run" — the
-    # scheduled-cadence pause, not a failure. Everything downstream is untouched: scoring, the
+    # A scheduled-cadence pause, not a failure. Everything downstream is untouched: scoring, the
     # digest and the report all still run off already-landed postings.
-    if skip_fetch:
+    skip_fetch = (
+        None
+        if run_date is None or is_fetch_day(run_date, every_n_days=every_n_days)
+        else SKIP_NOT_A_FETCH_DAY
+    )
+    if skip_fetch is not None:
         landed: list[tuple[str, dict[str, Any], str | None]] = []
     else:
         landed = fetch_to_bronze(
@@ -446,35 +507,72 @@ def ingest(
 
     # Why the sweep ended, if it ended early (INV-003). `None` = it worked through its whole
     # query matrix, so `fetched: 0` genuinely means "the source had nothing new". Read
-    # defensively via getattr: the `SourceAdapter` port does not require this attribute, so a
-    # fake or a future adapter that omits it simply reports no reason.
+    # defensively via getattr: the `SourceAdapter` port does not require these attributes, so a
+    # fake or a future adapter that omits them simply reports no reason and no failures.
     #
     # This single key is what makes a zero-fetch day diagnosable from runs/*.json alone,
     # instead of identical to a quiet day.
-    fetch_stopped = skip_fetch or getattr(source_adapter, "last_stop_reason", None)
+    #
+    # The adapter's counters are read ONLY when we actually fetched. On a skip day the generator
+    # was never created, so its reset never ran and anything still on the instance describes a
+    # PREVIOUS sweep — reporting that against a run that made zero requests would be a lie of
+    # exactly the kind this key exists to prevent.
+    failed_queries = 0
+    if skip_fetch is not None:
+        fetch_stopped: str | None = skip_fetch
+    else:
+        fetch_stopped = getattr(source_adapter, "last_stop_reason", None)
+        # Defensive on the VALUE as well as on the attribute's absence: the comment above
+        # promises that any adapter which omits these "simply reports no reason and no
+        # failures", and a bare `int(...)` would have made that true for a MISSING attribute
+        # and false for a junk one (`"many"` → ValueError out of the run).
+        raw_failed = getattr(source_adapter, "last_failed_queries", 0)
+        failed_queries = raw_failed if isinstance(raw_failed, int) else 0
+        if fetch_stopped is None and failed_queries:
+            # The sweep ran its whole loop but lost queries to upstream errors, so part of the
+            # matrix went unsearched. Reporting `None` here would assert "the source had nothing
+            # new" about a matrix we never finished asking — the ERR-017 lie, restated.
+            fetch_stopped = STOP_PARTIAL_ERRORS
     if fetch_stopped == SKIP_NOT_A_FETCH_DAY:
         # A PLANNED pause, not a fault — say so in full, at INFO, so anyone reading the log or
         # the run summary understands the whole situation without opening the code or the docs.
+        #
+        # EVERY number below is derived from the live spec and the active cadence. The one that
+        # used to be typed — "~19 days of every month" — was a PRE-FIX figure (it came from the
+        # 6-country, 18-request sweep) sitting in the same sentence as a freshly-derived "~13
+        # days", so the message contradicted itself by 32 days inside a 30-day month.
+        sweep = _sweep_cost(spec)
+        days_to_exhaust = SOURCE_MONTHLY_QUOTA // max(sweep, 1)
+        sweeps_per_month = 30 // max(every_n_days, 1)
+        resumes = next_fetch_day(run_date, every_n_days=every_n_days) if run_date else None
         log.info(
             "fetch_stopped=%s — the JSearch sweep did NOT run today, ON PURPOSE. Why: the "
             "JSearch plan allows %d requests per MONTH, and one full sweep costs "
             "%d requests (%d job title(s) x %d countries x %d page(s)), so sweeping every day "
-            "would need ~%d/month and would exhaust the whole month's quota in ~%d days — "
-            "which is exactly what silently happened, for ~19 days of every month, until "
-            "2026-09-04 (ERR-017). The sweep therefore runs every %d days (~%d/month, ~%d "
-            "requests). NOTHING IS BROKEN: "
+            "would need ~%d/month — it would exhaust the whole month's quota in ~%d days and "
+            "leave ~%d days a month with no intake at all, which is what silently happened "
+            "until 2026-09-04 (ERR-017). The sweep therefore runs every %d days (~%d/month, "
+            "~%d requests). NOTHING IS BROKEN: "
             "scoring, the digest and the full-list report all still ran against the postings "
             "already collected. New job intake resumes on %s. To change this, raise the "
             "RapidAPI plan and FETCH_EVERY_N_DAYS together — never one without the other.",
             fetch_stopped,
             SOURCE_MONTHLY_QUOTA,
-            _sweep_cost(spec), len(spec.targeting.job_titles), len(spec.targeting.countries),
-            spec.budget.max_pages_per_query, _sweep_cost(spec) * 30,
-            SOURCE_MONTHLY_QUOTA // max(_sweep_cost(spec), 1),
-            every_n_days,
-            30 // max(every_n_days, 1), _sweep_cost(spec) * (30 // max(every_n_days, 1)),
-            next_fetch_day(run_date_for_cadence, every_n_days=every_n_days).isoformat()
-            if run_date_for_cadence else "the next scheduled fetch day",
+            sweep, len(spec.targeting.job_titles), len(spec.targeting.countries),
+            spec.budget.max_pages_per_query, sweep * 30,
+            days_to_exhaust, max(30 - days_to_exhaust, 0),
+            every_n_days, sweeps_per_month, sweep * sweeps_per_month,
+            resumes.isoformat() if resumes else "the next scheduled fetch day",
+        )
+    elif fetch_stopped == STOP_PARTIAL_ERRORS:
+        log.warning(
+            "ingest: the sweep ran its whole loop but %d query/queries gave up on upstream "
+            "errors (run_id=%s) — %d posting(s) landed. Part of the query matrix was never "
+            "searched, so `fetched` is a FLOOR, not the day's true supply. This is NOT the same "
+            "as a quiet day: do not read a low or zero count here as 'the source had nothing'.",
+            failed_queries,
+            run_id,
+            len(landed),
         )
     elif fetch_stopped:
         log.warning(
@@ -495,6 +593,10 @@ def ingest(
         "deferred": deferred,
         "billing_blocked": billing_blocked,
         "fetch_stopped": fetch_stopped,
+        # How many (title, country) queries died on an upstream error. 0 on a complete sweep and
+        # on a skip day. Paired with `fetch_stopped`: the reason says the matrix was incomplete,
+        # this says by how much.
+        "fetch_failed_queries": failed_queries,
     }
 
 
@@ -1062,7 +1164,7 @@ def notify(
     max_age_days: int | None = None,
     report_store: "ReportStore | None" = None,
     capture_link: "CaptureLink | None" = None,
-) -> dict[str, int]:
+) -> dict[str, int | None]:
     """Step-6 notification: load the profile (its **runtime** threshold) → read the scored
     shortlist (surfaced + below count) → render the daily digest → send it.
 
@@ -1093,8 +1195,10 @@ def notify(
     full-list report so each surfaced job carries a signed "Mark applied" link. `None` (capture
     unconfigured) renders no capture link — never a reason the run fails.
 
-    Returns `{surfaced, below_threshold, sent}` (`sent` is 1 — a send failure raises before
-    we get here)."""
+    Returns `{surfaced, below_threshold, sent, days_since_last_digest}` (`sent` is 1 — a send
+    failure raises before we get here). `days_since_last_digest` is `None` on a first-ever run
+    — "no basis to judge", not "infinitely stale" — which is why the return type is
+    `int | None`, not `int`."""
     if not recipient_email:
         raise NotifierError("no recipient_email — cannot send the digest")
     row = repo.get_profile(user_id)

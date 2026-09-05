@@ -458,3 +458,60 @@ def test_notify_writes_report_object_and_embeds_presigned_url(repo):
         mine = [m for m in _moto_sent_messages() if "report@jobfetcher.test" in m["destinations"]]
         assert len(mine) == 1
         assert key in mine[0]["body"]  # the presigned url path carries the report key
+
+
+def test_a_run_that_completes_but_sends_nothing_does_not_reset_staleness(repo):
+    """INV-004 **VG-c**, over a real `run_log` — the property the unit suite only ever asserted
+    in a comment.
+
+    The whole escalation rests on measuring the PRODUCT OUTCOME ("did a shortlist reach the
+    human?") rather than any internal stage: during ERR-010 the pipeline RAN, and returned 500,
+    every day for 38 days. If a completed-but-silent run touched `digest_sent_at`, staleness
+    would reset daily and the escalation could never fire — the detector would be as blind as
+    the alarms were.
+
+    A fresh Examiner flagged that `test_digest_staleness_days_counts_from_delivery_not_from_
+    running` cannot test this: it calls a pure function that takes a datetime and has no access
+    to run history. The property lives here, in `mark_digest_sent` / `get_last_digest_sent_at`.
+    """
+    from sqlalchemy import update
+
+    from jobfetcher.core.ingest import digest_staleness_days
+    from jobfetcher.db import tables
+
+    tag = uuid4().hex[:8]
+    user = f"vgc-{tag}"
+
+    # Day 0: a digest genuinely goes out. Backdate it 38 days — the real ERR-010 number.
+    repo.mark_digest_sent(user_id=user, run_date=date(2026, 7, 24), run_id="r-sent")
+    sent_at = datetime.now(timezone.utc) - timedelta(days=38)
+    with repo.engine.begin() as conn:
+        conn.execute(
+            update(tables.run_log)
+            .where((tables.run_log.c.user_id == user)
+                   & (tables.run_log.c.run_date == date(2026, 7, 24)))
+            .values(digest_sent_at=sent_at)
+        )
+
+    # Days 1..38: the pipeline runs and completes every day, but never sends. Nothing calls
+    # `mark_digest_sent` — that is the contract, and this is what asserts it.
+    for offset in range(1, 39):
+        assert not repo.was_digest_sent(
+            user_id=user, run_date=date(2026, 7, 24) + timedelta(days=offset)
+        )
+
+    # The counter must still read the ORIGINAL delivery, not "today".
+    last = repo.get_last_digest_sent_at(user_id=user)
+    assert last is not None
+    assert digest_staleness_days(last, today=(sent_at + timedelta(days=38)).date()) == 38
+
+    # ...and the positive half: an actual send DOES move it, so this is a gate, not a tautology.
+    repo.mark_digest_sent(user_id=user, run_date=date(2026, 9, 1), run_id="r-sent-2")
+    moved = repo.get_last_digest_sent_at(user_id=user)
+    assert moved is not None and moved > last
+    # Reference the day OF the recorded delivery, not "now" (CodeRabbit): reading the clock
+    # again after the insert can cross UTC midnight and make this assert 1 instead of 0 — a
+    # once-a-day flake. The dialect returns naive UTC locally and aware elsewhere, so
+    # normalize before taking the date.
+    moved_day = (moved.astimezone(timezone.utc) if moved.tzinfo else moved).date()
+    assert digest_staleness_days(moved, today=moved_day) == 0
