@@ -92,9 +92,16 @@ resource "aws_lambda_function" "pipeline" {
       # the next deploy, then stopped, with nothing announcing it (backlog B-13).
       #
       # RAISE THIS AND THE RAPIDAPI PLAN TOGETHER, NEVER ONE WITHOUT THE OTHER — the arithmetic
-      # is the whole point, and exceeding the quota fails SILENTLY (that is ERR-017). A value
-      # of 1 or less disables the cadence entirely: every run sweeps, ~30x the spend. The
-      # handler now logs a WARNING naming ERR-017 when it sees one, but nothing blocks it.
+      # is the whole point. A value of 1 or less disables the cadence entirely: every run
+      # sweeps, which at the default of 3 is 3x the monthly request spend (~30 sweeps/month
+      # instead of ~10). The handler logs a WARNING naming ERR-017 when it sees one, but
+      # nothing blocks it.
+      #
+      # On what happens when you DO exceed the quota: it is no longer silent — since PR #63 a
+      # 429 is logged at WARNING and recorded as `fetch_stopped: rate_limited` in the run
+      # summary. It is still NOT ALARMED, though: a green-but-empty run pages nobody, so it
+      # takes someone reading runs/*.json (backlog B-12). Silent was ERR-017; the current
+      # state is legible-but-unannounced.
       JOBFETCHER_FETCH_EVERY_N_DAYS = "3"
       # INV-001: the capture endpoint the "Mark applied" links point at + the signing-key secret
       # name. The pipeline signs the links (build_capture_link); the capture Lambda verifies them.

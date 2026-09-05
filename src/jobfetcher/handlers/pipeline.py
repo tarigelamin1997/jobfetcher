@@ -509,10 +509,12 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             # error; it is the one setting that must never happen by accident and unnoticed.
             rlog.warning(
                 "JOBFETCHER_FETCH_EVERY_N_DAYS=%r disables the fetch cadence — the JSearch "
-                "sweep will run on EVERY invocation. That is ~30 sweeps/month against a "
-                "%d-request monthly plan; exceeding it fails silently (ERR-017). Intended "
+                "sweep will run on EVERY invocation: ~30 sweeps/month instead of ~%d, i.e. "
+                "~%dx the request spend, against a %d-request monthly plan. Exceeding that "
+                "quota is recorded (fetch_stopped=rate_limited) but NOT alarmed — nobody is "
+                "paged, so it takes someone reading runs/*.json (ERR-017, B-12). Intended "
                 "only for tests and deliberate backfills.",
-                every_n, SOURCE_MONTHLY_QUOTA,
+                every_n, 30 // FETCH_EVERY_N_DAYS, FETCH_EVERY_N_DAYS, SOURCE_MONTHLY_QUOTA,
             )
         # The cadence DECISION lives in `ingest` (one input, one decision, one explanation);
         # this call is the same pure function on the same two values purely so the start line
