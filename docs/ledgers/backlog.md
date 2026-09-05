@@ -244,7 +244,7 @@ Only #2 is engineering work, and only #2 stops the next occurrence. **Fixing the
 
 ## B-13 · Two cadence knobs an operator can reach but not keep
 
-**Logged:** 2026-09-05, from a fresh Examiner pass on PR #64 (see [CHANGELOG](../../CHANGELOG.md) "what a fresh adversarial Examiner found"). **Status:** open — **not** in PR #70's blast radius, deliberately.
+**Logged:** 2026-09-05, from a fresh Examiner pass on PR #64 (see [CHANGELOG](../../CHANGELOG.md) "what a fresh adversarial Examiner found"). **Status:** ✅ **closed 2026-09-05 (PR #71)** — the variable is declared in `terraform/lambda.tf` and the INV-003 dossier's "without a redeploy" claim is corrected. ⚠️ **Merged, not applied:** the running Lambda does not carry the entry until someone runs `terraform apply`, which is a human checkpoint.
 
 **What.** `terraform/lambda.tf` lists `LOG_LEVEL` and `PIPELINE_MAX_WORKERS` in the Lambda's `environment.variables` **specifically so the knobs are IaC-visible** — the file says so in a comment. `JOBFETCHER_FETCH_EVERY_N_DAYS` is not listed. Because Terraform manages `environment.variables` as a whole map, an operator who sets the override in the Lambda console — the path [INV-003](../investigations/INV-003-silent-fetch-stop/README.md) advertises as "overrides the cadence without a redeploy" — has it **silently removed by the next `terraform apply`**. The documented escape hatch works exactly until the next deploy, then stops, with nothing announcing it.
 

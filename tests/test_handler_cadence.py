@@ -188,6 +188,16 @@ def test_disabling_the_cadence_is_loud_even_though_it_is_legal(
     assert src.sweeps == 1                       # the cadence really is off
     assert "disables the fetch cadence" in caplog.text
     assert "ERR-017" in caplog.text
+    # The multiplier must be DERIVED, not typed. CodeRabbit caught this warning claiming
+    # "~30x the spend" when disabling the cadence: 30 sweeps/month against the default's 10 is
+    # 3x, not 30x. Wrong-number-in-a-confident-sentence is the exact failure this whole unit
+    # exists to stop, so the number is pinned here rather than left to prose.
+    assert "~3x the request spend" in caplog.text
+    assert "~30x" not in caplog.text
+    # ...and it must not repeat the stale "fails silently" claim: since PR #63 a quota stop IS
+    # recorded (fetch_stopped=rate_limited). It is unalarmed, which is a different fact.
+    assert "fails silently" not in caplog.text
+    assert "NOT alarmed" in caplog.text
 
 
 def test_the_normal_cadence_does_not_warn(monkeypatch, tmp_path, pkg_logger_restored, caplog):

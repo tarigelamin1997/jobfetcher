@@ -79,6 +79,30 @@ resource "aws_lambda_function" "pipeline" {
       # For reference, the 2026-09-02 drain ran 618 scorings at 80 workers in ~10 min for
       # $8.23 — see backlog B-10 for the cost model.
       PIPELINE_MAX_WORKERS = "8"
+      # ERR-017 / INV-003: how often the JSearch SWEEP runs. The Lambda still fires DAILY (the
+      # dead-man alarm watches a 24h window and cannot be widened); this throttles only the
+      # source calls, because the free tier is 200 requests/MONTH and one sweep costs
+      # titles x countries x pages.
+      #
+      # Listed here for the same reason LOG_LEVEL is — the code defaults to 3 when unset, and
+      # this entry makes the knob IaC-visible. It is not cosmetic: Terraform manages
+      # `environment.variables` as a WHOLE MAP, so a value set in the Lambda console (the path
+      # INV-003's dossier advertises as "override the cadence without a redeploy") was silently
+      # REMOVED by the next `terraform apply`. The documented escape hatch worked exactly until
+      # the next deploy, then stopped, with nothing announcing it (backlog B-13).
+      #
+      # RAISE THIS AND THE RAPIDAPI PLAN TOGETHER, NEVER ONE WITHOUT THE OTHER — the arithmetic
+      # is the whole point. A value of 1 or less disables the cadence entirely: every run
+      # sweeps, which at the default of 3 is 3x the monthly request spend (~30 sweeps/month
+      # instead of ~10). The handler logs a WARNING naming ERR-017 when it sees one, but
+      # nothing blocks it.
+      #
+      # On what happens when you DO exceed the quota: it is no longer silent — since PR #63 a
+      # 429 is logged at WARNING and recorded as `fetch_stopped: rate_limited` in the run
+      # summary. It is still NOT ALARMED, though: a green-but-empty run pages nobody, so it
+      # takes someone reading runs/*.json (backlog B-12). Silent was ERR-017; the current
+      # state is legible-but-unannounced.
+      JOBFETCHER_FETCH_EVERY_N_DAYS = "3"
       # INV-001: the capture endpoint the "Mark applied" links point at + the signing-key secret
       # name. The pipeline signs the links (build_capture_link); the capture Lambda verifies them.
       # An empty CAPTURE_BASE_URL would just disable the links (graceful) — here it is always set.
