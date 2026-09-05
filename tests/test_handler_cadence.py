@@ -139,13 +139,18 @@ def test_the_cadence_env_override_is_honoured_end_to_end(
     assert out["ingest"]["fetch_stopped"] is None
 
 
-@pytest.mark.parametrize("junk", ["banana", "", "3.5"])
+@pytest.mark.parametrize("junk", ["banana", "3.5", "  ", "3 "])
 def test_a_junk_cadence_override_falls_back_instead_of_killing_the_run(
     monkeypatch, tmp_path, pkg_logger_restored, junk
 ):
     # negative (Examiner S3): the `except ValueError` fallback had ZERO coverage anywhere — the
-    # unit suite never reached it and the integration suite sets a valid "1". A logging/config
-    # typo must degrade to the documented default, never take the daily run down.
+    # unit suite never reached it and the integration suite sets a valid "1". A config typo must
+    # degrade to the documented default, never take the daily run down.
+    #
+    # `""` was dropped from this list on re-verification: `env.get(k, "") or FETCH_EVERY_N_DAYS`
+    # short-circuits before `int()` is ever called, so an empty string is an unset-equivalent
+    # case, not a parse-failure one — it was passing without exercising the branch the comment
+    # claimed. `"  "` and `"3 "` are the real near-misses.
     pipe = _wire(monkeypatch, tmp_path, _ExplodingSource())
     monkeypatch.setenv("JOBFETCHER_FETCH_EVERY_N_DAYS", junk)
     out = pipe.handler({"run_date": NON_FETCH_DAY}, None)
@@ -164,3 +169,109 @@ def test_an_absurd_cadence_override_does_not_page_the_operator(
     out = pipe.handler({"run_date": NON_FETCH_DAY}, None)
     assert out["statusCode"] == 200
     assert out["ingest"]["fetch_stopped"] == "not_a_fetch_day"
+
+
+@pytest.mark.parametrize("disabling", ["0", "-5", "1"])
+def test_disabling_the_cadence_is_loud_even_though_it_is_legal(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog, disabling
+):
+    # negative: the DANGEROUS value is the QUIET one. `banana` warned and fell back to the safe
+    # default; `0` and `-5` were silently accepted and switched the sweep back to DAILY — ~30x
+    # the quota spend, i.e. ERR-017 — with no log line at all. Disabling is legitimate (the
+    # integration suite sets 1), so it must not fail; it must be impossible to do unnoticed.
+    src = _CountingSource()
+    pipe = _wire(monkeypatch, tmp_path, src)
+    monkeypatch.setenv("JOBFETCHER_FETCH_EVERY_N_DAYS", disabling)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": NON_FETCH_DAY}, None)
+    assert out["statusCode"] == 200
+    assert src.sweeps == 1                       # the cadence really is off
+    assert "disables the fetch cadence" in caplog.text
+    assert "ERR-017" in caplog.text
+
+
+def test_the_normal_cadence_does_not_warn(monkeypatch, tmp_path, pkg_logger_restored, caplog):
+    # negative pair: a warning that fires on ordinary days is furniture, not a signal.
+    pipe = _wire(monkeypatch, tmp_path, _ExplodingSource())
+    with caplog.at_level("WARNING"):
+        pipe.handler({"run_date": NON_FETCH_DAY}, None)
+    assert "disables the fetch cadence" not in caplog.text
+
+
+# ------------------------------------------------ C6: the notify-SKIP summary's key-set parity
+# `runs/{date}/{run_id}.json` is machine-readable forensics. The two notify-SKIP branches used
+# to hand-build a 3-key dict against the send path's 4, so a consumer reading
+# `notify.days_since_last_digest` saw three shapes (int / null / ABSENT) — and the absent one
+# landed on partial and already-sent runs, i.e. exactly the runs during which staleness accrues.
+
+
+def _wire_with_digest_history(monkeypatch, tmp_path, *, last_sent, already_sent=True, fail=False):
+    pipe = _wire(monkeypatch, tmp_path, _ExplodingSource())
+    repo_holder = {}
+
+    class _Repo:
+        engine = object()
+
+        def upsert_profile(self, **kw):  # noqa: ARG002
+            pass
+
+        def get_profile(self, user_id):  # noqa: ARG002
+            from jobfetcher.core.profile import Profile
+
+            return {"profile": Profile.from_yaml_text(_PROFILE_YML).model_dump()}
+
+        def was_digest_sent(self, **kw):  # noqa: ARG002
+            return already_sent
+
+        def get_last_digest_sent_at(self, **kw):  # noqa: ARG002
+            if fail:
+                from jobfetcher.core.ports import RepositoryError
+
+                raise RepositoryError("connection reset")
+            return last_sent
+
+    repo_holder["repo"] = _Repo()
+    monkeypatch.setattr(pipe, "PostgresRepository", lambda url: repo_holder["repo"])  # noqa: ARG005
+    return pipe
+
+
+def test_a_skipped_notify_reports_staleness_with_the_SAME_keys_as_a_send(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    from datetime import datetime, timezone
+
+    sent = datetime(2026, 8, 1, 6, 0, tzinfo=timezone.utc)
+    pipe = _wire_with_digest_history(monkeypatch, tmp_path, last_sent=sent)
+    out = pipe.handler({"run_date": NON_FETCH_DAY}, None)  # 2026-09-05, digest already sent
+    assert out["statusCode"] == 200
+    assert out["notify"]["sent"] == 0                       # notify really was skipped...
+    assert set(out["notify"]) == {
+        "surfaced", "below_threshold", "sent", "days_since_last_digest"
+    }
+    assert out["notify"]["days_since_last_digest"] == 35     # ...and still carries the number
+
+
+def test_a_skipped_notify_reports_None_not_a_missing_key_on_a_first_ever_run(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # negative: no digest ever sent → the key is present and null ("no basis to judge"),
+    # never absent. Absent and null are different facts and a consumer must be able to tell.
+    pipe = _wire_with_digest_history(monkeypatch, tmp_path, last_sent=None)
+    out = pipe.handler({"run_date": NON_FETCH_DAY}, None)
+    assert "days_since_last_digest" in out["notify"]
+    assert out["notify"]["days_since_last_digest"] is None
+
+
+def test_a_failed_staleness_read_degrades_instead_of_paging_the_operator(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # negative: the staleness read is new on this branch and is PURE TELEMETRY. A DB hiccup
+    # must not convert a documented-benign skip ("digest already sent") into a statusCode:500
+    # and a PIPELINE_ALARM page — every other best-effort enhancement here is guarded.
+    pipe = _wire_with_digest_history(monkeypatch, tmp_path, last_sent=None, fail=True)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": NON_FETCH_DAY}, None)
+    assert out["statusCode"] == 200
+    assert "PIPELINE_ALARM" not in caplog.text
+    assert out["notify"]["days_since_last_digest"] is None   # unknown, and the key still there
+    assert "UNKNOWN" in caplog.text

@@ -191,7 +191,11 @@ def next_fetch_day(
     page. A knob nobody should set must not be able to page anybody.
     """
     if every_n_days <= 1:  # cadence off — tomorrow is a fetch day
-        return run_date + timedelta(days=1)
+        # `date.max` has no tomorrow. Unreachable in production (a skip only happens when
+        # `every_n_days >= 2`, and `resolve_run_date` never yields 9999-12-31), but the
+        # function promises `None` when no representable fetch day exists — so it must
+        # actually deliver that on every branch, not just the closed-form one.
+        return None if run_date == date.max else run_date + timedelta(days=1)
     # The smallest multiple of `every_n_days` strictly greater than today's ordinal.
     ordinal = (run_date.toordinal() // every_n_days + 1) * every_n_days
     if ordinal > date.max.toordinal():
@@ -518,7 +522,12 @@ def ingest(
         fetch_stopped: str | None = skip_fetch
     else:
         fetch_stopped = getattr(source_adapter, "last_stop_reason", None)
-        failed_queries = int(getattr(source_adapter, "last_failed_queries", 0) or 0)
+        # Defensive on the VALUE as well as on the attribute's absence: the comment above
+        # promises that any adapter which omits these "simply reports no reason and no
+        # failures", and a bare `int(...)` would have made that true for a MISSING attribute
+        # and false for a junk one (`"many"` → ValueError out of the run).
+        raw_failed = getattr(source_adapter, "last_failed_queries", 0)
+        failed_queries = raw_failed if isinstance(raw_failed, int) else 0
         if fetch_stopped is None and failed_queries:
             # The sweep ran its whole loop but lost queries to upstream errors, so part of the
             # matrix went unsearched. Reporting `None` here would assert "the source had nothing

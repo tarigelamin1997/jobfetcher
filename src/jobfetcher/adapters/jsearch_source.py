@@ -281,29 +281,39 @@ class JSearchSourceAdapter:
                         break
                     raw_data = data.get("data")
                     if not isinstance(raw_data, list):
-                        if raw_data is not None:
+                        # A COUNTED failure, not an empty page. An empty result really is
+                        # `{"data": []}` (a list), so a `data` that is a dict/string/number —
+                        # or ABSENT entirely, the shape of an application-level error returned
+                        # with HTTP 200 (`{"status":"ERROR","error":{...}}`) — means we did not
+                        # get an answer for this query, and its remaining pages go unsearched.
+                        #
+                        # It used to fall through to `page_len = 0` and `break` while counting
+                        # nothing, so `fetch_stopped` still said `None` ("the whole matrix was
+                        # searched"). The absent-`data` case did not even log: the old
+                        # `if raw_data is not None` guard suppressed the one signal there was.
+                        # That is the ERR-017 shape in its quietest form.
+                        self.last_failed_queries += 1
+                        log.warning(
+                            "JSearch 'data' is %s, not a list, for '%s'/%s p%s — skipping query "
+                            "(this query's remaining pages were NOT searched)",
+                            type(raw_data).__name__, title, country, page,
+                        )
+                        break
+                    jobs: list[dict[str, Any]] = []
+                    for item in raw_data:
+                        if isinstance(item, dict):
+                            # C3: carry the authoritative *query* country on a shallow copy
+                            # (the original source dict is never mutated; the bronze landing
+                            # pops this key before persisting the raw payload).
+                            jobs.append({**item, QUERY_COUNTRY_KEY: country})
+                        else:
                             log.warning(
-                                "JSearch 'data' is %s, not a list for '%s'/%s p%s — skipping",
-                                type(raw_data).__name__, title, country, page,
+                                "JSearch job item is %s, not a dict — skipping one item",
+                                type(item).__name__,
                             )
-                        jobs: list[dict[str, Any]] = []
-                    else:
-                        jobs = []
-                        for item in raw_data:
-                            if isinstance(item, dict):
-                                # C3: carry the authoritative *query* country on a shallow copy
-                                # (the original source dict is never mutated; the bronze landing
-                                # pops this key before persisting the raw payload).
-                                jobs.append({**item, QUERY_COUNTRY_KEY: country})
-                            else:
-                                log.warning(
-                                    "JSearch job item is %s, not a dict — skipping one item",
-                                    type(item).__name__,
-                                )
-                        yield from jobs
+                    yield from jobs
 
                     # short page (by the raw page size) → no more pages for this query
-                    page_len = len(raw_data) if isinstance(raw_data, list) else 0
-                    if page_len < _FULL_PAGE:
+                    if len(raw_data) < _FULL_PAGE:
                         break
                     time.sleep(_POLITE_SLEEP_S)  # be polite to the API

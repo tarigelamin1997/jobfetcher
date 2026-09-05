@@ -49,6 +49,7 @@ from ..core.ingest import (
     DEFAULT_USER_ID,
     FETCH_EVERY_N_DAYS,
     SKIP_NOT_A_FETCH_DAY,
+    SOURCE_MONTHLY_QUOTA,
     Deadline,
     apply_gold_filter,
     digest_staleness_days,
@@ -500,6 +501,19 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 env.get("JOBFETCHER_FETCH_EVERY_N_DAYS"), FETCH_EVERY_N_DAYS,
             )
             every_n = FETCH_EVERY_N_DAYS
+        if every_n <= 1:
+            # The DANGEROUS value is the QUIET one. `banana` warns and falls back to the safe
+            # default; `0` and `-5` were silently accepted and switched the sweep back to
+            # DAILY — ~30x the quota spend, i.e. ERR-017 — with no log line at all. Disabling
+            # the cadence is legitimate (the integration suite sets 1), so this is not an
+            # error; it is the one setting that must never happen by accident and unnoticed.
+            rlog.warning(
+                "JOBFETCHER_FETCH_EVERY_N_DAYS=%r disables the fetch cadence — the JSearch "
+                "sweep will run on EVERY invocation. That is ~30 sweeps/month against a "
+                "%d-request monthly plan; exceeding it fails silently (ERR-017). Intended "
+                "only for tests and deliberate backfills.",
+                every_n, SOURCE_MONTHLY_QUOTA,
+            )
         # The cadence DECISION lives in `ingest` (one input, one decision, one explanation);
         # this call is the same pure function on the same two values purely so the start line
         # says what is about to happen. They cannot disagree.
@@ -568,13 +582,30 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             it is a day that *increments* staleness, and it was the one shape that dropped the
             number. The value is free — `get_last_digest_sent_at` is the same single read the
             send path makes."""
+            # GUARDED, like every other best-effort enhancement in this handler (the audit
+            # store's construction, the full-list report, the capture links). This value is
+            # pure forensic telemetry for `runs/*.json` — it changes nothing the user
+            # receives — and both call sites are branches the surrounding code documents as
+            # BENIGN ("a partial run"; "digest already sent"). Unguarded, a `RepositoryError`
+            # here would turn one of those into a `statusCode: 500` and an operator page, on
+            # a path that previously made no DB read at all. "A routine pause that pages like
+            # a fault is how alert fatigue starts" is this project's own rule (B-5).
+            stale: int | None = None
+            try:
+                stale = digest_staleness_days(
+                    repo.get_last_digest_sent_at(user_id=user_id), today=run_date
+                )
+            except Exception as exc:  # noqa: BLE001 — telemetry must never fail a benign skip
+                rlog.warning(
+                    "could not read digest staleness for the run summary — recording it as "
+                    "UNKNOWN (null), which is NOT the same as zero: %s",
+                    exc,
+                )
             return {
                 "surfaced": 0,
                 "below_threshold": 0,
                 "sent": 0,
-                "days_since_last_digest": digest_staleness_days(
-                    repo.get_last_digest_sent_at(user_id=user_id), today=run_date
-                ),
+                "days_since_last_digest": stale,
             }
 
         if partial:

@@ -540,6 +540,23 @@ def test_ingest_tolerates_a_source_without_the_attribute():
     assert summary["fetched"] == 1 and summary["fetch_stopped"] is None
 
 
+def test_ingest_tolerates_a_source_with_a_JUNK_failure_count():
+    # negative: the comment beside this read promises that an adapter which omits these
+    # attributes "simply reports no reason and no failures". A bare int() made that true for a
+    # MISSING attribute and false for a junk one — `"many"` raised ValueError out of the run.
+    class JunkSource(FakeSource):
+        last_stop_reason = None
+        last_failed_queries = "many"
+
+    summary = ingest(
+        _spec(), run_id="r", source_adapter=JunkSource([_job("a")]),
+        raw_store=FakeRawStore(), repo=FakeRepo(), dissector=_dissector(),
+    )
+    assert summary["fetched"] == 1
+    assert summary["fetch_failed_queries"] == 0     # unusable value -> no claim, not a crash
+    assert summary["fetch_stopped"] is None
+
+
 # ------------------------------------------------ INV-003 / ERR-017: the fetch cadence
 # The Lambda runs daily (the dead-man alarm watches a 24h window and cannot be widened);
 # the JSearch sweep runs every Nth day because the free tier is 200 requests/MONTH.
@@ -582,9 +599,17 @@ def test_next_fetch_day_survives_an_absurd_cadence_instead_of_crashing_the_run()
     from jobfetcher.core.ingest import next_fetch_day
 
     assert next_fetch_day(date(2026, 9, 5), every_n_days=4_000_000) is None  # no crash
+    # ...on EVERY branch, including the cadence-off one. Found independently by the fresh
+    # re-verifier and by CodeRabbit: `date.max` has no tomorrow, so the `<= 1` early return
+    # raised OverflowError while the docstring promised None. Unreachable in production; the
+    # point is that a function's stated contract should hold everywhere it is stated.
+    assert next_fetch_day(date.max, every_n_days=1) is None
+    assert next_fetch_day(date.max, every_n_days=0) is None
+    assert next_fetch_day(date.max, every_n_days=3) is None
     # and it still answers correctly in the normal range
     assert next_fetch_day(date(2026, 9, 5), every_n_days=3) == date(2026, 9, 7)
     assert next_fetch_day(date(2026, 9, 7), every_n_days=3) == date(2026, 9, 10)  # strictly after
+    assert next_fetch_day(date(2026, 9, 5), every_n_days=1) == date(2026, 9, 6)  # cadence off
 
 
 # `date(2026, 9, 5).toordinal() % 3 == 1` and `% 7 == 6` — a non-fetch day for both cadences.

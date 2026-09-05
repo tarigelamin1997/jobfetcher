@@ -509,4 +509,9 @@ def test_a_run_that_completes_but_sends_nothing_does_not_reset_staleness(repo):
     repo.mark_digest_sent(user_id=user, run_date=date(2026, 9, 1), run_id="r-sent-2")
     moved = repo.get_last_digest_sent_at(user_id=user)
     assert moved is not None and moved > last
-    assert digest_staleness_days(moved, today=datetime.now(timezone.utc).date()) == 0
+    # Reference the day OF the recorded delivery, not "now" (CodeRabbit): reading the clock
+    # again after the insert can cross UTC midnight and make this assert 1 instead of 0 — a
+    # once-a-day flake. The dialect returns naive UTC locally and aware elsewhere, so
+    # normalize before taking the date.
+    moved_day = (moved.astimezone(timezone.utc) if moved.tzinfo else moved).date()
+    assert digest_staleness_days(moved, today=moved_day) == 0

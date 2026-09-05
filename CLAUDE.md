@@ -23,7 +23,7 @@ JobFetcher is a personal-scale, serverless job-matching tool **and** a Data-Engi
 - **DeepSeek's concurrency limit scales with account *balance*** (39 near-empty, ≥200 at $10) and is reported **only in a 429 body** — no `/limits` endpoint, no `x-ratelimit-*` headers ([ERR-014](docs/ledgers/errors.md)).
 - **DeepSeek, not AWS, is the entire running cost** — ~$0.0155/posting, roughly $5–14/month; Aurora scale-to-0 means ~$0 idle ([B-10](docs/ledgers/backlog.md)).
 - **Docs are CI-checked.** `python scripts/check_docs.py` fails the build on a broken internal link, a `plan §NN` citation, a **guarded count** that drifts from its ground-truth command, or a stale deployment claim. Counts in prose are wrapped in `<!--fact:name-->` markers — never retype one by hand ([ERR-016](docs/ledgers/errors.md)).
-- **Tests:** <!--fact:tests_unit-->525<!--/fact--> unit + <!--fact:tests_integration-->68<!--/fact--> integration (<!--fact:tests-->593<!--/fact--> collected; integration needs Docker or `$JOBFETCHER_DB_URL`), ~95% coverage in CI, `ruff` clean.
+- **Tests:** <!--fact:tests_unit-->539<!--/fact--> unit + <!--fact:tests_integration-->68<!--/fact--> integration (<!--fact:tests-->607<!--/fact--> collected; integration needs Docker or `$JOBFETCHER_DB_URL`), ~95% coverage in CI, `ruff` clean.
 
 **The roadmap is a living hypothesis** — the next migration is chosen by the P2 protocol from real use, not from the pre-drawn list. Still-future hypotheses live in [`03-roadmap`](docs/03-roadmap.md); observed bottlenecks feeding P2 live in [`backlog`](docs/ledgers/backlog.md).
 

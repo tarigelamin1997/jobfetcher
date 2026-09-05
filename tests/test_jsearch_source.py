@@ -449,3 +449,44 @@ def test_fetch_non_object_body_skips_query_instead_of_killing_the_run(monkeypatc
     out = list(src.fetch(_spec(titles=("a", "b"), max_pages=1), run_id="r"))
     assert [j["job_id"] for j in out] == ["ok"]  # the run survived and the good query landed
     assert src.last_failed_queries == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "label"),
+    [
+        ({"data": {"unexpected": "object"}}, "data is a dict"),
+        ({"data": "boom"}, "data is a string"),
+        ({"data": None}, "data is null"),
+        ({"status": "ERROR", "error": {"message": "quota"}}, "no data key at all"),
+    ],
+)
+def test_a_query_lost_to_a_malformed_data_body_is_counted_and_logged(
+    monkeypatch, caplog, body, label
+):
+    # The re-verification pass found the hole the FIRST fix left: three break paths were counted
+    # and this one was not, so a 200 whose `data` is unusable ended the query early, left its
+    # remaining pages unsearched, and still reported `fetch_stopped: None` — which is DEFINED as
+    # "the whole matrix was searched".
+    #
+    # `no data key at all` is the worst of the set: `{"status":"ERROR", ...}` is the most
+    # plausible shape of an application-level upstream error returned with HTTP 200, and the old
+    # `if raw_data is not None` guard suppressed even the warning — total silence.
+    _patch_pages(monkeypatch, [body] * 3)
+    src = JSearchSourceAdapter(api_key="k")
+    with caplog.at_level("WARNING"):
+        out = list(src.fetch(_spec(titles=("a", "b", "c"), max_pages=2), run_id="r"))
+    assert out == []
+    assert src.last_failed_queries == 3, label
+    assert "not a list" in caplog.text  # never silent, not even for an absent key
+
+
+def test_a_genuinely_empty_page_is_not_counted_as_a_failure(monkeypatch):
+    # THE NEGATIVE that keeps `partial_errors` meaningful. An empty result really is
+    # `{"data": []}` — a list. If that were counted, every quiet day would report
+    # `partial_errors` and the reason would become furniture, which is the failure mode the
+    # whole escalation design is trying to avoid.
+    _patch_pages(monkeypatch, [{"data": []}] * 3)
+    src = JSearchSourceAdapter(api_key="k")
+    out = list(src.fetch(_spec(titles=("a", "b", "c"), max_pages=1), run_id="r"))
+    assert out == []
+    assert src.last_failed_queries == 0 and src.last_stop_reason is None
