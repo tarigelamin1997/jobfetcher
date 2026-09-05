@@ -33,6 +33,27 @@ AWS_MAX_ATTEMPTS=1 aws lambda invoke --function-name jobfetcher-dev-pipeline \
 - **500:** the Lambda can't reach the DB (Aurora paused + timeout, IAM, ARNs) — **or** the DB is reachable but was **never migrated at all** (missing/empty `alembic_version` table makes the SELECT itself fail). The `error` field tells them apart: an `UndefinedTable`/`NoResultFound` = run the first `alembic upgrade head`; a connect/timeout error = infra.
 - `AWS_MAX_ATTEMPTS=1` + `--cli-read-timeout 120` per the *invocation pattern* registry row (ERR-008: the CLI silently re-invokes slow sync calls); the smoke itself is one `SELECT`, but a scale-to-0 Aurora resume can take ~30 s.
 
+## 2b · Did ingestion actually resume? (`check_ingestion.py`)
+
+The smoke gate proves the Lambda is alive and pointed at the right schema. It says **nothing**
+about whether the JSearch sweep is bringing in postings — the failure [ERR-017](../ledgers/errors.md)
+was made of. That question has its own read-only command:
+
+```bash
+JOBFETCHER_DATA_BUCKET=$(terraform -chdir=terraform output -raw data_bucket_name)   python scripts/check_ingestion.py
+```
+
+- **Exit 0** = nothing failing. **Exit 1** = a `rate_limited` run inside a cycle the fixed cadence
+  was sized to fit — the one condition that re-opens ERR-017.
+- **Two results that look alarming and are not**, both deliberately reported as `EXPECTED`:
+  `not_a_fetch_day` (the sweep runs every `FETCH_EVERY_N_DAYS`; 2 days in 3 look like this), and
+  `rate_limited` in a cycle that began before `FIRST_CLEAN_CYCLE` (running out mid-cycle is what a
+  quota *is*).
+- It **never calls JSearch** — the quota is the thing under test, and spending a request to ask
+  whether requests remain is the ERR-013 mistake. Actual usage lives on the RapidAPI dashboard.
+- Run it **on or after the monthly reset (the 22nd)**, and after any change to `targeting`,
+  `budget`, or `FETCH_EVERY_N_DAYS`.
+
 ## 3 · ONE-TIME state migration (local → S3) — human-present
 
 The backend block ships in the repo (`terraform/providers.tf`); moving the *existing* state is a one-time manual procedure. The bucket is deliberately **unmanaged** (never a resource in this config): state must survive `terraform destroy`.
