@@ -46,5 +46,6 @@ The **Independent Verifier** is a fresh agent (new context) whose prompt:
 2. **Not pre-framed** — its prompt asks it to *break* the code against the spec, never to confirm the approach.
 3. **No cherry-picking** — the orchestrator fixes *every* real finding and re-verifies; it does not pick a convenient subset.
 4. **Plus genuinely-external eyes** — **CodeRabbit** (the GitHub bot) and the **human** review each PR independently. The verifier complements, never replaces, them.
+   > **Amendment, 2026-09-05 ([ERR-018](../ledgers/errors.md)).** This held for #21–#35 and the receipts above are real. It then stopped: CodeRabbit's OSS free tier ceased auto-reviewing repos under 10 stars on ~2026-07-21 and **reports the skip as a green check**, so #36–#69 — 34 PRs — had no automated external review while appearing to have one. Read as written today, point 4 overstates the arrangement: the reliable independent eyes are the **fresh Examiner** and the **human**, with CodeRabbit available on an explicit `@coderabbitai review` comment.
 
 Net: **three independent checks** (the fresh verifier + CodeRabbit + the human) instead of one orchestrator-framed reviewer. The cost (an extra agent or two per unit) is justified — the alternative is shipping the bugs.
