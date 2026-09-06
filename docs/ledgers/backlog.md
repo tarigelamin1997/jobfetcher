@@ -244,7 +244,7 @@ Only #2 is engineering work, and only #2 stops the next occurrence. **Fixing the
 
 ## B-13 · Two cadence knobs an operator can reach but not keep
 
-**Logged:** 2026-09-05, from a fresh Examiner pass on PR #64 (see [CHANGELOG](../../CHANGELOG.md) "what a fresh adversarial Examiner found"). **Status:** ✅ **closed 2026-09-05 (PR #71)** — the variable is declared in `terraform/lambda.tf` and the INV-003 dossier's "without a redeploy" claim is corrected. ⚠️ **Merged, not applied:** the running Lambda does not carry the entry until someone runs `terraform apply`, which is a human checkpoint.
+**Logged:** 2026-09-05, from a fresh Examiner pass on PR #64 (see [CHANGELOG](../../CHANGELOG.md) "what a fresh adversarial Examiner found"). **Status:** ✅ **closed 2026-09-05 (PR #71)** — the variable is declared in `terraform/lambda.tf` and the INV-003 dossier's "without a redeploy" claim is corrected. ✅ **Applied 2026-09-05:** `terraform apply` ran (0 added, 2 changed, 0 destroyed) and the live Lambda now reports `JOBFETCHER_FETCH_EVERY_N_DAYS = 3` where it previously read `null` — the read-back, not the apply's exit code, is the proof.
 
 **What.** `terraform/lambda.tf` lists `LOG_LEVEL` and `PIPELINE_MAX_WORKERS` in the Lambda's `environment.variables` **specifically so the knobs are IaC-visible** — the file says so in a comment. `JOBFETCHER_FETCH_EVERY_N_DAYS` is not listed. Because Terraform manages `environment.variables` as a whole map, an operator who sets the override in the Lambda console — the path [INV-003](../investigations/INV-003-silent-fetch-stop/README.md) advertises as "overrides the cadence without a redeploy" — has it **silently removed by the next `terraform apply`**. The documented escape hatch works exactly until the next deploy, then stops, with nothing announcing it.
 
@@ -259,3 +259,22 @@ Only #2 is engineering work, and only #2 stops the next occurrence. **Fixing the
 **What.** The cadence reads `run_date` + the env knob only. An operator wanting to spend the ~50 spare monthly requests on an off-day must either edit Lambda config (see **B-13**) or fake `run_date` — which doubles as the `run_log` send-once key and the report's S3 prefix, so a faked date writes `mark_digest_sent` against a day the run did not happen on. An `event['force_fetch']` boolean would be ~2 lines.
 
 **Why it matters — and why it waited.** It is a convenience with no observed bottleneck behind it: nobody has yet needed an off-day sweep. Recorded so the option is not rediscovered from scratch, per P2 — a candidate, not a commitment.
+
+## B-15 · The integration suite shares one database and cannot be run concurrently
+
+**Logged:** 2026-09-06, from hitting it — not from reading the code. **Status:** open, low priority, recorded so the next person loses minutes instead of an afternoon.
+
+**What.** Every integration test points at the same `$JOBFETCHER_DB_URL` and works on the same tables. Two suites running against one Postgres interfere, and — this is the part that costs time — **they fail on *different* tests each run**, each failure looking entirely plausible on its own.
+
+**Observed.** Two full runs launched minutes apart against one local Postgres:
+
+```
+run A:  1 failed  — test_integration_handler::test_handler_end_to_end_then_idempotent
+run B:  5 failed  — test_integration_gold_read_size (3) + others
+```
+
+Every one of them **passed in isolation**. Ten minutes went into diagnosing a defect that did not exist. The suite is safe run *once*; it is the concurrency that lies, and it lies convincingly because the failures land on real assertions rather than on connection errors.
+
+**Why it matters.** Not correctness — CI runs one job against its own service container, so CI is unaffected. It matters because a **false failure that looks like a real one** is expensive in exactly the way this repo keeps paying for ([ERR-013](errors.md): the right method with the wrong instrument). Anyone running the suite while CI runs, or in two terminals, will misdiagnose.
+
+**Next.** Cheapest honest fix is a line in [`tests/README.md`](../../tests/README.md) saying the suite is single-writer. A real fix (per-worker schemas, or a transaction rollback fixture) is only worth it if parallel integration runs ever become something we actually want — no evidence of that yet, so **not proposed**.

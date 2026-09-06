@@ -2,7 +2,7 @@
 
 > The test suite is the **negative-case engine for the [v0 validation gate](../docs/04-v0-build-plan.md#v0-validation-gate-behavioral--negative--a-presence-check-is-no-gate)**: every gate is *behavioral* and carries a *negative* case (a presence/liveness check is no gate). This file maps the gates (VG1–VG8) to the tests that enforce them, lists the pyramid layers, and shows how to run each.
 
-**Current state:** **<!--fact:tests_unit-->539<!--/fact--> unit + <!--fact:tests_integration-->68<!--/fact--> integration** (<!--fact:tests-->607<!--/fact--> collected; live-key tests skip without a key) · `ruff` clean · **~95% coverage** (measured 2026-07-10 at v0.10.0 — a historical figure, not a live one; the CI floor is 85% and is enforced on every run). The three test counts above are **guarded**: [`scripts/check_docs.py`](../scripts/check_docs.py) diffs them against `pytest --collect-only` in CI, so they cannot go stale again ([ERR-016](../docs/ledgers/errors.md)). They previously read "385 unit + ~47 integration".
+**Current state:** **<!--fact:tests_unit-->603<!--/fact--> unit + <!--fact:tests_integration-->68<!--/fact--> integration** (<!--fact:tests-->671<!--/fact--> collected; live-key tests skip without a key) · `ruff` clean · **~95% coverage** (measured 2026-07-10 at v0.10.0 — a historical figure, not a live one; the CI floor is 85% and is enforced on every run). The three test counts above are **guarded**: [`scripts/check_docs.py`](../scripts/check_docs.py) diffs them against `pytest --collect-only` in CI, so they cannot go stale again ([ERR-016](../docs/ledgers/errors.md)). They previously read "385 unit + ~47 integration".
 
 ## The pyramid + how to run
 
@@ -15,6 +15,8 @@
 | **Live smoke** | one real end-to-end run against **deployed** infra | deployed stack (Step 10) | manual Lambda invoke (Step 10) |
 
 > `docker compose up -d` is only needed for the **integration** layer. Default development (code, unit tests, coverage, docs) needs no Docker.
+>
+> ⚠️ **The integration suite is SINGLE-WRITER — never run two of them against one database.** Every test shares `$JOBFETCHER_DB_URL` and the same tables. Two concurrent runs interfere and, worse, **fail on *different* tests each time**, each failure landing on a real assertion and looking entirely genuine. Two runs launched minutes apart produced `1 failed` and `5 failed` on disjoint sets; **all of them passed in isolation** (recorded as [B-15](../docs/ledgers/backlog.md)). CI is unaffected — one job, its own service container. If you get a puzzling integration failure, re-run it alone before believing it.
 
 ## Validation gates → tests (positive + negative)
 
