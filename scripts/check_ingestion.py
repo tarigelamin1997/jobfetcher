@@ -43,7 +43,18 @@ FAIL conditions are now:
   - a run that returned **`statusCode: 500`**;
   - `rate_limited` inside a cycle beginning on or after `FIRST_CLEAN_CYCLE`;
   - **more consecutive `not_a_fetch_day` runs than the cadence can produce** — arithmetically
-    impossible unless the cadence is misconfigured (the `$JOBFETCHER_FETCH_EVERY_N_DAYS` knob).
+    impossible unless the cadence is misconfigured (the `$JOBFETCHER_FETCH_EVERY_N_DAYS` knob,
+    which `--every-n-days` mirrors — a stale value here false-FAILs a healthy pipeline);
+  - **nothing has landed in `raw/` for more than two full sweeps** — intake has stopped even if
+    the pipeline is still running. This one is the *most likely* exit 1 in practice, and both
+    this list and `deploy.md` §2b previously omitted it;
+  - **no run summary for more than `_RUN_DROUGHT_DAYS` days** — the Lambda runs daily, so that
+    is the pipeline itself stopping rather than a paused sweep.
+
+**`WARN` never affects the exit code.** `partial_errors`, `budget_exhausted`, and a completed
+sweep that found nothing all print `[WARN]` and return **0**. That is the deliberate
+anti-cry-wolf choice, but it means `$? == 0` can coexist with "13 of 15 queries died" — read the
+lines, not only the code.
 """
 from __future__ import annotations
 
@@ -93,6 +104,11 @@ FIRST_CLEAN_CYCLE = date(2026, 9, 22)
 PASS, EXPECTED, WARN, FAIL, UNKNOWN = "PASS", "EXPECTED", "WARN", "FAIL", "UNKNOWN"
 
 OK_EXIT, FAIL_EXIT, CANNOT_JUDGE_EXIT = 0, 1, 2
+
+# The Lambda runs daily; more than this many days with no run summary at all means
+# the pipeline stopped, not that the sweep is paused. 2 allows for one missed day
+# and a timezone edge before crying wolf.
+_RUN_DROUGHT_DAYS = 2
 
 
 def last_quota_reset(today: date, *, reset_day: int = QUOTA_RESET_DAY) -> date:
@@ -367,7 +383,13 @@ def latest_raw_date(keys: list[str], *, not_after: "date | None" = None) -> "dat
 def _s3(client: Any = None) -> tuple[Any, str]:
     bucket = os.environ.get(_BUCKET_ENV, "").strip()
     if not bucket:
-        raise SystemExit(f"no data bucket — set ${_BUCKET_ENV}")
+        # Exit 2, NOT 1. `SystemExit("some string")` exits 1, which this file's own contract
+        # reserves for "a genuine defect" i.e. ERR-017 re-opened — while nothing was examined at
+        # all. Reachable straight from the runbook one-liner: if
+        # `terraform output -raw data_bucket_name` fails (expired session, wrong directory, no
+        # state) the substitution is empty and the script still runs.
+        print(f"no data bucket — set ${_BUCKET_ENV}  (nothing was examined)")
+        raise SystemExit(CANNOT_JUDGE_EXIT)
     if client is None:
         import boto3  # lazy: tests inject a fake/moto client (mirrors adapters/s3_raw.py)
 
@@ -411,6 +433,11 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
                     help="pin the cutoff date (YYYY-MM-DD, UTC). This is a TIME MACHINE, not a "
                          "dry run: data dated after it is invisible, so a past value can "
                          "legitimately return 1 or 2 on a healthy system")
+    ap.add_argument("--every-n-days", type=int, default=None,
+                    help="the LIVE sweep cadence, if it differs from this build's default of "
+                         f"{FETCH_EVERY_N_DAYS}. `$JOBFETCHER_FETCH_EVERY_N_DAYS` on the Lambda "
+                         "(terraform/lambda.tf) is the authority; a mismatch false-FAILs the "
+                         "cadence check on a healthy pipeline")
     ap.add_argument("--first-clean-cycle", type=date.fromisoformat, default=FIRST_CLEAN_CYCLE,
                     help=f"start of the first quota cycle that tests the fix (default {FIRST_CLEAN_CYCLE})")
     args = ap.parse_args(argv)
@@ -427,16 +454,21 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     # here is why the rule is written down rather than remembered.
     today = args.today or datetime.now(timezone.utc).date()
     since = args.first_clean_cycle
+    # The cadence lives on the Lambda now (B-13 / PR #71), so the compile-time constant
+    # is a DEFAULT, not the truth. `--first-clean-cycle` exists for exactly this reason
+    # on the other knob; this is its pair.
+    every_n = args.every_n_days if args.every_n_days is not None else FETCH_EVERY_N_DAYS
     reset = last_quota_reset(today)
     client, bucket = _s3(client)
 
     print(f"bucket={bucket}  today={today}  current quota cycle began {reset}")
     print(f"judging rate-limits against the first clean cycle: {since}")
-    print(f"cadence: a sweep every {FETCH_EVERY_N_DAYS} days; plan allows "
+    print(f"cadence: a sweep every {every_n} days; plan allows "
           f"{SOURCE_MONTHLY_QUOTA} requests/month")
     print(f"today is {'a FETCH day' if is_fetch_day(today) else 'NOT a fetch day'}\n")
 
     failed = 0
+    cannot_judge = False
 
     # Nothing dated AFTER the report's cutoff is evidence for it. A future-dated key satisfied
     # the landing check and displaced real dates out of the `--days` window, so the command
@@ -445,17 +477,58 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     # becomes "future". (It is also why an age could print negative.)
     raw_keys = _list_keys(client, bucket, "raw/")
     raw = latest_raw_date(raw_keys, not_after=today)
+    # `.json` only: any other object under a date prefix (an S3-console folder placeholder, a
+    # stray `.keep`, a truncated write) is not a summary. Listed ONCE, here, and reused below —
+    # the previous version listed `runs/` twice and counted UNFILTERED keys for the
+    # empty-bucket test, so a bucket holding only a console placeholder printed both
+    # "THIS IS THE FAILURE" and "CANNOT JUDGE (wrong bucket)" and exited 1.
+    all_keys = [k for k in _list_keys(client, bucket, "runs/") if k.endswith(".json")]
     # An ENTIRELY empty bucket is a misconfiguration, not a pipeline defect, and the two must
     # not share an exit code — a wrapper reading `$?` has to tell "wrong bucket" from "ERR-017
-    # re-opened". So the staleness FAIL below requires some sign the bucket is real; without
-    # one the report says CANNOT JUDGE and does not shout FAILURE on the way out.
-    bucket_has_data = bool(raw_keys) or bool(_list_keys(client, bucket, "runs/"))
+    # re-opened".
+    bucket_has_data = bool(raw_keys) or bool(all_keys)
+
+    # `dates_in_keys` PARSES rather than pattern-matching: a `runs/2026-13-45/` prefix is
+    # date-shaped junk and must be skipped, not turned into a ValueError traceback.
+    days = dates_in_keys(all_keys, r"runs/(\d{4}-\d{2}-\d{2})/", not_after=today)
+
+    # B1 — THE HOLE THIS TOOL EXISTS TO NOT HAVE. 2026-09-22 is itself a fetch day and the
+    # Lambda writes its summary at ~06:0x UTC. Run the command at 05:00 that morning and the
+    # staleness branch said "too early to judge" and then returned 0 with "OK (no failing
+    # condition found)" — byte-identical to the proven-success case, whether the sweep had
+    # resumed or had fetched nothing for 28 days. Not a false alarm: a FALSE ALL-CLEAR, on the
+    # one morning the tool is for. `main()` already knew both halves and never joined them.
+    #
+    # Narrow on purpose: this means "the pipeline is alive and today's run is merely pending",
+    # so it requires RECENT summaries as well as a missing one for today. Without that clause
+    # it also swallowed "no run has ever written a summary" and "the pipeline died a month
+    # ago" — turning a real, diagnosable failure into a shrug.
+    awaiting_todays_run = (
+        is_fetch_day(today, every_n_days=every_n)
+        and today not in days
+        and bool(days)
+        and (today - days[-1]).days <= _RUN_DROUGHT_DAYS
+    )
 
     # Measured against `since`, not the last reset: "later than the last reset" read
     # reassuringly while nothing had landed for days. `raw/` keys carry the LANDING date
     # (raw/{source}/{run_date}/…), not the posting's own date — so name it that.
-    if raw and raw >= since:
+    # S3 — `raw >= since` was a ONE-SHOT LATCH: a single landing on the 22nd satisfied it
+    # forever, so a pipeline that died on the 23rd reported OK through the next reset. The
+    # question is not "did anything ever land in this cycle" but "is intake still alive", so
+    # the bound is RECENCY, sized from the cadence: with a sweep every N days, a landing older
+    # than 2N days means at least one whole sweep produced nothing.
+    stale_after = 2 * max(every_n, 1)
+    intake_is_fresh = raw is not None and (today - raw).days <= stale_after
+    if intake_is_fresh and raw >= since:
         state = "landed in the cycle under test"
+    elif awaiting_todays_run:
+        # Ordered ABOVE the failure branches on purpose: today's sweep has not run yet, so the
+        # honest answer is "come back after it has", not a verdict on data it may be about to
+        # change. The stale age still prints, so nothing is hidden.
+        state = ("today is a FETCH day and today's run has not written a summary yet — "
+                 "CANNOT JUDGE until it does")
+        cannot_judge = True
     elif today <= since:
         state = f"the cycle that tests the fix starts {since} — too early to judge"
     elif not bucket_has_data:
@@ -473,12 +546,6 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     # Select the last N run DATES and judge every run inside them. Taking the last N *keys*
     # ordered them by `run_id` within a day — a random uuid hex — so a retry could hide the
     # failing run behind a passing one from the same morning.
-    # `.json` only: any other object under a date prefix (an S3-console folder placeholder, a
-    # stray `.keep`, a truncated write) is unreadable and would pin the exit code at 2 forever.
-    all_keys = [k for k in _list_keys(client, bucket, "runs/") if k.endswith(".json")]
-    # `dates_in_keys` PARSES rather than pattern-matching: a `runs/2026-13-45/` prefix is
-    # date-shaped junk and must be skipped, not turned into a ValueError traceback.
-    days = dates_in_keys(all_keys, r"runs/(\d{4}-\d{2}-\d{2})/", not_after=today)
     wanted = set(days[-args.days:])
     run_keys = sorted(
         k for k in all_keys if any(f"runs/{d.isoformat()}/" in k for d in wanted)
@@ -501,7 +568,16 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
             continue
         day = _run_day(payload)
         if isinstance(payload, dict) and day is not None and day <= today:
-            summaries.append(payload)  # only in-window runs feed the streak detectors
+            # Only in-window runs feed the streak detectors.
+            #
+            # HONEST NOTE, because a comment claiming more than it delivers is the defect this
+            # file keeps re-learning: removing `day <= today` here does NOT change any outcome I
+            # can construct, and the mutation survives the suite. `verdict()` already returns
+            # UNKNOWN for a future-dated body (forcing exit 2), and both folds key on the body
+            # date, so a 2027 entry lands in its own non-adjacent island rather than breaking a
+            # real streak. The guard is kept because it is correct and free — not because a test
+            # proves it bites. Saying so beats a contrived test that pretends otherwise.
+            summaries.append(payload)
         level, msg = verdict(payload, since=since, not_after=today)
         print(f"  [{level}] {msg}")
         if level == FAIL:
@@ -525,9 +601,21 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
                   "The streak detectors below reset across a gap, so they are weakened over "
                   "this window — read the per-run lines rather than trusting their silence.")
 
+    # The Lambda runs DAILY (the dead-man alarm needs it to), so a gap in run summaries is not
+    # a cadence question at all — it means the pipeline itself stopped. Without this the window
+    # was "the newest N dates that exist", however old, so a dead pipeline reported OK forever:
+    # the ERR-010 shape (38 unnoticed days) one level up, inside the tool built to catch it.
+    if days and (today - days[-1]).days > _RUN_DROUGHT_DAYS and not awaiting_todays_run:
+        drought = (today - days[-1]).days
+        print(f"\n  [FAIL] the newest run summary is {days[-1]} — {drought} days old. The "
+              "Lambda runs DAILY, so this is not a paused sweep: the pipeline has stopped "
+              "writing run summaries at all. Check the EventBridge rule and the dead-man "
+              "alarm before reading anything above as reassurance.")
+        failed += 1
+
     # Whole-report checks: a single line can be individually correct while the pattern across
     # days is the actual defect. That is how both ERR-010 and ERR-017 survived.
-    for extra in (cadence_anomaly(summaries), failure_streak(summaries)):
+    for extra in (cadence_anomaly(summaries, every_n_days=every_n), failure_streak(summaries)):
         if extra:
             print(f"\n  [FAIL] {extra}")
             failed += 1
@@ -536,12 +624,16 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     if failed:
         print(f"FAIL — {failed} failing condition(s) above.")
         return FAIL_EXIT
-    if unjudged:
+    if cannot_judge or unjudged:
         # ANY unjudged run, not only "all of them". A confirmed FAIL still wins above, but
         # otherwise an unjudged run cannot be reported as OK: the failing run may be precisely
         # the object we could not open, and "I did not look" must never render as "nothing
         # wrong". The earlier `and not summaries` meant one readable sibling was enough to
         # print OK and exit 0 over an inaccessible summary.
+        if cannot_judge and not unjudged:
+            print("CANNOT JUDGE — today's scheduled run has not written its summary yet. "
+                  "Re-run after ~06:05 UTC; nothing above is a verdict on today.")
+            return CANNOT_JUDGE_EXIT
         print(f"CANNOT JUDGE — {unjudged} run(s) in this window could not be judged "
               "(unreadable, or a summary shape this script does not understand), so the window "
               "is incomplete. Widen --days to reach judgeable runs, or fix the object.")

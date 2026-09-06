@@ -776,3 +776,155 @@ def test_a_future_body_date_cannot_defuse_the_cadence_detector():
     runs = [_summary(f"2026-09-{d}", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
             for d in ("10", "11", "12")]
     assert ci.cadence_anomaly(runs, every_n_days=3) is not None
+
+
+# ===================== the 2026-09-22 walkthrough: does it answer correctly? =====================
+# An artifact-level Examiner asked the only question that matters — "on 2026-09-22, will an
+# operator who runs this and reads $? be correctly informed?" — and found a hole on both sides.
+# `date(2026,9,22).toordinal() % 3 == 0`, so the reset day IS a fetch day, and the Lambda writes
+# its summary at ~06:0x UTC.
+
+
+def test_before_todays_run_lands_it_says_CANNOT_JUDGE_not_OK(monkeypatch, capsys):
+    # THE BLOCKER. Run at 05:00 on the 22nd and the tool printed "too early to judge" and then
+    # returned 0 with "OK (no failing condition found)" — byte-identical to the proven-success
+    # case, whether the sweep had resumed or had fetched nothing for 28 days. Not a false alarm:
+    # a FALSE ALL-CLEAR, on the one morning the tool exists for.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-08-25/old.json"],                  # 28 days stale
+        {f"runs/2026-09-{d}/r.json": _summary(f"2026-09-{d}",
+                                              fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+         for d in ("20", "21")},                              # alive, but nothing for the 22nd
+    )
+    assert ci.main(["--today", "2026-09-22"], client=fake) == ci.CANNOT_JUDGE_EXIT
+    out = capsys.readouterr().out
+    assert "has not written a summary yet" in out
+    assert "OK (no failing condition found)" not in out
+
+
+def test_once_todays_run_lands_the_verdict_is_real(monkeypatch, capsys):
+    # The pair. Same morning, the 06:00 run has now landed and swept: a real PASS, exit 0.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-09-22/new.json"],
+        {"runs/2026-09-21/r.json": _summary("2026-09-21",
+                                            fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+         "runs/2026-09-22/r.json": _summary("2026-09-22", fetched=140)},
+    )
+    assert ci.main(["--today", "2026-09-22"], client=fake) == ci.OK_EXIT
+    assert "[PASS]" in capsys.readouterr().out
+
+
+def test_still_rate_limited_after_the_reset_is_the_failure_it_exists_for(monkeypatch, capsys):
+    # The headline FAIL, end to end on the real date.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-09-04/old.json"],
+        {"runs/2026-09-22/r.json": _summary("2026-09-22",
+                                            fetch_stopped=ci.STOP_RATE_LIMITED)},
+    )
+    assert ci.main(["--today", "2026-09-22"], client=fake) == ci.FAIL_EXIT
+    assert "RE-OPEN ERR-017" in capsys.readouterr().out
+
+
+def test_a_dead_pipeline_does_not_latch_green_forever(monkeypatch, capsys):
+    # `raw >= since` was a ONE-SHOT LATCH: one landing on the 22nd satisfied it forever, so a
+    # pipeline that died on the 23rd reported OK through the NEXT reset — the ERR-010 shape
+    # (38 unnoticed days) one level up, inside the tool built to catch it.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-09-22/one.json"],                  # landed once, then nothing
+        {"runs/2026-09-22/r.json": _summary("2026-09-22", fetched=140)},
+    )
+    assert ci.main(["--today", "2026-10-22"], client=fake) == ci.FAIL_EXIT
+    out = capsys.readouterr().out
+    assert "days old" in out and "stopped writing run summaries" in out
+
+
+def test_a_missing_bucket_is_cannot_judge_not_a_defect(monkeypatch, capsys):
+    # `SystemExit("a string")` exits 1 — which this file's contract reserves for "a genuine
+    # defect" — while nothing was examined at all. Reachable from the runbook one-liner when
+    # `terraform output -raw data_bucket_name` fails (expired session, wrong directory).
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "")
+    with pytest.raises(SystemExit) as e:
+        ci.main(["--today", "2026-09-22"], client=_FakeS3([], {}))
+    assert e.value.code == ci.CANNOT_JUDGE_EXIT
+    assert "nothing was examined" in capsys.readouterr().out
+
+
+def test_the_live_cadence_can_be_supplied_so_it_does_not_false_FAIL(monkeypatch, capsys):
+    # The cadence is a LIVE knob on the Lambda (terraform/lambda.tf, B-13). The check used the
+    # compile-time constant, so raising the live value to 6 made four legitimate skip-days look
+    # "arithmetically impossible" and exited 1 on a healthy pipeline — at exactly the moment
+    # deploy.md tells the operator to re-run this command.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    runs = {f"runs/2026-09-{d}/r.json": _summary(f"2026-09-{d}",
+                                                 fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+            for d in ("18", "19", "20", "21")}
+    runs["runs/2026-09-22/r.json"] = _summary("2026-09-22", fetched=140)
+    fake = _FakeS3(["raw/jsearch/2026-09-22/a.json"], runs)
+    # with the build default of 3, four skips in a row is impossible -> FAIL
+    assert ci.main(["--today", "2026-09-22", "--days", "9"], client=fake) == ci.FAIL_EXIT
+    capsys.readouterr()
+    # told the truth about the live cadence, the same data is healthy
+    assert ci.main(["--today", "2026-09-22", "--days", "9", "--every-n-days", "6"],
+                   client=fake) == ci.OK_EXIT
+
+
+def test_a_future_body_date_really_cannot_defuse_the_cadence_detector():
+    # The previous version of this test contained NO future-dated summary — it was a duplicate
+    # of the plain adjacency case, so the `day <= today` guard it named was unprotected
+    # (deleting the guard left all 64 tests green). This one actually carries one.
+    runs = [
+        _summary("2026-09-10", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+        _summary("2026-09-11", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+        _summary("2027-01-01", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),  # the intruder
+        _summary("2026-09-12", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+    ]
+    assert ci.cadence_anomaly(runs, every_n_days=3) is not None  # adjacency survives it
+
+
+@pytest.mark.parametrize("bad", ["2026-W36-1", "20260905"])
+def test_a_shape_guard_stops_fromisoformat_inventing_a_date(bad):
+    # `_ISO` is load-bearing on 3.11: date.fromisoformat("2026-W36-1") == 2026-08-31 and
+    # "20260905" == 2026-09-05, so without the shape check a nonsense run_date becomes a
+    # SILENTLY WRONG date rather than UNKNOWN. It was alive, correct, and unasserted.
+    level, _ = ci.verdict({"statusCode": 200, "run_date": bad, "ingest": {"fetch_stopped": None}},
+                          since=date(2026, 9, 22))
+    assert level == ci.UNKNOWN
+
+
+def test_a_stale_landing_inside_the_cycle_still_FAILS_even_while_runs_are_healthy(
+    monkeypatch, capsys
+):
+    # Closes a gap my own mutation run exposed: the dead-pipeline test above is caught by the
+    # run-summary DROUGHT check, so the recency half of the raw latch was itself unprotected
+    # (reverting `intake_is_fresh and ...` to `raw >= since` left all 73 tests green).
+    #
+    # This is the case only the latch can catch: the pipeline is alive and writing summaries
+    # every day, but INTAKE stopped — the newest landing is inside the cycle under test yet far
+    # older than two full sweeps. `raw >= since` alone calls that "landed in the cycle under
+    # test" forever; recency is what makes it a question rather than a latch.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    runs = {f"runs/2026-10-0{d}/r.json": _summary(f"2026-10-0{d}",
+                                                  fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+            for d in (3, 4, 5)}
+    runs["runs/2026-10-06/r.json"] = _summary("2026-10-06", fetched=0)  # swept, found nothing
+    fake = _FakeS3(["raw/jsearch/2026-09-22/one.json"], runs)  # 14 days stale, but >= since
+    assert ci.main(["--today", "2026-10-06", "--days", "4"], client=fake) == ci.FAIL_EXIT
+    assert "THIS IS THE FAILURE" in capsys.readouterr().out
+
+
+def test_a_recent_landing_inside_the_cycle_is_not_flagged(monkeypatch):
+    # negative pair: the latch must not fire while intake is genuinely alive. Two days old with
+    # a 3-day cadence is ordinary, and calling it a failure is how a check becomes furniture.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-10-04/fresh.json"],
+        {"runs/2026-10-06/r.json": _summary("2026-10-06",
+                                            fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+         "runs/2026-10-05/r.json": _summary("2026-10-05",
+                                            fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)},
+    )
+    assert ci.main(["--today", "2026-10-06"], client=fake) == ci.OK_EXIT
