@@ -670,7 +670,10 @@ def test_a_future_raw_key_does_not_satisfy_the_landing_check(monkeypatch, capsys
     assert ci.main(["--today", "2026-09-25"], client=fake) == ci.FAIL_EXIT
     out = capsys.readouterr().out
     assert "THIS IS THE FAILURE" in out
-    assert "-" not in out.split("days ago")[0][-4:]  # no negative age
+    # The future key is dropped entirely, so there is no age line at all. (The previous form of
+    # this assertion sliced the tail of the WHOLE report and could never fail — a vacuous test
+    # inside a commit about checks that do not check.)
+    assert "days ago" not in out
 
 
 def test_a_future_runs_prefix_does_not_displace_the_real_window(monkeypatch, capsys):
@@ -684,7 +687,10 @@ def test_a_future_runs_prefix_does_not_displace_the_real_window(monkeypatch, cap
     })
     assert ci.main(["--today", "2026-09-25", "--days", "1"], client=fake) == ci.FAIL_EXIT
     out = capsys.readouterr().out
-    assert "2026-09-25" in out and "2027-01-01" not in out  # the REAL run was judged
+    # NOT `"2026-09-25" in out` — the header prints `today=2026-09-25` unconditionally, so that
+    # half was tautological. Assert on text only a JUDGED run can produce.
+    assert "statusCode 500" in out          # the real run was judged...
+    assert "2027-01-01" not in out          # ...and the future one never entered the window
 
 
 def test_dates_in_keys_caps_at_the_cutoff():
@@ -697,3 +703,76 @@ def test_dates_in_keys_caps_at_the_cutoff():
     assert ci.dates_in_keys(["a/2026-09-25/x"], not_after=date(2026, 9, 25)) == [
         date(2026, 9, 25)
     ]
+
+
+def test_the_cutoff_is_UTC_not_the_machines_local_date(monkeypatch):
+    # SHOULD-FIX (delta Examiner): S3 keys carry the UTC date (`resolve_run_date` ->
+    # `s3_raw.put_raw`), and the cutoff is now a HARD FILTER over them rather than the cosmetic
+    # age it used to be. A local `date.today()` on any machine behind UTC would discard the
+    # freshest landing as "future" and manufacture a FAILURE on a healthy pipeline. The repo
+    # codified this rule once already in `core/ingest.py::digest_staleness_days`.
+    import datetime as _dt
+
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    seen = {}
+
+    class _Capturing(_FakeS3):
+        def list_objects_v2(self, **kw):
+            seen["called"] = True
+            return super().list_objects_v2(**kw)
+
+    class _FixedDatetime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is _dt.timezone.utc, "the cutoff must be taken in UTC, not local time"
+            seen["tz"] = tz
+            return _dt.datetime(2026, 9, 25, 2, 0, tzinfo=_dt.timezone.utc)
+
+    monkeypatch.setattr(ci, "datetime", _FixedDatetime)
+    fake = _Capturing(["raw/jsearch/2026-09-25/a.json"],
+                      {"runs/2026-09-25/r.json": _summary("2026-09-25", fetched=5)})
+    assert ci.main([], client=fake) == ci.OK_EXIT  # no --today -> the default path
+    assert seen.get("tz") is _dt.timezone.utc
+
+
+def test_a_confirmed_failure_survives_an_empty_run_window(monkeypatch, capsys):
+    # SHOULD-FIX (delta Examiner): the `if not run_keys` early return discarded a FAIL already
+    # established by the raw-staleness check — printing "THIS IS THE FAILURE" and then
+    # answering "cannot tell", contradicting this file's own contract.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(["raw/jsearch/2026-08-14/old.json"], {})  # real raw, stale, and no runs
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.FAIL_EXIT
+    assert "THIS IS THE FAILURE" in capsys.readouterr().out
+
+
+def test_an_entirely_empty_bucket_is_a_misconfiguration_not_a_defect(monkeypatch, capsys):
+    # ...and its pair, which is why the check above is conditional: a bucket with NOTHING in it
+    # is a wrong --bucket, not ERR-017 re-opened. The two must not share an exit code, and the
+    # report must not shout FAILURE on the way out.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    assert ci.main(["--today", "2026-09-25"], client=_FakeS3([], {})) == ci.CANNOT_JUDGE_EXIT
+    out = capsys.readouterr().out
+    assert "THIS IS THE FAILURE" not in out
+    assert "wrong bucket" in out
+
+
+def test_a_future_dated_summary_BODY_is_not_evidence_either(monkeypatch, capsys):
+    # MINOR (delta Examiner): the cap covered KEY dates only, so a summary whose body carried a
+    # future `run_date` — a backfill written with the wrong date, the source this file names —
+    # was still judged AND folded into the streak detectors, where its out-of-order date broke
+    # adjacency and silently defused them.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(["raw/jsearch/2026-09-25/a.json"],
+                   {"runs/2026-09-25/x.json": _summary("2027-01-01", fetched=999)})
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.CANNOT_JUDGE_EXIT
+    out = capsys.readouterr().out
+    assert "after this report's cutoff" in out
+    assert "landed 999" not in out  # never judged as a pass
+
+
+def test_a_future_body_date_cannot_defuse_the_cadence_detector():
+    # the streak half of the same defect: three adjacent skip-days must still fire even if a
+    # fourth summary claims a future date.
+    runs = [_summary(f"2026-09-{d}", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+            for d in ("10", "11", "12")]
+    assert ci.cadence_anomaly(runs, every_n_days=3) is not None

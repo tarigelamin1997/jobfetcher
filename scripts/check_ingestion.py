@@ -3,7 +3,7 @@
 
     python scripts/check_ingestion.py                      # judge the last 5 days of runs
     python scripts/check_ingestion.py --days 10            # look further back
-    python scripts/check_ingestion.py --today 2026-09-22   # pin "now" for a dry check
+    python scripts/check_ingestion.py --today 2026-09-22   # replay AS OF that date (UTC)
 
 **Exit codes** — three, not two, because "broken" and "cannot tell" are different answers and
 a wrapper checking `$?` must be able to distinguish them:
@@ -52,7 +52,7 @@ import json
 import os
 import re
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -107,9 +107,17 @@ def last_quota_reset(today: date, *, reset_day: int = QUOTA_RESET_DAY) -> date:
     return prev.replace(day=reset_day)
 
 
-def verdict(summary: Any, *, since: date = FIRST_CLEAN_CYCLE) -> tuple[str, str]:
+def verdict(
+    summary: Any, *, since: date = FIRST_CLEAN_CYCLE, not_after: "date | None" = None
+) -> tuple[str, str]:
     """`(level, message)` for one run summary. **Pure — this is the whole judgment**, so every
-    trap lives here rather than in the plumbing and is unit-testable without S3."""
+    trap lives here rather than in the plumbing and is unit-testable without S3.
+
+    `not_after` applies the same rule the key dates get: a run dated after the report's cutoff
+    is not evidence for it. Without it a summary whose BODY carries a future `run_date` — a
+    backfill written with the wrong date, the exact source this file names — was judged, and
+    worse, folded into the streak detectors where its out-of-order date broke adjacency and
+    silently defused them."""
     if not isinstance(summary, dict):
         # A JSON body that parses but is not an object. Exactly the class of bug PR #70 fixed in
         # the JSearch adapter, so guarding it here rather than re-learning it.
@@ -123,6 +131,11 @@ def verdict(summary: Any, *, since: date = FIRST_CLEAN_CYCLE) -> tuple[str, str]
         # unparseable date is missing information, and guessing toward alarm is crying wolf.
         raw_date = summary.get("run_date")
         return UNKNOWN, f"a run summary has an unusable run_date ({raw_date!r}) — cannot judge it."
+    if not_after is not None and day > not_after:
+        return UNKNOWN, (
+            f"a run summary is dated {day} — after this report's cutoff ({not_after}) — so it "
+            "is not evidence for it. Check the clock on whatever wrote it."
+        )
     run_date = day.isoformat()
 
     status = summary.get("statusCode")
@@ -395,14 +408,24 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     ap.add_argument("--days", type=int, default=5,
                     help="how many recent run DATES to judge (all runs within them)")
     ap.add_argument("--today", type=date.fromisoformat, default=None,
-                    help="pin today's date (YYYY-MM-DD)")
+                    help="pin the cutoff date (YYYY-MM-DD, UTC). This is a TIME MACHINE, not a "
+                         "dry run: data dated after it is invisible, so a past value can "
+                         "legitimately return 1 or 2 on a healthy system")
     ap.add_argument("--first-clean-cycle", type=date.fromisoformat, default=FIRST_CLEAN_CYCLE,
                     help=f"start of the first quota cycle that tests the fix (default {FIRST_CLEAN_CYCLE})")
     args = ap.parse_args(argv)
     if args.days < 1:
         ap.error("--days must be >= 1")  # `[-0:]` is the whole list, which is not "none"
 
-    today = args.today or date.today()
+    # UTC, not local. `resolve_run_date` stamps S3 keys with the UTC date
+    # (handlers/pipeline.py -> adapters/s3_raw.py), and this value is now a HARD FILTER over
+    # those keys rather than the cosmetic age it used to be. On any machine behind UTC — all of
+    # the Americas, from local afternoon — a local date would discard the freshest landing as
+    # "future" and manufacture a THIS-IS-THE-FAILURE on a healthy pipeline. That is the
+    # cry-wolf direction, and this repo already codified the rule once: see the same fix in
+    # `core/ingest.py::digest_staleness_days`, made earlier in this same session. Repeating it
+    # here is why the rule is written down rather than remembered.
+    today = args.today or datetime.now(timezone.utc).date()
     since = args.first_clean_cycle
     reset = last_quota_reset(today)
     client, bucket = _s3(client)
@@ -420,7 +443,14 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     # could return OK with no actual data in the range asked about. Reachable through the
     # documented `--today` flag alone: pin the cutoff to a past date and every later real key
     # becomes "future". (It is also why an age could print negative.)
-    raw = latest_raw_date([k for k in _list_keys(client, bucket, "raw/")], not_after=today)
+    raw_keys = _list_keys(client, bucket, "raw/")
+    raw = latest_raw_date(raw_keys, not_after=today)
+    # An ENTIRELY empty bucket is a misconfiguration, not a pipeline defect, and the two must
+    # not share an exit code — a wrapper reading `$?` has to tell "wrong bucket" from "ERR-017
+    # re-opened". So the staleness FAIL below requires some sign the bucket is real; without
+    # one the report says CANNOT JUDGE and does not shout FAILURE on the way out.
+    bucket_has_data = bool(raw_keys) or bool(_list_keys(client, bucket, "runs/"))
+
     # Measured against `since`, not the last reset: "later than the last reset" read
     # reassuringly while nothing had landed for days. `raw/` keys carry the LANDING date
     # (raw/{source}/{run_date}/…), not the posting's own date — so name it that.
@@ -428,6 +458,8 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         state = "landed in the cycle under test"
     elif today <= since:
         state = f"the cycle that tests the fix starts {since} — too early to judge"
+    elif not bucket_has_data:
+        state = "the bucket is empty — CANNOT JUDGE (wrong bucket, or nothing has ever run)"
     else:
         # THE HEADLINE QUESTION, and it must reach the exit code. This used to be prose only:
         # the report could print "42 days ago — NOTHING has landed" and still exit 0, because
@@ -453,7 +485,11 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     )
     if not run_keys:
         print("no run summaries found — CANNOT JUDGE (wrong bucket, or nothing has run).")
-        return CANNOT_JUDGE_EXIT
+        # ...but a FAIL already established above (the raw-staleness check) still outranks it.
+        # This early return used to discard it, printing "THIS IS THE FAILURE" and then
+        # answering "cannot tell" — contradicting the contract stated in this file's docstring
+        # and asserted by test_a_confirmed_failure_outranks_an_unjudgeable_run.
+        return FAIL_EXIT if failed else CANNOT_JUDGE_EXIT
 
     unjudged = 0
     summaries: list[dict[str, Any]] = []
@@ -463,9 +499,10 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
             print(f"  [UNKNOWN] {key}: unreadable — {err}")
             unjudged += 1
             continue
-        if isinstance(payload, dict):
-            summaries.append(payload)
-        level, msg = verdict(payload, since=since)
+        day = _run_day(payload)
+        if isinstance(payload, dict) and day is not None and day <= today:
+            summaries.append(payload)  # only in-window runs feed the streak detectors
+        level, msg = verdict(payload, since=since, not_after=today)
         print(f"  [{level}] {msg}")
         if level == FAIL:
             failed += 1
