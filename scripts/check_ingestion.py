@@ -124,10 +124,20 @@ def last_quota_reset(today: date, *, reset_day: int = QUOTA_RESET_DAY) -> date:
 
 
 def verdict(
-    summary: Any, *, since: date = FIRST_CLEAN_CYCLE, not_after: "date | None" = None
+    summary: Any,
+    *,
+    since: date = FIRST_CLEAN_CYCLE,
+    not_after: "date | None" = None,
+    every_n_days: int = FETCH_EVERY_N_DAYS,
 ) -> tuple[str, str]:
     """`(level, message)` for one run summary. **Pure — this is the whole judgment**, so every
     trap lives here rather than in the plumbing and is unit-testable without S3.
+
+    `every_n_days` is the cadence ACTUALLY in force, so the explanation matches the judgment.
+    The tool briefly judged with the `--every-n-days` override while still reporting the build
+    constant — a message confidently stating a number the code was not using, which is the same
+    defect as the `~19 days` literal fixed in `core/ingest.py`. Reintroduced INSIDE the fix made
+    for cadence mismatch, which is why it is threaded rather than read from the module.
 
     `not_after` applies the same rule the key dates get: a run dated after the report's cutoff
     is not evidence for it. Without it a summary whose BODY carries a future `run_date` — a
@@ -188,7 +198,7 @@ def verdict(
 
     if stopped == SKIP_NOT_A_FETCH_DAY:
         return EXPECTED, (
-            f"{run_date}: not a fetch day — the sweep runs every {FETCH_EVERY_N_DAYS} days by "
+            f"{run_date}: not a fetch day — the sweep runs every {every_n_days} days by "
             "design, so 2 days in 3 look like this. Scoring, the digest and the report still ran."
         )
     if stopped == STOP_RATE_LIMITED:
@@ -465,7 +475,11 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     print(f"judging rate-limits against the first clean cycle: {since}")
     print(f"cadence: a sweep every {every_n} days; plan allows "
           f"{SOURCE_MONTHLY_QUOTA} requests/month")
-    print(f"today is {'a FETCH day' if is_fetch_day(today) else 'NOT a fetch day'}\n")
+    # `every_n`, not the module constant: the tool briefly judged with the `--every-n-days`
+    # override while this line still reported the build default — a header confidently stating
+    # a cadence the code was not using.
+    fetch_day = is_fetch_day(today, every_n_days=every_n)
+    print(f"today is {'a FETCH day' if fetch_day else 'NOT a fetch day'}\n")
 
     failed = 0
     cannot_judge = False
@@ -578,7 +592,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
             # real streak. The guard is kept because it is correct and free — not because a test
             # proves it bites. Saying so beats a contrived test that pretends otherwise.
             summaries.append(payload)
-        level, msg = verdict(payload, since=since, not_after=today)
+        level, msg = verdict(payload, since=since, not_after=today, every_n_days=every_n)
         print(f"  [{level}] {msg}")
         if level == FAIL:
             failed += 1

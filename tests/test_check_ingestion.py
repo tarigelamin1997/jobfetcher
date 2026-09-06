@@ -928,3 +928,31 @@ def test_a_recent_landing_inside_the_cycle_is_not_flagged(monkeypatch):
                                             fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)},
     )
     assert ci.main(["--today", "2026-10-06"], client=fake) == ci.OK_EXIT
+
+
+def test_the_reported_cadence_matches_the_one_being_judged(monkeypatch, capsys):
+    # CodeRabbit on #75: the checker judged with `--every-n-days` while the header and the
+    # per-run message still reported the build constant — confidently stating a number the code
+    # was not using. That is exactly the `~19 days` literal defect from `core/ingest.py`,
+    # reintroduced INSIDE the fix made for cadence mismatch.
+    #
+    # 2026-09-05 (ordinal 739864) is NOT a fetch day at cadence 3 (% 3 == 1) but IS at cadence 2
+    # (% 2 == 0) — chosen precisely because the two disagree, so the header must flip with the
+    # override. (My first attempt used 09-06, where BOTH cadences say "skip"; the assertion
+    # would have passed under a mutant that ignored the override entirely. Verified by computing
+    # the ordinals rather than assuming them — the habit this whole unit is about.)
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(["raw/jsearch/2026-09-05/a.json"],
+                   {"runs/2026-09-05/r.json": _summary("2026-09-05",
+                                                       fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)})
+    ci.main(["--today", "2026-09-05", "--every-n-days", "2"], client=fake)
+    out = capsys.readouterr().out
+    assert "a sweep every 2 days" in out          # the header reports the LIVE cadence...
+    assert "runs every 2 days by design" in out   # ...and so does the per-run explanation
+    assert "every 3 days" not in out
+    assert "today is a FETCH day" in out          # ...and the fetch-day call flips with it
+
+    capsys.readouterr()
+    ci.main(["--today", "2026-09-05"], client=fake)  # default 3: the same date is NOT a fetch day
+    out3 = capsys.readouterr().out
+    assert "a sweep every 3 days" in out3 and "today is NOT a fetch day" in out3
