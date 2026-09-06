@@ -383,3 +383,82 @@ def test_non_consecutive_failures_are_not_called_a_streak():
     # negative pair: failures on the 23rd and the 25th, healthy on the 24th -> no pattern.
     mixed = [_crashed("2026-09-23"), _summary("2026-09-24", fetched=5), _crashed("2026-09-25")]
     assert ci.failure_streak(mixed) is None
+
+
+# ---------------- CodeRabbit on PR #74: sparse dates are not consecutive days ----------------
+
+
+def test_a_gap_in_the_dates_resets_the_streak_instead_of_faking_one():
+    # CodeRabbit. Both streak checks walked sorted date STRINGS and incremented on each match
+    # without asking whether the days touch — so 09-01, 09-10 and 09-20 counted as "3
+    # consecutive", and a MISSING run date (an S3 object that never landed, a --days window with
+    # a hole) manufactured a FAIL out of nothing. That is the crying-wolf direction.
+    sparse = [_summary(d, fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+              for d in ("2026-09-01", "2026-09-10", "2026-09-20")]
+    assert ci.cadence_anomaly(sparse, every_n_days=3) is None
+
+    sparse_fail = [_crashed("2026-09-01"), _crashed("2026-09-10")]
+    assert ci.failure_streak(sparse_fail) is None
+
+
+def test_genuinely_adjacent_days_still_trip_both_streaks():
+    # the pair: adjacency is required, not sufficient-by-accident. Contiguous dates still fire.
+    runs = [_summary(f"2026-09-{d:02d}", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+            for d in (10, 11, 12)]
+    assert ci.cadence_anomaly(runs, every_n_days=3) is not None
+    assert ci.failure_streak([_crashed("2026-09-11"), _crashed("2026-09-12")]) is not None
+
+
+def test_one_missing_day_breaks_an_otherwise_long_run():
+    # 09-10, 09-11, [09-12 missing], 09-13, 09-14 -> longest adjacent run is 2, under the
+    # cadence of 3. A hole in the data must not be read as continuity.
+    runs = [_summary(f"2026-09-{d:02d}", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+            for d in (10, 11, 13, 14)]
+    assert ci.cadence_anomaly(runs, every_n_days=3) is None
+
+
+def test_a_day_with_any_sweep_is_not_a_skip_day():
+    # negative for the per-day fold: several runs share a date (a retry). If ANY of them swept,
+    # that day is not a skip day, so it must break the streak.
+    runs = [
+        _summary("2026-09-10", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+        _summary("2026-09-11", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+        _summary("2026-09-12", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+        _summary("2026-09-12", fetched=140),  # a re-trigger that DID sweep
+    ]
+    assert ci.cadence_anomaly(runs, every_n_days=3) is None
+
+
+def test_one_unreadable_summary_alongside_a_readable_one_cannot_judge(monkeypatch, capsys):
+    # CodeRabbit. The guard was `unreadable and not summaries`, so a single readable sibling was
+    # enough to print OK and exit 0 over an inaccessible object — and the failing run may be
+    # exactly the one we could not open. "I did not look" must never render as "nothing wrong".
+    class _HalfBroken(_FakeS3):
+        def get_object(self, **kw):
+            if kw["Key"].endswith("bad.json"):
+                raise RuntimeError("AccessDenied")
+            return super().get_object(**kw)
+
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _HalfBroken([], {
+        "runs/2026-09-25/good.json": _summary("2026-09-25", fetched=5),
+        "runs/2026-09-25/bad.json": _summary("2026-09-25", fetched=0),
+    })
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.CANNOT_JUDGE_EXIT
+    assert "CANNOT JUDGE" in capsys.readouterr().out
+
+
+def test_a_confirmed_failure_still_outranks_an_unreadable_object(monkeypatch, capsys):
+    # ...and its pair: a KNOWN defect is more actionable than an unknown one, so FAIL wins.
+    class _HalfBroken(_FakeS3):
+        def get_object(self, **kw):
+            if kw["Key"].endswith("bad.json"):
+                raise RuntimeError("AccessDenied")
+            return super().get_object(**kw)
+
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _HalfBroken([], {
+        "runs/2026-09-25/crash.json": _crashed("2026-09-25"),
+        "runs/2026-09-25/bad.json": _summary("2026-09-25"),
+    })
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.FAIL_EXIT

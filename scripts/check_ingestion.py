@@ -196,6 +196,39 @@ def verdict(summary: Any, *, since: date = FIRST_CLEAN_CYCLE) -> tuple[str, str]
     )
 
 
+def _run_day(summary: Any) -> "date | None":
+    """The summary's `run_date` as a real `date`, or None if it has none we can parse. Pure."""
+    if not isinstance(summary, dict):
+        return None
+    raw = summary.get("run_date")
+    if not isinstance(raw, str) or not _ISO.match(raw):
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _longest_run(by_day: "dict[date, bool]") -> int:
+    """The longest run of CALENDAR-ADJACENT days whose value is True. Pure.
+
+    Adjacency is the whole point. Both callers previously walked sorted dates and incremented a
+    streak on each True without checking that the days actually touch — so summaries for
+    09-01, 09-10 and 09-20 counted as "3 consecutive", and a **missing** run date (an S3 object
+    that never landed, a `--days` window with a hole in it) manufactured a FAIL out of nothing.
+    That is the crying-wolf direction this file spends its docstring arguing against, so a gap
+    now RESETS the streak: absence of evidence is not evidence of a streak.
+    """
+    streak = worst = 0
+    prev: date | None = None
+    for day in sorted(by_day):
+        contiguous = prev is not None and (day - prev).days == 1
+        streak = (streak + 1) if (by_day[day] and contiguous) else (1 if by_day[day] else 0)
+        worst = max(worst, streak)
+        prev = day
+    return worst
+
+
 def cadence_anomaly(
     summaries: list[dict[str, Any]], *, every_n_days: int = FETCH_EVERY_N_DAYS
 ) -> str | None:
@@ -209,16 +242,15 @@ def cadence_anomaly(
     every line individually correct, the whole picture wrong."""
     if every_n_days <= 1:
         return None  # cadence off: every day is a fetch day, so skips are the anomaly elsewhere
-    dated = sorted(
-        (s for s in summaries if isinstance(s, dict) and isinstance(s.get("run_date"), str)),
-        key=lambda s: s["run_date"],
-    )
-    streak = worst = 0
-    for s in dated:
+    by_day: dict[date, bool] = {}
+    for s in summaries:
+        day = _run_day(s)
+        if day is None:
+            continue
         ingest = s.get("ingest")
         skipped = isinstance(ingest, dict) and ingest.get("fetch_stopped") == SKIP_NOT_A_FETCH_DAY
-        streak = streak + 1 if skipped else 0
-        worst = max(worst, streak)
+        by_day[day] = by_day.get(day, True) and skipped
+    worst = _longest_run(by_day)
     if worst < every_n_days:
         return None
     return (
@@ -236,14 +268,12 @@ def failure_streak(summaries: list[dict[str, Any]]) -> str | None:
     is ERR-010**, which ran 38 days precisely because each morning's failure looked like the
     last and nobody read the pattern. So the per-run verdict stays proportionate and the
     escalation lives here, where more than one day can be seen at once."""
-    by_day: dict[str, bool] = {}
+    by_day: dict[date, bool] = {}
     for s in summaries:
-        if isinstance(s, dict) and isinstance(s.get("run_date"), str):
-            by_day[s["run_date"]] = by_day.get(s["run_date"], False) or s.get("statusCode") == 500
-    streak = worst = 0
-    for day in sorted(by_day):
-        streak = streak + 1 if by_day[day] else 0
-        worst = max(worst, streak)
+        day = _run_day(s)
+        if day is not None:
+            by_day[day] = by_day.get(day, False) or s.get("statusCode") == 500
+    worst = _longest_run(by_day)
     if worst < 2:
         return None
     return (
@@ -374,8 +404,14 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     if failed:
         print(f"FAIL — {failed} failing condition(s) above.")
         return FAIL_EXIT
-    if unreadable and not summaries:
-        print(f"CANNOT JUDGE — all {unreadable} summaries were unreadable.")
+    if unreadable:
+        # ANY unreadable object, not only "all of them". A confirmed FAIL still wins above, but
+        # otherwise an unjudged run cannot be reported as OK: the failing run may be precisely
+        # the object we could not open, and "I did not look" must never render as "nothing
+        # wrong". The earlier `and not summaries` meant one readable sibling was enough to
+        # print OK and exit 0 over an inaccessible summary.
+        print(f"CANNOT JUDGE — {unreadable} summary/summaries could not be read, so this window "
+              "is incomplete. Fix the access or the object, then re-run.")
         return CANNOT_JUDGE_EXIT
     print("OK (no failing condition found)")
     print("Actual request usage is on the RapidAPI dashboard — this script deliberately does "
