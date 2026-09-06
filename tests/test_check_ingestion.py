@@ -113,7 +113,7 @@ def test_a_pre_ERR017_summary_is_reported_as_unknown_not_crashed():
     old = {"statusCode": 200, "run_date": "2026-09-04", "ingest": {"fetched": 0, "bronzed": 0}}
     level, msg = ci.verdict(old, since=date(2026, 9, 22))
     assert level == ci.UNKNOWN
-    assert "older than PR #63" in msg
+    assert "predates PR #63" in msg
 
 
 # --------------------------------------------------------------- latest_raw_date (pure)
@@ -209,3 +209,177 @@ def test_after_the_test_cycle_starts_a_stale_raw_prefix_says_so_plainly(monkeypa
     )
     ci.main(["--today", "2026-09-25"], client=fake)
     assert "NOTHING has landed since 2026-09-22" in capsys.readouterr().out
+
+
+# ===================== the re-verification round: what a fresh Examiner found =====================
+# The first version refused to cry wolf so thoroughly that it could not bark. These are its
+# blind spots, each with the test that would have caught it.
+
+
+def _crashed(run_date: str, error: str = "OperationalError: could not connect"):
+    """Exactly the shape `handlers/pipeline.py` writes on a stage failure — statusCode 500 and
+    NO `ingest` key, to the same runs/ prefix a healthy run uses."""
+    return {"statusCode": 500, "run_id": "deadbeef", "run_date": run_date, "error": error}
+
+
+def test_a_crashed_run_is_a_FAIL_not_an_unknown_old_build():
+    # THE BLOCKER. A 500 summary has no `ingest` key, so the pre-#63 branch swallowed it: a
+    # pipeline dying every morning reported OK, exit 0, and told the operator to "check a run
+    # from a newer build" — when the newer build was precisely what was failing. That is the
+    # ERR-010 shape (38 unnoticed returned-500s) reproduced inside the tool built to catch it.
+    level, msg = ci.verdict(_crashed("2026-09-25"), since=date(2026, 9, 22))
+    assert level == ci.FAIL
+    assert "statusCode 500" in msg
+    assert "predates PR #63" not in msg  # the misdiagnosis must be gone
+    # The ERR-010 framing deliberately does NOT live here — one 500 is a fact, a streak is the
+    # pattern. See `failure_streak` and its test; a per-run message that shouts "38 days!" at a
+    # single Aurora resume is a check people learn to discount.
+
+
+def test_main_exits_one_when_every_run_crashed(monkeypatch, capsys):
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3([], {f"runs/2026-09-2{d}/r{d}.json": _crashed(f"2026-09-2{d}")
+                        for d in range(3, 8)})
+    assert ci.main(["--today", "2026-09-28"], client=fake) == ci.FAIL_EXIT
+    out = capsys.readouterr().out
+    assert "[FAIL]" in out and "OK (no failing" not in out
+
+
+def test_a_reassess_run_has_no_ingest_and_is_not_an_error():
+    # negative pair: `mode=reassess` legitimately has no ingest stage. It must not be judged as
+    # a broken shape, or every manual replay would light up the report.
+    level, _ = ci.verdict(
+        {"statusCode": 200, "run_date": "2026-09-25", "mode": "reassess", "reassess": {}},
+        since=date(2026, 9, 22),
+    )
+    assert level == ci.EXPECTED
+
+
+def test_an_impossible_run_of_skips_is_a_FAIL_even_though_each_line_is_expected():
+    # A cadence of 3 can put at most 2 skips between sweeps. Seven in a row means the sweep is
+    # not paused, it is dead — the $JOBFETCHER_FETCH_EVERY_N_DAYS failure mode. Every individual
+    # line stays correctly EXPECTED; the whole picture is what is wrong.
+    runs = [_summary(f"2026-09-{d:02d}", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+            for d in range(20, 27)]
+    msg = ci.cadence_anomaly(runs, every_n_days=3)
+    assert msg is not None and "7 CONSECUTIVE" in msg
+    assert "JOBFETCHER_FETCH_EVERY_N_DAYS" in msg
+
+
+def test_a_normal_cadence_is_not_flagged_as_an_anomaly():
+    # negative: skip, skip, sweep — the ordinary pattern must stay silent, or the check becomes
+    # the furniture it was written to avoid.
+    runs = [
+        _summary("2026-09-20", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+        _summary("2026-09-21", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+        _summary("2026-09-22", fetched=140),
+        _summary("2026-09-23", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
+    ]
+    assert ci.cadence_anomaly(runs, every_n_days=3) is None
+
+
+def test_unreadable_summaries_do_not_report_OK(monkeypatch, capsys):
+    # The two were backwards: an EMPTY runs/ prefix exited 1 while "every object failed to read"
+    # exited 0. "I could not read anything" is the louder failure.
+    class _Unreadable(_FakeS3):
+        def get_object(self, **kw):
+            raise RuntimeError("AccessDenied")
+
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _Unreadable([], {"runs/2026-09-25/r1.json": {}})
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.CANNOT_JUDGE_EXIT
+    assert "CANNOT JUDGE" in capsys.readouterr().out
+
+
+def test_an_empty_runs_prefix_cannot_judge_rather_than_failing(monkeypatch, capsys):
+    # ...and its pair: nothing to read is "cannot judge" (exit 2), NOT "ERR-017 re-opened"
+    # (exit 1). A wrapper checking $? must be able to tell a wrong bucket from a real defect.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    assert ci.main(["--today", "2026-09-25"], client=_FakeS3([], {})) == ci.CANNOT_JUDGE_EXIT
+
+
+def test_an_unusable_run_date_is_unknown_not_a_failure():
+    # negative: the date comparison is a string compare. Missing/unpadded/non-string dates must
+    # land on UNKNOWN — guessing toward FAIL is the crying-wolf direction.
+    for bad in ({"statusCode": 200}, {"run_date": 20260905}, {"run_date": "2026-9-05"}):
+        level, _ = ci.verdict({"statusCode": 200, "ingest": {"fetch_stopped": None}, **bad},
+                              since=date(2026, 9, 22))
+        assert level == ci.UNKNOWN, bad
+
+
+def test_a_non_object_summary_body_does_not_crash():
+    # The exact bug class PR #70 fixed in the JSearch adapter, guarded here rather than
+    # re-learned: a body that parses as JSON but is not an object.
+    for body in ([1, 2, 3], "oops", 42, None):
+        level, _ = ci.verdict(body, since=date(2026, 9, 22))
+        assert level == ci.UNKNOWN
+
+
+def test_list_keys_terminates_when_truncated_without_a_token():
+    # negative: `IsTruncated` with no NextContinuationToken would re-request page 1 forever —
+    # an unbounded BILLED loop, not just a hang.
+    class _Broken:
+        calls = 0
+
+        def list_objects_v2(self, **kw):
+            self.calls += 1
+            assert self.calls < 50, "infinite pagination loop"
+            return {"Contents": [{"Key": "runs/2026-09-25/a.json"}], "IsTruncated": True}
+
+    assert ci._list_keys(_Broken(), "b", "runs/") == ["runs/2026-09-25/a.json"]
+
+
+def test_days_must_be_at_least_one(monkeypatch):
+    # `[-0:]` is the WHOLE list, so `--days 0` silently judged everything.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    with pytest.raises(SystemExit) as e:
+        ci.main(["--days", "0"], client=_FakeS3([], {}))
+    assert e.value.code == 2  # argparse usage error, not a silent surprise
+
+
+def test_a_junk_date_argument_is_an_argparse_error_not_a_traceback(monkeypatch):
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    with pytest.raises(SystemExit) as e:
+        ci.main(["--today", "notadate"], client=_FakeS3([], {}))
+    assert e.value.code == 2
+
+
+def test_every_run_of_a_day_is_judged_not_just_the_last_key(monkeypatch, capsys):
+    # Keys are runs/{date}/{run_id}.json and run_id is a random uuid hex, so ordering by key
+    # within a day is arbitrary: a retry could hide the failing run behind a passing one from
+    # the same morning. Selection is by DATE, and every run in it is judged.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3([], {
+        "runs/2026-09-25/a1b2c3d4.json": _summary("2026-09-25",
+                                                  fetch_stopped=ci.STOP_RATE_LIMITED),
+        "runs/2026-09-25/f9e8d7c6.json": _summary("2026-09-25", fetched=3),
+    })
+    assert ci.main(["--today", "2026-09-25", "--days", "1"], client=fake) == ci.FAIL_EXIT
+    out = capsys.readouterr().out
+    assert "[FAIL]" in out and "[PASS]" in out  # both runs judged, not one
+
+
+def test_one_failed_run_is_a_fact_and_a_streak_is_the_ERR010_pattern():
+    # One 500 is a transient (an Aurora resume, say) — real, worth flagging, not a pattern.
+    # CONSECUTIVE days of them is ERR-010, which ran 38 days precisely because each morning
+    # looked like the last. The per-run message stays proportionate; the escalation is here.
+    one = [_crashed("2026-09-25")]
+    assert ci.failure_streak(one) is None
+
+    streak = [_crashed(f"2026-09-2{d}") for d in (3, 4, 5)]
+    msg = ci.failure_streak(streak)
+    assert msg is not None and "3 CONSECUTIVE DAYS" in msg and "ERR-010" in msg
+
+
+def test_a_single_failure_message_does_not_overclaim():
+    # negative: the first version asserted "This is the ERR-010 shape" on every single 500,
+    # including a four-day-old Aurora resume. A check that dramatises is a check people discount.
+    _, msg = ci.verdict(_crashed("2026-09-25"), since=date(2026, 9, 22))
+    assert "ERR-010" not in msg
+    assert "statusCode 500" in msg
+
+
+def test_non_consecutive_failures_are_not_called_a_streak():
+    # negative pair: failures on the 23rd and the 25th, healthy on the 24th -> no pattern.
+    mixed = [_crashed("2026-09-23"), _summary("2026-09-24", fetched=5), _crashed("2026-09-25")]
+    assert ci.failure_streak(mixed) is None

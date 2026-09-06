@@ -43,8 +43,15 @@ was made of. That question has its own read-only command:
 JOBFETCHER_DATA_BUCKET=$(terraform -chdir=terraform output -raw data_bucket_name)   python scripts/check_ingestion.py
 ```
 
-- **Exit 0** = nothing failing. **Exit 1** = a `rate_limited` run inside a cycle the fixed cadence
-  was sized to fit — the one condition that re-opens ERR-017.
+- **Three exit codes**, because *broken* and *cannot tell* are different answers and a wrapper
+  checking `$?` must distinguish them: **0** = nothing failing · **1** = a genuine defect ·
+  **2** = cannot judge (no summaries, unreadable summaries, or a bad argument).
+- **Exit 1 fires on any of:** a run that returned **`statusCode: 500`** (the ERR-010 shape — a
+  crashed run writes a summary with no `ingest` block at all, and an earlier version of this
+  script mistook that for an old build and reported OK); a **`rate_limited`** run inside a cycle
+  the fixed cadence was sized to fit (the ERR-017 condition); or **more consecutive
+  `not_a_fetch_day` runs than the cadence can arithmetically produce** — which means the sweep is
+  not paused but dead, the `$JOBFETCHER_FETCH_EVERY_N_DAYS` failure mode.
 - **Two results that look alarming and are not**, both deliberately reported as `EXPECTED`:
   `not_a_fetch_day` (the sweep runs every `FETCH_EVERY_N_DAYS`; 2 days in 3 look like this), and
   `rate_limited` in a cycle that began before `FIRST_CLEAN_CYCLE` (running out mid-cycle is what a
