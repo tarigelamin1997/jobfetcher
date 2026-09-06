@@ -49,9 +49,23 @@ JOBFETCHER_DATA_BUCKET=$(terraform -chdir=terraform output -raw data_bucket_name
 - **Exit 1 fires on any of:** a run that returned **`statusCode: 500`** (the ERR-010 shape — a
   crashed run writes a summary with no `ingest` block at all, and an earlier version of this
   script mistook that for an old build and reported OK); a **`rate_limited`** run inside a cycle
-  the fixed cadence was sized to fit (the ERR-017 condition); or **more consecutive
-  `not_a_fetch_day` runs than the cadence can arithmetically produce** — which means the sweep is
-  not paused but dead, the `$JOBFETCHER_FETCH_EVERY_N_DAYS` failure mode.
+  the fixed cadence was sized to fit (the ERR-017 condition); **more consecutive
+  `not_a_fetch_day` runs than the cadence can arithmetically produce** — the sweep not paused but
+  dead, the `$JOBFETCHER_FETCH_EVERY_N_DAYS` failure mode; **nothing landed in `raw/` for more
+  than two full sweeps** (intake stopped — in practice the most likely exit 1); or **no run
+  summary for more than 2 days** (the Lambda runs daily, so that is the pipeline itself stopping).
+- **`WARN` never affects the exit code.** `partial_errors`, `budget_exhausted` and a completed
+  sweep that found nothing all print `[WARN]` and exit **0** — deliberate, so the check does not
+  cry wolf, but it means `$? == 0` can coexist with "13 of 15 queries died". Read the lines.
+- **Two things that are NOT a defect and exit 2:** an unset/empty `$JOBFETCHER_DATA_BUCKET`
+  (nothing was examined — likely an expired AWS session breaking the `terraform output`
+  substitution above), and **running before the day's 06:0x UTC run has written its summary** on
+  a fetch day. The second matters on 2026-09-22 itself: that date IS a fetch day, and an earlier
+  version answered `OK` there whether the sweep had resumed or had fetched nothing for a month.
+- **⚠️ Pass `--every-n-days` if the live cadence differs from the build default.**
+  `terraform/lambda.tf` owns `$JOBFETCHER_FETCH_EVERY_N_DAYS` ([B-13](../ledgers/backlog.md)); a
+  mismatch makes legitimate skip-days look arithmetically impossible and exits 1 on a healthy
+  pipeline — precisely when you re-run this after changing the cadence.
 - **Two results that look alarming and are not**, both deliberately reported as `EXPECTED`:
   `not_a_fetch_day` (the sweep runs every `FETCH_EVERY_N_DAYS`; 2 days in 3 look like this), and
   `rate_limited` in a cycle that began before `FIRST_CLEAN_CYCLE` (running out mid-cycle is what a
