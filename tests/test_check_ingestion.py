@@ -652,3 +652,48 @@ def test_dates_in_keys_parses_rather_than_pattern_matching():
     assert ci.dates_in_keys(["a/2026-09-03/x", "a/2026-09-01/y", "a/2026-09-03/z"]) == [
         date(2026, 9, 1), date(2026, 9, 3)
     ]
+
+
+# ------- CodeRabbit round 3: a date after the report's cutoff is not evidence for it -------
+
+
+def test_a_future_raw_key_does_not_satisfy_the_landing_check(monkeypatch, capsys):
+    # A future-dated `raw/` key made "has anything landed in the cycle under test?" true, so
+    # the command returned OK about a window holding no data at all. Reachable through the
+    # documented --today flag alone: pin the cutoff to a past date and later real keys are
+    # "future". Also why an age could print negative.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2027-01-01/future.json"],  # after the cutoff -> not evidence
+        {"runs/2026-09-25/r1.json": _summary("2026-09-25", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)},
+    )
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.FAIL_EXIT
+    out = capsys.readouterr().out
+    assert "THIS IS THE FAILURE" in out
+    assert "-" not in out.split("days ago")[0][-4:]  # no negative age
+
+
+def test_a_future_runs_prefix_does_not_displace_the_real_window(monkeypatch, capsys):
+    # `days[-args.days:]` takes the LAST N dates, and future dates sort last — so a single
+    # future-dated prefix could push every real run out of the window and leave the report
+    # judging nothing that happened.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(["raw/jsearch/2026-09-25/a.json"], {
+        "runs/2027-01-01/future.json": _summary("2027-01-01", fetched=999),
+        "runs/2026-09-25/real.json": _crashed("2026-09-25"),
+    })
+    assert ci.main(["--today", "2026-09-25", "--days", "1"], client=fake) == ci.FAIL_EXIT
+    out = capsys.readouterr().out
+    assert "2026-09-25" in out and "2027-01-01" not in out  # the REAL run was judged
+
+
+def test_dates_in_keys_caps_at_the_cutoff():
+    keys = ["a/2026-09-01/x", "a/2026-09-30/y", "a/2027-01-01/z"]
+    assert ci.dates_in_keys(keys, not_after=date(2026, 9, 25)) == [date(2026, 9, 1)]
+    assert ci.dates_in_keys(keys) == [                       # uncapped keeps everything
+        date(2026, 9, 1), date(2026, 9, 30), date(2027, 1, 1)
+    ]
+    # the boundary is INCLUSIVE — today's own data is evidence for today
+    assert ci.dates_in_keys(["a/2026-09-25/x"], not_after=date(2026, 9, 25)) == [
+        date(2026, 9, 25)
+    ]

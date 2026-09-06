@@ -310,28 +310,44 @@ def failure_streak(summaries: list[dict[str, Any]]) -> str | None:
     )
 
 
-def dates_in_keys(keys: list[str], pattern: str = r"(\d{4}-\d{2}-\d{2})") -> "list[date]":
-    """Every REAL date appearing in `keys`, sorted and deduped. Pure.
+def dates_in_keys(
+    keys: list[str],
+    pattern: str = r"(\d{4}-\d{2}-\d{2})",
+    *,
+    not_after: "date | None" = None,
+) -> "list[date]":
+    """Every REAL date appearing in `keys`, sorted and deduped, optionally capped at `not_after`.
 
-    Date-*shaped* is not date-*valid*: `2026-13-45` matches the regex and then explodes in
-    `date.fromisoformat`. An S3 key is not a trusted input — anything can be written under a
-    prefix — so a malformed one must be skipped, not turned into a traceback. This is the same
-    lesson as `_run_day`: parse once, in one place, and let the parse be the validator."""
+    Two ways an S3 key lies, and neither may reach the caller:
+
+    - **Date-shaped is not date-valid.** `2026-13-45` matches the regex and then explodes in
+      `date.fromisoformat`. A key is untrusted input — anything can be written under a prefix —
+      so malformed ones are skipped, never turned into a traceback. Parse once, in one place,
+      and let the parse be the validator (same lesson as `_run_day`).
+    - **A date after the report's cutoff is not evidence for it.** `not_after` drops those. A
+      future-dated key otherwise satisfied the "has anything landed?" check and displaced real
+      dates out of the `--days` window, so the command could answer OK about a range holding no
+      data at all. Reachable through the documented `--today` flag alone — pin the cutoff to a
+      past date and every later real key is "future" — as well as by clock skew or a backfill
+      written with the wrong date.
+    """
     out: set[date] = set()
     for k in keys:
         m = re.search(pattern, k)
         if not m:
             continue
         try:
-            out.add(date.fromisoformat(m.group(1)))
+            parsed = date.fromisoformat(m.group(1))
         except ValueError:
             continue  # date-shaped junk in a key must never crash the report
+        if not_after is None or parsed <= not_after:
+            out.add(parsed)
     return sorted(out)
 
 
-def latest_raw_date(keys: list[str]) -> "date | None":
-    """The newest real date appearing in the `raw/` keys, or None. Pure."""
-    found = dates_in_keys(keys)
+def latest_raw_date(keys: list[str], *, not_after: "date | None" = None) -> "date | None":
+    """The newest real date in the `raw/` keys at or before `not_after`, or None. Pure."""
+    found = dates_in_keys(keys, not_after=not_after)
     return found[-1] if found else None
 
 
@@ -399,7 +415,12 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
 
     failed = 0
 
-    raw = latest_raw_date(_list_keys(client, bucket, "raw/"))
+    # Nothing dated AFTER the report's cutoff is evidence for it. A future-dated key satisfied
+    # the landing check and displaced real dates out of the `--days` window, so the command
+    # could return OK with no actual data in the range asked about. Reachable through the
+    # documented `--today` flag alone: pin the cutoff to a past date and every later real key
+    # becomes "future". (It is also why an age could print negative.)
+    raw = latest_raw_date([k for k in _list_keys(client, bucket, "raw/")], not_after=today)
     # Measured against `since`, not the last reset: "later than the last reset" read
     # reassuringly while nothing had landed for days. `raw/` keys carry the LANDING date
     # (raw/{source}/{run_date}/…), not the posting's own date — so name it that.
@@ -425,7 +446,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     all_keys = [k for k in _list_keys(client, bucket, "runs/") if k.endswith(".json")]
     # `dates_in_keys` PARSES rather than pattern-matching: a `runs/2026-13-45/` prefix is
     # date-shaped junk and must be skipped, not turned into a ValueError traceback.
-    days = dates_in_keys(all_keys, r"runs/(\d{4}-\d{2}-\d{2})/")
+    days = dates_in_keys(all_keys, r"runs/(\d{4}-\d{2}-\d{2})/", not_after=today)
     wanted = set(days[-args.days:])
     run_keys = sorted(
         k for k in all_keys if any(f"runs/{d.isoformat()}/" in k for d in wanted)
