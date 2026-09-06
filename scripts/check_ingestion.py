@@ -10,7 +10,9 @@ a wrapper checking `$?` must be able to distinguish them:
 
     0  OK             nothing failing
     1  FAIL           something is genuinely wrong (see the FAIL conditions below)
-    2  CANNOT JUDGE   no summaries, unreadable summaries, or a bad argument
+    2  CANNOT JUDGE   no summaries, or a run in the window we could not judge
+                      (unreadable object, or a shape this script cannot read),
+                      or a bad argument
 
 **Why this exists as a command and not as a note.** [ERR-017] ran for two months because a run
 that fetched nothing was indistinguishable from a run with nothing to fetch, and the follow-up
@@ -308,10 +310,29 @@ def failure_streak(summaries: list[dict[str, Any]]) -> str | None:
     )
 
 
-def latest_raw_date(keys: list[str]) -> str | None:
-    """The newest `YYYY-MM-DD` appearing in the `raw/` keys, or None. Pure."""
-    dates = {m.group(1) for k in keys if (m := re.search(r"(\d{4}-\d{2}-\d{2})", k))}
-    return max(dates) if dates else None
+def dates_in_keys(keys: list[str], pattern: str = r"(\d{4}-\d{2}-\d{2})") -> "list[date]":
+    """Every REAL date appearing in `keys`, sorted and deduped. Pure.
+
+    Date-*shaped* is not date-*valid*: `2026-13-45` matches the regex and then explodes in
+    `date.fromisoformat`. An S3 key is not a trusted input — anything can be written under a
+    prefix — so a malformed one must be skipped, not turned into a traceback. This is the same
+    lesson as `_run_day`: parse once, in one place, and let the parse be the validator."""
+    out: set[date] = set()
+    for k in keys:
+        m = re.search(pattern, k)
+        if not m:
+            continue
+        try:
+            out.add(date.fromisoformat(m.group(1)))
+        except ValueError:
+            continue  # date-shaped junk in a key must never crash the report
+    return sorted(out)
+
+
+def latest_raw_date(keys: list[str]) -> "date | None":
+    """The newest real date appearing in the `raw/` keys, or None. Pure."""
+    found = dates_in_keys(keys)
+    return found[-1] if found else None
 
 
 def _s3(client: Any = None) -> tuple[Any, str]:
@@ -382,7 +403,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     # Measured against `since`, not the last reset: "later than the last reset" read
     # reassuringly while nothing had landed for days. `raw/` keys carry the LANDING date
     # (raw/{source}/{run_date}/…), not the posting's own date — so name it that.
-    if raw and raw >= since.isoformat():
+    if raw and raw >= since:
         state = "landed in the cycle under test"
     elif today <= since:
         state = f"the cycle that tests the fix starts {since} — too early to judge"
@@ -393,7 +414,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         # paragraph is the ERR-017 shape — a run that reports success while doing nothing.
         state = f"NOTHING has landed since {since}, the cycle that tests the fix — THIS IS THE FAILURE"
         failed += 1
-    age = f"{(today - date.fromisoformat(raw)).days} days ago — " if raw else ""
+    age = f"{(today - raw).days} days ago — " if raw else ""
     print(f"latest raw/ landing date: {raw or 'none found'}  ({age}{state})\n")
 
     # Select the last N run DATES and judge every run inside them. Taking the last N *keys*
@@ -402,20 +423,24 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     # `.json` only: any other object under a date prefix (an S3-console folder placeholder, a
     # stray `.keep`, a truncated write) is unreadable and would pin the exit code at 2 forever.
     all_keys = [k for k in _list_keys(client, bucket, "runs/") if k.endswith(".json")]
-    days = sorted({m.group(1) for k in all_keys if (m := re.search(r"runs/(\d{4}-\d{2}-\d{2})/", k))})
+    # `dates_in_keys` PARSES rather than pattern-matching: a `runs/2026-13-45/` prefix is
+    # date-shaped junk and must be skipped, not turned into a ValueError traceback.
+    days = dates_in_keys(all_keys, r"runs/(\d{4}-\d{2}-\d{2})/")
     wanted = set(days[-args.days:])
-    run_keys = sorted(k for k in all_keys if any(f"runs/{d}/" in k for d in wanted))
+    run_keys = sorted(
+        k for k in all_keys if any(f"runs/{d.isoformat()}/" in k for d in wanted)
+    )
     if not run_keys:
         print("no run summaries found — CANNOT JUDGE (wrong bucket, or nothing has run).")
         return CANNOT_JUDGE_EXIT
 
-    unreadable = 0
+    unjudged = 0
     summaries: list[dict[str, Any]] = []
     for key in reversed(run_keys):
         payload, err = _read_json(client, bucket, key)
         if err is not None:
             print(f"  [UNKNOWN] {key}: unreadable — {err}")
-            unreadable += 1
+            unjudged += 1
             continue
         if isinstance(payload, dict):
             summaries.append(payload)
@@ -423,11 +448,19 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         print(f"  [{level}] {msg}")
         if level == FAIL:
             failed += 1
+        elif level == UNKNOWN:
+            # An UNREADABLE object and an UNJUDGEABLE one are the same fact wearing different
+            # clothes: a run in the window whose state we do not know. Only the first used to
+            # affect the exit code, so a summary with a broken `run_date`, a missing
+            # `fetch_stopped` (a pre-#63 build) or an unrecognised shape printed UNKNOWN and
+            # then exited 0 — "I could not judge this" rendering as "nothing wrong", which is
+            # the blocker this script was rewritten for, one level down.
+            unjudged += 1
 
     # The streak detectors reset on a calendar gap (see `_longest_run`), so a window with holes
     # can silently defuse them. Say how many, rather than leaving that to be discovered.
     if wanted:
-        span = (date.fromisoformat(max(wanted)) - date.fromisoformat(min(wanted))).days + 1
+        span = (max(wanted) - min(wanted)).days + 1
         holes = span - len(wanted)
         if holes > 0:
             print(f"\n  [WARN] {holes} of the last {span} calendar days have NO run summary. "
@@ -445,14 +478,15 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
     if failed:
         print(f"FAIL — {failed} failing condition(s) above.")
         return FAIL_EXIT
-    if unreadable:
-        # ANY unreadable object, not only "all of them". A confirmed FAIL still wins above, but
+    if unjudged:
+        # ANY unjudged run, not only "all of them". A confirmed FAIL still wins above, but
         # otherwise an unjudged run cannot be reported as OK: the failing run may be precisely
         # the object we could not open, and "I did not look" must never render as "nothing
         # wrong". The earlier `and not summaries` meant one readable sibling was enough to
         # print OK and exit 0 over an inaccessible summary.
-        print(f"CANNOT JUDGE — {unreadable} summary/summaries could not be read, so this window "
-              "is incomplete. Fix the access or the object, then re-run.")
+        print(f"CANNOT JUDGE — {unjudged} run(s) in this window could not be judged "
+              "(unreadable, or a summary shape this script does not understand), so the window "
+              "is incomplete. Widen --days to reach judgeable runs, or fix the object.")
         return CANNOT_JUDGE_EXIT
     print("OK (no failing condition found)")
     print("Actual request usage is on the RapidAPI dashboard — this script deliberately does "

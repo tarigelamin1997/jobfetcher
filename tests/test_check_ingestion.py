@@ -124,8 +124,16 @@ def test_latest_raw_date_picks_the_newest_and_tolerates_junk_keys():
         "raw/jsearch/2026-08-31/c.json",
         "raw/_manifest",  # no date -> ignored, not a crash
     ]
-    assert ci.latest_raw_date(keys) == "2026-09-01"
+    assert ci.latest_raw_date(keys) == date(2026, 9, 1)  # a real date, not a string
     assert ci.latest_raw_date([]) is None  # negative: empty bucket
+    # negative (CodeRabbit): date-SHAPED is not date-VALID. An S3 key is untrusted input, and
+    # `2026-13-45` matched the old regex and then exploded in `date.fromisoformat` — a traceback
+    # instead of an exit code. Junk is skipped; a real date beside it still wins.
+    assert ci.latest_raw_date(["raw/jsearch/2026-13-45/x.json"]) is None
+    assert ci.latest_raw_date(
+        ["raw/jsearch/2026-13-45/x.json", "raw/jsearch/2026-09-01/b.json"]
+    ) == date(2026, 9, 1)
+    assert ci.latest_raw_date(["raw/jsearch/2026-02-30/x.json"]) is None  # not a real day
 
 
 # --------------------------------------------------------------- end to end, fake S3
@@ -581,3 +589,66 @@ def test_one_date_validator_so_a_nonsense_date_is_invisible_to_nobody():
     assert level == ci.UNKNOWN                    # not FAIL — an unusable date is not evidence
     assert ci._run_day(nonsense) is None
     assert ci.failure_streak([nonsense, nonsense]) is None
+
+
+# --------- CodeRabbit round 2: unjudged is not OK, and key dates are untrusted input ---------
+
+
+def test_an_unknown_verdict_cannot_judge_rather_than_reporting_OK(monkeypatch, capsys):
+    # An UNREADABLE object and an UNJUDGEABLE one are the same fact in different clothes: a run
+    # in the window whose state we do not know. Only the first affected the exit code, so a
+    # pre-#63 summary printed UNKNOWN and then exited 0 — "I could not judge this" rendering as
+    # "nothing wrong", which is the blocker this script was rewritten for, one level down.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    old_build = {"statusCode": 200, "run_date": "2026-09-25",
+                 "ingest": {"fetched": 0, "bronzed": 0}}  # no fetch_stopped key
+    fake = _FakeS3(["raw/jsearch/2026-09-25/a.json"], {
+        "runs/2026-09-25/good.json": _summary("2026-09-25", fetched=5),
+        "runs/2026-09-25/old.json": old_build,
+    })
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.CANNOT_JUDGE_EXIT
+    out = capsys.readouterr().out
+    assert "[UNKNOWN]" in out and "CANNOT JUDGE" in out
+
+
+def test_all_judgeable_runs_still_exit_zero(monkeypatch):
+    # negative pair: the moment every run is judgeable, exit 0 returns. Without this the change
+    # above would just be a permanently-red check, which is the same uselessness inverted.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(["raw/jsearch/2026-09-25/a.json"],
+                   {"runs/2026-09-25/good.json": _summary("2026-09-25", fetched=5)})
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.OK_EXIT
+
+
+def test_a_confirmed_failure_outranks_an_unjudgeable_run(monkeypatch):
+    # ordering: a KNOWN defect is more actionable than an unknown one, so FAIL still wins.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(["raw/jsearch/2026-09-25/a.json"], {
+        "runs/2026-09-25/crash.json": _crashed("2026-09-25"),
+        "runs/2026-09-25/old.json": {"statusCode": 200, "run_date": "2026-09-25",
+                                     "ingest": {"fetched": 0}},
+    })
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.FAIL_EXIT
+
+
+def test_a_junk_date_in_a_runs_prefix_does_not_crash_the_report(monkeypatch, capsys):
+    # negative (CodeRabbit): `runs/2026-13-45/` is date-shaped junk. The old prefix regex fed it
+    # straight to date.fromisoformat -> ValueError traceback instead of a clean exit code.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(["raw/jsearch/2026-09-25/a.json"], {
+        "runs/2026-13-45/junk.json": _summary("2026-09-25", fetched=5),
+        "runs/2026-09-25/good.json": _summary("2026-09-25", fetched=5),
+    })
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.OK_EXIT  # junk prefix skipped
+    assert "Traceback" not in capsys.readouterr().out
+
+
+def test_dates_in_keys_parses_rather_than_pattern_matching():
+    assert ci.dates_in_keys(["a/2026-09-01/x", "a/2026-13-45/x", "a/2026-02-30/x"]) == [
+        date(2026, 9, 1)
+    ]
+    assert ci.dates_in_keys([]) == []
+    # sorted + deduped, so callers can take [-1] for "newest"
+    assert ci.dates_in_keys(["a/2026-09-03/x", "a/2026-09-01/y", "a/2026-09-03/z"]) == [
+        date(2026, 9, 1), date(2026, 9, 3)
+    ]
