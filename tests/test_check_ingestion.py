@@ -286,7 +286,7 @@ def test_unreadable_summaries_do_not_report_OK(monkeypatch, capsys):
             raise RuntimeError("AccessDenied")
 
     monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
-    fake = _Unreadable([], {"runs/2026-09-25/r1.json": {}})
+    fake = _Unreadable(["raw/jsearch/2026-09-25/a.json"], {"runs/2026-09-25/r1.json": {}})
     assert ci.main(["--today", "2026-09-25"], client=fake) == ci.CANNOT_JUDGE_EXIT
     assert "CANNOT JUDGE" in capsys.readouterr().out
 
@@ -417,16 +417,44 @@ def test_one_missing_day_breaks_an_otherwise_long_run():
     assert ci.cadence_anomaly(runs, every_n_days=3) is None
 
 
-def test_a_day_with_any_sweep_is_not_a_skip_day():
+@pytest.mark.parametrize("sweep_first", [False, True])
+def test_a_day_with_any_sweep_is_not_a_skip_day(sweep_first):
     # negative for the per-day fold: several runs share a date (a retry). If ANY of them swept,
     # that day is not a skip day, so it must break the streak.
+    #
+    # BOTH ORDERS, and that is the whole point. The single-order version of this test was
+    # TAUTOLOGICAL with respect to the property it claimed: a last-write-wins fold
+    # (`by_day[day] = skipped`) passed it 41/41, and survived only because the skip happened to
+    # be listed before the sweep. In production the order is arbitrary — `main()` sorts
+    # `runs/{date}/{run_id}.json` keys and `run_id` is a random uuid hex — so that mutant would
+    # have produced a COIN-FLIP false FAIL in the field with a fully green suite.
+    same_day = [
+        _summary("2026-09-12", fetched=140),                            # a re-trigger that swept
+        _summary("2026-09-12", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),  # and the scheduled skip
+    ]
+    if not sweep_first:
+        same_day.reverse()
     runs = [
         _summary("2026-09-10", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
         _summary("2026-09-11", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
-        _summary("2026-09-12", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY),
-        _summary("2026-09-12", fetched=140),  # a re-trigger that DID sweep
+        *same_day,
     ]
     assert ci.cadence_anomaly(runs, every_n_days=3) is None
+
+
+@pytest.mark.parametrize("crash_first", [False, True])
+def test_a_day_with_any_crash_is_a_failure_day(crash_first):
+    # The mirror fold, with the opposite operator and the same order-independence requirement:
+    # a crash at 06:00 plus a successful manual retry at 07:00 still means the SCHEDULED run
+    # failed that day. `failure_streak` therefore folds with OR where `cadence_anomaly` folds
+    # with AND — the asymmetry is deliberate.
+    day_11 = [_crashed("2026-09-11"), _summary("2026-09-11", fetched=9)]
+    day_12 = [_crashed("2026-09-12"), _summary("2026-09-12", fetched=9)]
+    if not crash_first:
+        day_11.reverse()
+        day_12.reverse()
+    msg = ci.failure_streak([*day_11, *day_12])
+    assert msg is not None and "2 CONSECUTIVE DAYS" in msg
 
 
 def test_one_unreadable_summary_alongside_a_readable_one_cannot_judge(monkeypatch, capsys):
@@ -440,7 +468,7 @@ def test_one_unreadable_summary_alongside_a_readable_one_cannot_judge(monkeypatc
             return super().get_object(**kw)
 
     monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
-    fake = _HalfBroken([], {
+    fake = _HalfBroken(["raw/jsearch/2026-09-25/a.json"], {
         "runs/2026-09-25/good.json": _summary("2026-09-25", fetched=5),
         "runs/2026-09-25/bad.json": _summary("2026-09-25", fetched=0),
     })
@@ -462,3 +490,94 @@ def test_a_confirmed_failure_still_outranks_an_unreadable_object(monkeypatch, ca
         "runs/2026-09-25/bad.json": _summary("2026-09-25"),
     })
     assert ci.main(["--today", "2026-09-25"], client=fake) == ci.FAIL_EXIT
+
+
+# ------------- the delta review: the headline question must reach the exit code -------------
+
+
+def test_nothing_landed_in_the_cycle_under_test_is_a_FAIL_not_just_prose(monkeypatch, capsys):
+    # THE HEADLINE QUESTION. `raw/` staleness used to be prose only: the report could print
+    # "42 days ago - NOTHING has landed" and still exit 0, because nothing about it fed the
+    # verdict. A green $? beside an alarming paragraph is the ERR-017 shape exactly — a run
+    # that reports success while doing nothing.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-08-14/a.json"],  # nothing since well before the cycle began
+        {"runs/2026-09-25/r1.json": _summary("2026-09-25", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)},
+    )
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.FAIL_EXIT
+    assert "THIS IS THE FAILURE" in capsys.readouterr().out
+
+
+def test_an_empty_raw_prefix_after_the_cycle_starts_is_also_a_FAIL(monkeypatch):
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3([], {"runs/2026-09-25/r1.json": _summary("2026-09-25", fetched=0)})
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.FAIL_EXIT
+
+
+def test_the_same_staleness_before_the_cycle_starts_is_NOT_a_failure(monkeypatch, capsys):
+    # negative pair, identical data, earlier date: before the cycle under test there is nothing
+    # to conclude, so this must stay exit 0. If it ever flips, the check has become furniture.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-08-14/a.json"],
+        {"runs/2026-09-05/r1.json": _summary("2026-09-05", fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)},
+    )
+    assert ci.main(["--today", "2026-09-05"], client=fake) == ci.OK_EXIT
+    assert "too early to judge" in capsys.readouterr().out
+
+
+def test_a_window_with_holes_warns_that_the_streak_detectors_are_weakened(monkeypatch, capsys):
+    # The blind spot the adjacency fix leaves: a dead sweep whose summaries are periodically
+    # missing escapes the streak detectors. The trade-off is right, but a detector that can be
+    # defused silently is one nobody should trust twice — so the report says the window has holes.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-09-25/a.json"],
+        {f"runs/2026-09-{d}/r.json": _summary(f"2026-09-{d}",
+                                              fetch_stopped=ci.SKIP_NOT_A_FETCH_DAY)
+         for d in ("20", "22", "25")},  # 6-day span, 3 summaries -> 3 holes
+    )
+    ci.main(["--today", "2026-09-25", "--days", "5"], client=fake)
+    out = capsys.readouterr().out
+    assert "3 of the last 6 calendar days have NO run summary" in out
+    assert "weakened" in out
+
+
+def test_a_contiguous_window_does_not_warn_about_holes(monkeypatch, capsys):
+    # negative: an unbroken window must stay quiet, or the warning becomes furniture.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+    fake = _FakeS3(
+        ["raw/jsearch/2026-09-25/a.json"],
+        {f"runs/2026-09-2{d}/r.json": _summary(f"2026-09-2{d}", fetched=5) for d in (3, 4, 5)},
+    )
+    ci.main(["--today", "2026-09-25", "--days", "3"], client=fake)
+    assert "NO run summary" not in capsys.readouterr().out
+
+
+def test_a_stray_non_json_object_does_not_pin_the_exit_code_at_cannot_judge(monkeypatch):
+    # An S3-console folder placeholder / .keep / truncated write under runs/{date}/ is
+    # unreadable, and would otherwise force exit 2 forever even though every real summary was
+    # readable and passing. Only .json keys are summaries.
+    monkeypatch.setenv("JOBFETCHER_DATA_BUCKET", "b")
+
+    class _WithPlaceholder(_FakeS3):
+        def list_objects_v2(self, **kw):
+            page = super().list_objects_v2(**kw)
+            if kw["Prefix"] == "runs/":
+                page["Contents"].append({"Key": "runs/2026-09-25/"})  # not a summary
+            return page
+
+    fake = _WithPlaceholder(["raw/jsearch/2026-09-25/a.json"],
+                            {"runs/2026-09-25/r1.json": _summary("2026-09-25", fetched=5)})
+    assert ci.main(["--today", "2026-09-25"], client=fake) == ci.OK_EXIT
+
+
+def test_one_date_validator_so_a_nonsense_date_is_invisible_to_nobody():
+    # Two validators disagreed: `verdict` only regex-checked the shape, so "2026-13-45" was
+    # judged there but skipped by the streak detectors. Now both use `_run_day`.
+    nonsense = {"statusCode": 500, "run_date": "2026-13-45"}
+    level, _ = ci.verdict(nonsense, since=date(2026, 9, 22))
+    assert level == ci.UNKNOWN                    # not FAIL — an unusable date is not evidence
+    assert ci._run_day(nonsense) is None
+    assert ci.failure_streak([nonsense, nonsense]) is None

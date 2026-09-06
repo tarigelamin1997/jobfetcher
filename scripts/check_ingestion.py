@@ -113,11 +113,15 @@ def verdict(summary: Any, *, since: date = FIRST_CLEAN_CYCLE) -> tuple[str, str]
         # the JSearch adapter, so guarding it here rather than re-learning it.
         return UNKNOWN, f"a run summary is {type(summary).__name__}, not an object — skipped."
 
-    run_date = summary.get("run_date")
-    if not isinstance(run_date, str) or not _ISO.match(run_date):
+    # ONE date validator, shared with the streak detectors via `_run_day`. Two of them disagreed:
+    # this one only regex-checked the shape, so `2026-13-45` was judged here and invisible there.
+    day = _run_day(summary)
+    if day is None:
         # Cannot place it in a cycle, so cannot judge it. Deliberately NOT a FAIL: an
         # unparseable date is missing information, and guessing toward alarm is crying wolf.
-        return UNKNOWN, f"a run summary has an unusable run_date ({run_date!r}) — cannot judge it."
+        raw_date = summary.get("run_date")
+        return UNKNOWN, f"a run summary has an unusable run_date ({raw_date!r}) — cannot judge it."
+    run_date = day.isoformat()
 
     status = summary.get("statusCode")
     if status == 500:
@@ -218,6 +222,14 @@ def _longest_run(by_day: "dict[date, bool]") -> int:
     that never landed, a `--days` window with a hole in it) manufactured a FAIL out of nothing.
     That is the crying-wolf direction this file spends its docstring arguing against, so a gap
     now RESETS the streak: absence of evidence is not evidence of a streak.
+
+    **The cost of that choice, stated rather than left to be discovered.** A genuinely dead
+    sweep escapes these detectors if its summaries are *periodically missing* — 30 straight
+    skip-days with every third summary absent yields a longest adjacent run of 2, under the
+    threshold. The trade-off is still right (a sparse window is far likelier than "dead AND
+    periodically missing", and a false alarm is the failure mode that gets a check ignored), but
+    it is a real blind spot, so `main()` reports how many days in the window have no summary at
+    all. A detector that can be defused silently is one nobody should trust twice.
     """
     streak = worst = 0
     prev: date | None = None
@@ -238,8 +250,15 @@ def cadence_anomaly(
     With a cadence of N, at most N-1 skips can fall between two sweeps — so a longer run of them
     is arithmetically impossible unless the cadence is misconfigured (the
     `$JOBFETCHER_FETCH_EVERY_N_DAYS` knob, or a `run_date` that never lands on a fetch day).
-    Without this, a permanently-dead sweep prints an unbroken column of `EXPECTED` and exits 0 —
-    every line individually correct, the whole picture wrong."""
+    Without this, a permanently-dead sweep **whose summaries are contiguous** prints an unbroken
+    column of `EXPECTED` and exits 0 — every line individually correct, the whole picture wrong.
+    (The contiguity qualifier is load-bearing: see `_longest_run` for the blind spot it leaves
+    and how `main()` surfaces it.)
+
+    The per-day fold is **AND** — a day counts as skipped only if EVERY run that day skipped —
+    because this is the one detector that can turn a column of `EXPECTED` into exit 1 on its
+    own, so it gets the conservative operator. `failure_streak` folds with OR for the opposite
+    reason; see its docstring."""
     if every_n_days <= 1:
         return None  # cadence off: every day is a fetch day, so skips are the anomaly elsewhere
     by_day: dict[date, bool] = {}
@@ -267,7 +286,13 @@ def failure_streak(summaries: list[dict[str, Any]]) -> str | None:
     One `statusCode: 500` is a fact — an Aurora resume, a transient. **Consecutive days of them
     is ERR-010**, which ran 38 days precisely because each morning's failure looked like the
     last and nobody read the pattern. So the per-run verdict stays proportionate and the
-    escalation lives here, where more than one day can be seen at once."""
+    escalation lives here, where more than one day can be seen at once.
+
+    The per-day fold is **OR** — any crash that day makes it a failure day, even if a manual
+    retry later succeeded — because the *scheduled* run did fail. That is safe to be aggressive
+    about: every summary this can count already made `verdict()` return `FAIL`, so this function
+    has **no authority over the exit code** and can only escalate the message on a run that
+    already set it. `cadence_anomaly`, which CAN set the exit code alone, folds with AND."""
     by_day: dict[date, bool] = {}
     for s in summaries:
         day = _run_day(s)
@@ -351,26 +376,32 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
           f"{SOURCE_MONTHLY_QUOTA} requests/month")
     print(f"today is {'a FETCH day' if is_fetch_day(today) else 'NOT a fetch day'}\n")
 
+    failed = 0
+
     raw = latest_raw_date(_list_keys(client, bucket, "raw/"))
-    if raw:
-        # Measured against `since`, not the last reset: "later than the last reset" read
-        # reassuringly while nothing had landed for days. `raw/` keys carry the LANDING date
-        # (raw/{source}/{run_date}/…), not the posting's own date — so name it that.
-        age = (today - date.fromisoformat(raw)).days
-        if raw >= since.isoformat():
-            state = "landed in the cycle under test"
-        elif today < since:
-            state = f"the cycle that tests the fix starts {since} — too early to judge"
-        else:
-            state = f"NOTHING has landed since {since}, the cycle that tests the fix"
-        print(f"latest raw/ landing date: {raw}  ({age} days ago — {state})\n")
+    # Measured against `since`, not the last reset: "later than the last reset" read
+    # reassuringly while nothing had landed for days. `raw/` keys carry the LANDING date
+    # (raw/{source}/{run_date}/…), not the posting's own date — so name it that.
+    if raw and raw >= since.isoformat():
+        state = "landed in the cycle under test"
+    elif today <= since:
+        state = f"the cycle that tests the fix starts {since} — too early to judge"
     else:
-        print("latest raw/ landing date: none found\n")
+        # THE HEADLINE QUESTION, and it must reach the exit code. This used to be prose only:
+        # the report could print "42 days ago — NOTHING has landed" and still exit 0, because
+        # nothing about `raw/` staleness fed the verdict. A green $? beside an alarming
+        # paragraph is the ERR-017 shape — a run that reports success while doing nothing.
+        state = f"NOTHING has landed since {since}, the cycle that tests the fix — THIS IS THE FAILURE"
+        failed += 1
+    age = f"{(today - date.fromisoformat(raw)).days} days ago — " if raw else ""
+    print(f"latest raw/ landing date: {raw or 'none found'}  ({age}{state})\n")
 
     # Select the last N run DATES and judge every run inside them. Taking the last N *keys*
     # ordered them by `run_id` within a day — a random uuid hex — so a retry could hide the
     # failing run behind a passing one from the same morning.
-    all_keys = _list_keys(client, bucket, "runs/")
+    # `.json` only: any other object under a date prefix (an S3-console folder placeholder, a
+    # stray `.keep`, a truncated write) is unreadable and would pin the exit code at 2 forever.
+    all_keys = [k for k in _list_keys(client, bucket, "runs/") if k.endswith(".json")]
     days = sorted({m.group(1) for k in all_keys if (m := re.search(r"runs/(\d{4}-\d{2}-\d{2})/", k))})
     wanted = set(days[-args.days:])
     run_keys = sorted(k for k in all_keys if any(f"runs/{d}/" in k for d in wanted))
@@ -378,7 +409,7 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         print("no run summaries found — CANNOT JUDGE (wrong bucket, or nothing has run).")
         return CANNOT_JUDGE_EXIT
 
-    failed = unreadable = 0
+    unreadable = 0
     summaries: list[dict[str, Any]] = []
     for key in reversed(run_keys):
         payload, err = _read_json(client, bucket, key)
@@ -392,6 +423,16 @@ def main(argv: list[str] | None = None, *, client: Any = None) -> int:
         print(f"  [{level}] {msg}")
         if level == FAIL:
             failed += 1
+
+    # The streak detectors reset on a calendar gap (see `_longest_run`), so a window with holes
+    # can silently defuse them. Say how many, rather than leaving that to be discovered.
+    if wanted:
+        span = (date.fromisoformat(max(wanted)) - date.fromisoformat(min(wanted))).days + 1
+        holes = span - len(wanted)
+        if holes > 0:
+            print(f"\n  [WARN] {holes} of the last {span} calendar days have NO run summary. "
+                  "The streak detectors below reset across a gap, so they are weakened over "
+                  "this window — read the per-run lines rather than trusting their silence.")
 
     # Whole-report checks: a single line can be individually correct while the pattern across
     # days is the actual defect. That is how both ERR-010 and ERR-017 survived.
