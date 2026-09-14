@@ -253,3 +253,71 @@ def test_unknown_targeting_key_is_loud():
     data["targeting"]["region"] = "GCC"
     with pytest.raises(ValidationError):
         SearchSpec.model_validate(data)
+
+
+# ── free-tier arithmetic: the sample must actually FIT, not just claim to ───
+# The sample used to carry `# fits free 200/mo` beside `max_pages_per_query: 5` and
+# `request_budget_per_run: 70` — about 700 requests a month, 3.5x the free tier. Anyone copying
+# it would have run out within about a week and hit ERR-017. "Fits the free tier" is only true
+# if something fails when it stops being true; these tests are that something.
+
+
+def _worst_case_monthly_requests(spec: SearchSpec) -> tuple[int, int]:
+    """`(requests in the worst-aligned month, the plan's monthly quota)` for `spec`.
+
+    Worst-aligned, not average: at a cadence of N days a 31-day window holds up to ceil(31 / N)
+    fetch days — 11 at the default cadence of 3, not the ~10 an average suggests. The average
+    hides exactly the month that runs out."""
+    from jobfetcher.core.ingest import FETCH_EVERY_N_DAYS, SOURCE_MONTHLY_QUOTA, _sweep_cost
+
+    worst_sweeps = -(-31 // FETCH_EVERY_N_DAYS)  # ceil(31 / N)
+    return _sweep_cost(spec) * worst_sweeps, SOURCE_MONTHLY_QUOTA
+
+
+def _fits_free_tier(spec: SearchSpec) -> bool:
+    used, quota = _worst_case_monthly_requests(spec)
+    return used <= quota
+
+
+def _budget_lets_a_full_sweep_complete(spec: SearchSpec) -> bool:
+    from jobfetcher.core.ingest import _sweep_cost
+
+    return spec.budget.request_budget_per_run >= _sweep_cost(spec)
+
+
+def _sample_spec() -> SearchSpec:
+    return SearchSpec.from_yaml_text(SAMPLE.read_text(encoding="utf-8"))
+
+
+def test_the_sample_fits_the_free_tier_in_the_worst_month():
+    spec = _sample_spec()
+    used, quota = _worst_case_monthly_requests(spec)
+    assert _fits_free_tier(spec), (
+        f"the sample would spend {used} requests in its worst month against a {quota} free tier"
+    )
+
+
+def test_the_sample_budget_lets_a_full_sweep_complete():
+    # A budget below the sweep cost means EVERY sweep stops early and reports
+    # `budget_exhausted`: the query matrix never completes and the counts are always a floor.
+    assert _budget_lets_a_full_sweep_complete(_sample_spec())
+
+
+def test_the_previous_over_quota_sample_is_caught():
+    # negative, through the SAME predicate the positive uses — so a predicate broken to always
+    # return True fails here. The shape is the sample this change replaces:
+    # 3 titles x 6 countries x 5 pages.
+    d = _valid_spec_dict()
+    d["targeting"]["job_titles"] = ["Data Engineer", "Data Platform Engineer", "Data Architect"]
+    d["targeting"]["countries"] = ["sa", "ae", "qa", "kw", "bh", "om"]
+    d["budget"] = {"max_pages_per_query": 5, "request_budget_per_run": 70}
+    assert not _fits_free_tier(SearchSpec.model_validate(d))
+
+
+def test_a_budget_below_the_sweep_cost_is_caught():
+    # negative for the budget predicate: 2 titles x 5 countries x 1 page = 10 per sweep, budget 9.
+    d = _valid_spec_dict()
+    d["targeting"]["job_titles"] = ["Data Engineer", "Data Architect"]
+    d["targeting"]["countries"] = ["sa", "ae", "qa", "kw", "bh"]
+    d["budget"] = {"max_pages_per_query": 1, "request_budget_per_run": 9}
+    assert not _budget_lets_a_full_sweep_complete(SearchSpec.model_validate(d))
