@@ -926,6 +926,108 @@ def test_the_staleness_banner_does_not_contradict_the_email_it_sits_on():
     assert "shortlist to reach you" not in text
 
 
+# --------------------------------------------------------------------------- B-12: the intake alert
+# `core.intake` decides a sweep ended early; this is the part the user actually sees. Every
+# positive is paired with its silence, and both render paths are exercised on purpose — the
+# staleness banner once shipped with its main-path half untested (Examiner B3).
+
+
+def _quota_alert():
+    from jobfetcher.core.intake import IntakeAlert
+
+    return IntakeAlert(
+        "Intake stopped: JSearch monthly quota used up", "Check usage on the RapidAPI dashboard"
+    )
+
+
+def _intake_present(subject: str, html: str, text: str) -> bool:
+    """The alert is visible in all three places: subject (leading), HTML banner, text banner."""
+    alert = _quota_alert()
+    return (
+        subject.startswith(f"⚠ {alert.what}")
+        and alert.what in html and alert.where in html
+        and f"⚠ {alert.what}. {alert.where}." in text
+    )
+
+
+_MATCHES = ([_item(90), _item(70, "p2")], 4)
+_NO_MATCHES = ([], 0)
+
+
+@pytest.mark.parametrize(("items", "below"), [_NO_MATCHES, _MATCHES], ids=["zero-match", "main"])
+def test_the_intake_alert_renders_on_both_paths(items, below):
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, text = render_digest(
+        items, below, threshold=60, date=date(2026, 9, 25), intake_alert=_quota_alert()
+    )
+    assert _intake_present(subject, html, text)
+    # one short line, at the very top of the plaintext — not a paragraph
+    assert text.splitlines()[0] == "⚠ Intake stopped: JSearch monthly quota used up. " \
+        "Check usage on the RapidAPI dashboard."
+
+
+@pytest.mark.parametrize(("items", "below"), [_NO_MATCHES, _MATCHES], ids=["zero-match", "main"])
+def test_no_intake_alert_renders_nothing_on_either_path(items, below):
+    # negative: healthy intake is the ordinary day, and the ordinary day must look ordinary.
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, text = render_digest(items, below, threshold=60, date=date(2026, 9, 25))
+    assert "⚠" not in subject and "⚠" not in text
+    assert "RapidAPI" not in html and "RapidAPI" not in text
+    assert "#fce8e6" not in html  # no banner block of any kind
+
+
+def test_the_intake_alert_is_escaped_in_the_html():
+    # `what` can carry an unknown `fetch_stopped` string read back from S3 — untrusted-ish input,
+    # and this module's contract is that everything interpolated into HTML is escaped first.
+    from jobfetcher.core.intake import IntakeAlert
+    from jobfetcher.core.notifier import render_digest
+
+    _, html, _ = render_digest(
+        [], 0, threshold=60, date=date(2026, 9, 25),
+        intake_alert=IntakeAlert("<script>x</script>", "a & b"),
+    )
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html and "a &amp; b" in html
+
+
+@pytest.mark.parametrize(("items", "below"), [_NO_MATCHES, _MATCHES], ids=["zero-match", "main"])
+def test_both_escalations_together_mark_the_subject_once_and_lead_with_the_cause(items, below):
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, text = render_digest(
+        items, below, threshold=60, date=date(2026, 9, 25), stale_days=6,
+        intake_alert=_quota_alert(),
+    )
+    assert subject.count("⚠") == 1                    # one warning sign, not "⚠ ⚠ …"
+    assert _intake_present(subject, html, text)       # the cause leads...
+    assert _banner_present(subject, html, text)       # ...and the staleness banner survives
+    assert text.index("RapidAPI") < text.index("WARNING:")
+    assert html.index("RapidAPI") < html.index("days since your last digest")
+
+
+def test_notify_actually_wires_the_intake_alert_into_the_email_it_sends():
+    # THE SEAM, the same lesson as staleness: an alert the handler computes but notify() does not
+    # pass to render_digest reaches nobody, and a suite that asserts only the returned dict
+    # stays green while it happens.
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90)], below=0)
+    notifier = _FakeNotifier()
+    notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+           run_date=date(2026, 9, 25), intake_alert=_quota_alert())
+    sent = notifier.sent[0]
+    assert _intake_present(sent["subject"], sent["html"], sent["text"])
+
+
+def test_notify_without_an_intake_alert_sends_no_banner():
+    repo = _FakeRepo(threshold=60, surfaced=[_item(90)], below=0)
+    notifier = _FakeNotifier()
+    notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+           run_date=date(2026, 9, 25))
+    sent = notifier.sent[0]
+    assert "⚠" not in sent["subject"] and "RapidAPI" not in sent["text"]
+
+
 def test_digest_staleness_days_counts_whole_days_since_the_recorded_delivery():
     # (Renamed: the old name promised "from delivery, not from running", which THIS function
     # cannot possibly test — it takes a datetime and has no access to run history. That property

@@ -4,6 +4,7 @@ layout per stage, the batched-JSONL body shape, the run-summary object, the empt
 never propagates), so an audit write can never fail a pipeline run. Mirrors `test_s3_reports.py`."""
 from __future__ import annotations
 
+import io
 import json
 from datetime import date
 from typing import Any
@@ -129,3 +130,88 @@ def test_non_json_native_values_serialize_via_default():
     assert key is not None
     line = json.loads(client.puts[0]["Body"].decode("utf-8"))
     assert line["when"] == "2026-07-11"
+
+
+# --------------------------------------------------------------------------- the reader (B-12)
+class _ListingS3:
+    """`list_objects_v2` + `get_object` over an in-memory bucket: real-shaped pagination, an
+    optional truncated page that carries NO token, and an optional key whose read fails."""
+
+    def __init__(self, objects, *, page_size=1000, truncated_without_token=False, fail_key=None):
+        self.objects = objects
+        self.page_size = page_size
+        self.truncated_without_token = truncated_without_token
+        self.fail_key = fail_key
+        self.list_calls: list[dict[str, Any]] = []
+
+    def list_objects_v2(self, **kw: Any) -> dict:
+        self.list_calls.append(kw)
+        assert len(self.list_calls) < 50, "the listing loop did not terminate"
+        keys = sorted(k for k in self.objects if k.startswith(kw["Prefix"]))
+        start = int(kw.get("ContinuationToken", 0))
+        page: dict[str, Any] = {
+            "Contents": [{"Key": k} for k in keys[start:start + self.page_size]]
+        }
+        if self.truncated_without_token:
+            page["IsTruncated"] = True
+        elif start + self.page_size < len(keys):
+            page["IsTruncated"] = True
+            page["NextContinuationToken"] = str(start + self.page_size)
+        return page
+
+    def get_object(self, **kw: Any) -> dict:
+        if kw["Key"] == self.fail_key:
+            raise RuntimeError("AccessDenied")
+        return {"Body": io.BytesIO(self.objects[kw["Key"]])}
+
+
+_DAY = date(2026, 9, 22)
+
+
+def _summary(**kw: Any) -> bytes:
+    return json.dumps(kw).encode("utf-8")
+
+
+def _day_objects() -> dict[str, bytes]:
+    return {
+        "runs/2026-09-22/b.json": _summary(ingest={"fetch_stopped": None}),
+        "runs/2026-09-22/a.json": _summary(statusCode=500),
+        "runs/2026-09-22/": b"",                         # console "folder" placeholder
+        "runs/2026-09-22/list.json": b"[1, 2, 3]",       # parses, but is not a summary
+        "runs/2026-09-21/other.json": _summary(statusCode=201),  # another day entirely
+    }
+
+
+def test_get_run_summaries_reads_only_that_days_json_objects_in_key_order():
+    client = _ListingS3(_day_objects())
+    got = _store(client).get_run_summaries(_DAY)
+    assert [s.get("statusCode") for s in got] == [500, None]  # a.json, b.json; nothing else
+    assert client.list_calls[0]["Bucket"] == "b"
+    assert client.list_calls[0]["Prefix"] == "runs/2026-09-22/"
+
+
+def test_get_run_summaries_follows_every_page():
+    # negative for a reader that stops after page one: 5 summaries across 3 pages of 2.
+    objects = {f"runs/2026-09-22/r{i}.json": _summary(n=i) for i in range(5)}
+    client = _ListingS3(objects, page_size=2)
+    got = _store(client).get_run_summaries(_DAY)
+    assert [s["n"] for s in got] == [0, 1, 2, 3, 4]
+    assert len(client.list_calls) == 3
+
+
+def test_a_truncated_page_without_a_token_ends_the_listing():
+    client = _ListingS3(_day_objects(), truncated_without_token=True)
+    assert len(_store(client).get_run_summaries(_DAY)) == 2
+    assert len(client.list_calls) == 1
+
+
+def test_an_empty_day_is_an_empty_list():
+    assert _store(_ListingS3({})).get_run_summaries(_DAY) == []
+
+
+def test_a_read_failure_raises_unlike_the_writes():
+    # The reader is deliberately NOT behind the non-fatal guard: the caller must be able to tell
+    # "could not read" from "nothing wrong", so it can decline to alert rather than guess.
+    client = _ListingS3(_day_objects(), fail_key="runs/2026-09-22/b.json")
+    with pytest.raises(RuntimeError, match="AccessDenied"):
+        _store(client).get_run_summaries(_DAY)

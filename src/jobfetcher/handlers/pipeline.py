@@ -59,6 +59,7 @@ from ..core.ingest import (
     reassess,
     score_gold,
 )
+from ..core.intake import IntakeAlert, latest_fetch_day, problem_on_day, sweep_problem
 from ..core.profile import Profile
 from ..core.scorer import Scorer
 from ..core.search_spec import SearchSpec
@@ -333,6 +334,47 @@ def resolve_filter_strategy(env: dict[str, str]) -> Any:
 
 
 # --------------------------------------------------------------------------- handler
+def _intake_alert_for_digest(
+    ingest_counts: dict[str, Any],
+    *,
+    run_date: date,
+    every_n_days: int,
+    audit_store: "S3AuditStore | None",
+    rlog: Any,
+) -> IntakeAlert | None:
+    """Whether today's digest must lead with an intake alert (B-12) — on EVERY day until a sweep
+    succeeds, not only on the day it failed.
+
+    On a fetch day the answer is this run's own sweep. On the days between sweeps this run made
+    no requests to judge, so the answer is the LAST fetch day's recorded run summaries: without
+    that look-back a quota stop would show on day one and vanish on days two and three, and an
+    alert that comes and goes is one the reader learns to dismiss.
+
+    Best-effort, like every other digest enhancement here: a failed read logs a warning and
+    returns `None`. It never fails the run, and it never MANUFACTURES an alert out of a read
+    error — the sweep's own `fetch_stopped` is still in `runs/*.json` for
+    `scripts/check_ingestion.py` to find."""
+    try:
+        fetch_day = latest_fetch_day(run_date, every_n_days=every_n_days)
+        if fetch_day == run_date:
+            alert = sweep_problem(ingest_counts, run_date=run_date)
+        elif fetch_day is None or audit_store is None:
+            return None
+        else:
+            alert = problem_on_day(audit_store.get_run_summaries(fetch_day), run_date=fetch_day)
+    except Exception as exc:  # noqa: BLE001 — the alert is an enhancement; never fail the send
+        rlog.warning(
+            "could not determine intake health for the digest — it sends WITHOUT an intake "
+            "alert, which is NOT the same as intake being healthy: %s",
+            exc,
+        )
+        return None
+    if alert is not None:
+        # WARNING, for the log trail: the same words the user reads at the top of the email.
+        rlog.warning("INTAKE ALERT in today's digest: %s. %s.", alert.what, alert.where)
+    return alert
+
+
 def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[str, Any]:
     """The one v0 Lambda. Returns a `{statusCode, run_id, ...stage counts}` summary.
 
@@ -631,6 +673,11 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             from .capture import build_capture_link
 
             capture_link = build_capture_link(env)
+            # B-12: a sweep that ended early leads the digest, every day until one succeeds.
+            intake_alert = _intake_alert_for_digest(
+                ingest_counts, run_date=run_date, every_n_days=every_n,
+                audit_store=audit_store, rlog=rlog,
+            )
             notify_counts = notify(
                 run_id=run_id,
                 repo=repo,
@@ -646,6 +693,8 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 report_store=report_store,
                 # INV-001: the capture-link signer (None → no "Mark applied" links; graceful).
                 capture_link=capture_link,
+                # B-12: what broke in intake + where to look (None → no banner).
+                intake_alert=intake_alert,
             )
             # Mark sent ONLY after a successful send (notify raises on a failed send, so we never
             # get here on failure — the guard is not written, the next run re-sends).

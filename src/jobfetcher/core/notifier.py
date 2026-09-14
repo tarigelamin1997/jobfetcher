@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
 
+    from .intake import IntakeAlert
     from .ports import ShortlistItem
 
     # A pure sink injected by the handler/ingest layer (where the base URL + signing key live):
@@ -261,6 +262,51 @@ def _staleness_banner(stale_days: int | None) -> tuple[str, str]:
     return msg, html
 
 
+def _intake_banner(alert: "IntakeAlert | None") -> tuple[str, str]:
+    """`(text, html)`: ONE short line — what failed, and where to look — or `("", "")`.
+
+    Short on purpose: the email's job is to say intake broke and point at the place to look,
+    not to diagnose; the run summary and the logs hold the detail. Unlike staleness there is no
+    threshold to wait for — `core.intake` returns an alert only for a sweep that really ended
+    early, so this renders on every digest until a sweep succeeds."""
+    if alert is None:
+        return "", ""
+    text = f"⚠ {alert.what}. {alert.where}."
+    html = (
+        '<div style="background:#fce8e6;border-left:4px solid #d93025;padding:10px 14px;'
+        'margin:0 0 16px;border-radius:4px;">'
+        f'<strong style="color:#c5221f;">&#9888; {escape(alert.what)}.</strong> '
+        f'<span style="color:#3c4043;">{escape(alert.where)}.</span>'
+        "</div>"
+    )
+    return text, html
+
+
+def _with_banners(
+    subject: str,
+    text_body: str,
+    *,
+    stale_days: int | None,
+    intake_alert: "IntakeAlert | None",
+) -> tuple[str, str, str]:
+    """Put both escalations on one render path: returns `(subject, text_body, banner_html)`.
+
+    ONE helper for both of `render_digest`'s return paths — two hand-kept copies is how the main
+    path's staleness banner once went untested (Examiner B3). The intake banner leads: it names
+    the cause, staleness is a symptom. In the subject, `⚠` appears exactly once and WHAT failed
+    comes first, because the inbox list is where triage happens (INV-004)."""
+    intake_text, intake_html = _intake_banner(intake_alert)
+    stale_text, stale_html = _staleness_banner(stale_days)
+    if intake_alert is not None:
+        subject = f"⚠ {intake_alert.what} | {subject}"
+    elif stale_text:
+        subject = f"⚠ {subject}"
+    banners = "\n".join(t for t in (intake_text, stale_text) if t)
+    if banners:
+        text_body = f"{banners}\n\n{text_body}"
+    return subject, text_body, intake_html + stale_html
+
+
 def render_digest(
     items: "list[ShortlistItem]",
     below_count: int,
@@ -271,8 +317,14 @@ def render_digest(
     full_list_url: str | None = None,
     capture_link: "CaptureLink | None" = None,
     stale_days: int | None = None,
+    intake_alert: "IntakeAlert | None" = None,
 ) -> tuple[str, str, str]:
     """Render `(subject, html_body, text_body)` for the daily digest.
+
+    `intake_alert` (B-12) is the handler's verdict on the last JSearch sweep (`core.intake`):
+    when present, the digest opens with one short line — what failed, where to look — and the
+    subject leads with it. `stale_days` is the other escalation (INV-004). Both render on BOTH
+    return paths, zero-match included.
 
     `items` are the surfaced matches (already `score >= threshold`, ordered by score DESC by the
     Repository); `below_count` is how many scored matches fell below the threshold (the footer).
@@ -341,13 +393,12 @@ def render_digest(
             )
         text_body = f"{line}\n"
         # The zero-match path is EXACTLY the shape a silently-broken pipeline produces, so
-        # the banner matters most here: it separates a quiet week from having received
-        # nothing at all for 38 days.
-        stale_text, stale_html = _staleness_banner(stale_days)
-        if stale_text:
-            subject = f"⚠ {subject}"
-            text_body = f"{stale_text}\n\n{text_body}"
-        html_body = _html_shell(day, stale_html + f'<p style="color:#3c4043;">{escape(line)}</p>')
+        # the banners matter most here: they separate a quiet week from a broken intake, and
+        # from having received nothing at all for 38 days.
+        subject, text_body, banner_html = _with_banners(
+            subject, text_body, stale_days=stale_days, intake_alert=intake_alert
+        )
+        html_body = _html_shell(day, banner_html + f'<p style="color:#3c4043;">{escape(line)}</p>')
         return subject, html_body, text_body
 
     if n == 0:
@@ -411,13 +462,10 @@ def render_digest(
         )
     else:
         footer_html = f'<p style="color:#80868b;font-size:13px;margin:8px 0 0;">{escape(footer)}</p>'
-    stale_text, stale_html = _staleness_banner(stale_days)
-    if stale_text:
-        # In the SUBJECT too: the inbox list is where triage happens, and an escalation that
-        # lives only in the body loses to a body nobody opens (INV-004).
-        subject = f"⚠ {subject}"
-        text_body = f"{stale_text}\n\n{text_body}"
-    html_body = _html_shell(day, stale_html + summary + new_html + open_html + footer_html)
+    subject, text_body, banner_html = _with_banners(
+        subject, text_body, stale_days=stale_days, intake_alert=intake_alert
+    )
+    html_body = _html_shell(day, banner_html + summary + new_html + open_html + footer_html)
     return subject, html_body, text_body
 
 

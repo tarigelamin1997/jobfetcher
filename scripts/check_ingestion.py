@@ -81,6 +81,7 @@ from jobfetcher.core.ingest import (  # noqa: E402
     SOURCE_MONTHLY_QUOTA,
     is_fetch_day,
 )
+from jobfetcher.core.intake import FIRST_CLEAN_CYCLE  # noqa: E402
 
 _BUCKET_ENV = "JOBFETCHER_DATA_BUCKET"
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -89,17 +90,10 @@ _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # the S3 audit trail showed a two-month cycle resetting on the 22nd and the dashboard agreed.
 QUOTA_RESET_DAY = 22
 
-# The first quota cycle running ENTIRELY on the fixed cadence — the first whose outcome actually
-# tests the ERR-017 capacity fix.
-#
-# WHY NOT SIMPLY "THE LAST RESET". Being rate-limited *mid-cycle* is ordinary once the month's
-# allowance is spent; that is what a quota is. It only proves something is wrong when it happens
-# in a cycle the fixed arithmetic was sized to fit. September 2026's allowance was burned by the
-# OLD daily sweep before the fix reached the live Lambda, so a 429 anywhere in that cycle says
-# nothing about the new behaviour. Judging against the last reset instead would FAIL on every
-# ordinary day between exhaustion and rollover — the false alarm that makes a check unreadable.
-# Override with --first-clean-cycle when the baseline moves (a plan or cadence change).
-FIRST_CLEAN_CYCLE = date(2026, 9, 22)
+# FIRST_CLEAN_CYCLE — the first quota cycle whose outcome tests the ERR-017 fix — is imported
+# from `core.intake` (its comment says why it is not simply "the last reset"). The digest's
+# intake alert and this check must share ONE baseline. Override with --first-clean-cycle when
+# the baseline moves (a plan or cadence change).
 
 PASS, EXPECTED, WARN, FAIL, UNKNOWN = "PASS", "EXPECTED", "WARN", "FAIL", "UNKNOWN"
 

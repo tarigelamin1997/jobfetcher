@@ -16,9 +16,11 @@ argument passed".
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 import pytest
 
+from jobfetcher.adapters.jsearch_source import STOP_RATE_LIMITED
 from tests.test_db_resume import _PROFILE_YML, _SEARCH_YML
 
 
@@ -285,3 +287,151 @@ def test_a_failed_staleness_read_degrades_instead_of_paging_the_operator(
     assert "PIPELINE_ALARM" not in caplog.text
     assert out["notify"]["days_since_last_digest"] is None   # unknown, and the key still there
     assert "UNKNOWN" in caplog.text
+
+
+# ------------------------------------------------ B-12: the intake alert reaches the digest
+# `core.intake` is pure and tested on its own. These prove the HANDLER feeds it the right
+# evidence — this run's own sweep on a fetch day, the last fetch day's run summaries otherwise —
+# and hands the verdict to notify. 2026-09-22 and 09-25 are fetch days inside the first clean
+# cycle (`toordinal() % 3 == 0`); 09-23 is the day after a sweep.
+CLEAN_FETCH_DAY = "2026-09-25"
+LAST_SWEEP = date(2026, 9, 22)
+DAY_AFTER_SWEEP = "2026-09-23"
+_QUOTA_SPENT = [{"ingest": {"fetch_stopped": STOP_RATE_LIMITED, "fetched": 0}}]
+
+
+class _QuotaSpentSource(_CountingSource):
+    def fetch(self, spec, *, run_id):  # noqa: ARG002
+        self.sweeps += 1
+        self.last_stop_reason = STOP_RATE_LIMITED
+        return iter(())
+
+
+class _FakeAuditStore:
+    """Serves canned run summaries per day, and records which days the handler read."""
+
+    def __init__(self, summaries_by_day=None, *, fail=False):
+        self.summaries_by_day = summaries_by_day or {}
+        self.fail = fail
+        self.read_days: list[date] = []
+
+    def get_run_summaries(self, day):
+        self.read_days.append(day)
+        if self.fail:
+            raise RuntimeError("AccessDenied")
+        return self.summaries_by_day.get(day, [])
+
+    def __getattr__(self, name):
+        if name.startswith("put_"):  # the audit writes are not under test here
+            return lambda *a, **kw: None  # noqa: ARG005
+        raise AttributeError(name)
+
+
+def _wire_digest(monkeypatch, tmp_path, source, *, audit_store):
+    """`_wire`, except the digest has NOT been sent, so the handler reaches notify — replaced by
+    a recorder of exactly what the handler passed it."""
+    pipe = _wire(monkeypatch, tmp_path, source)
+
+    class _Repo:
+        engine = object()
+
+        def upsert_profile(self, **kw):  # noqa: ARG002
+            pass
+
+        def get_profile(self, user_id):  # noqa: ARG002
+            from jobfetcher.core.profile import Profile
+
+            return {"profile": Profile.from_yaml_text(_PROFILE_YML).model_dump()}
+
+        def was_digest_sent(self, **kw):  # noqa: ARG002
+            return False
+
+        def get_last_digest_sent_at(self, **kw):  # noqa: ARG002
+            return None
+
+        def mark_digest_sent(self, **kw):  # noqa: ARG002
+            pass
+
+    import jobfetcher.handlers.capture as capture
+
+    notified: dict = {}
+
+    def _record_notify(**kw):
+        notified.update(kw)
+        return {"surfaced": 0, "below_threshold": 0, "sent": 1, "days_since_last_digest": None}
+
+    monkeypatch.setattr(pipe, "PostgresRepository", lambda url: _Repo())  # noqa: ARG005
+    monkeypatch.setattr(pipe, "S3AuditStore", lambda **kw: audit_store)  # noqa: ARG005
+    monkeypatch.setattr(capture, "build_capture_link", lambda env: None)  # noqa: ARG005
+    monkeypatch.setattr(pipe, "notify", _record_notify)
+    return pipe, notified
+
+
+def test_a_quota_stop_on_a_fetch_day_leads_that_days_digest(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    audit = _FakeAuditStore()
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _QuotaSpentSource(), audit_store=audit)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)
+    assert out["statusCode"] == 200
+    assert out["ingest"]["fetch_stopped"] == STOP_RATE_LIMITED
+    alert = notified["intake_alert"]
+    assert alert is not None and "quota" in alert.what
+    assert audit.read_days == []   # judged from THIS run's sweep — no look-back read
+    assert "INTAKE ALERT" in caplog.text
+
+
+def test_a_healthy_fetch_day_sends_no_intake_alert(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # negative: the sweep searched everything, so the digest must look like an ordinary day.
+    src = _CountingSource()
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, src, audit_store=_FakeAuditStore())
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)
+    assert out["statusCode"] == 200 and src.sweeps == 1
+    assert "intake_alert" in notified and notified["intake_alert"] is None
+    assert "INTAKE ALERT" not in caplog.text
+
+
+def test_the_days_between_sweeps_keep_the_last_sweeps_alert(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # The user's requirement: a banner EVERY day until it is fixed, not only on the sweep day.
+    audit = _FakeAuditStore({LAST_SWEEP: _QUOTA_SPENT})
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _ExplodingSource(), audit_store=audit)
+    out = pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)
+    assert out["statusCode"] == 200
+    assert out["ingest"]["fetch_stopped"] == "not_a_fetch_day"   # no requests today...
+    assert audit.read_days == [LAST_SWEEP]                        # ...so it read the last sweep
+    alert = notified["intake_alert"]
+    assert alert is not None and "quota" in alert.what
+
+
+def test_an_unreadable_last_sweep_sends_the_digest_without_an_alert(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # negative: a read error must neither fail the run nor invent a warning.
+    audit = _FakeAuditStore(fail=True)
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _ExplodingSource(), audit_store=audit)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)
+    assert out["statusCode"] == 200
+    assert "PIPELINE_ALARM" not in caplog.text
+    assert notified["intake_alert"] is None
+    assert "could not determine intake health" in caplog.text
+
+
+def test_no_audit_store_means_no_look_back_and_no_crash(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # No store is already announced where it is constructed ("S3 audit store unavailable"), so
+    # the look-back must skip QUIETLY — not stumble into an AttributeError on None and log a
+    # second, misleading "could not determine intake health".
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _ExplodingSource(), audit_store=None)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)
+    assert out["statusCode"] == 200
+    assert notified["intake_alert"] is None
+    assert "could not determine intake health" not in caplog.text
