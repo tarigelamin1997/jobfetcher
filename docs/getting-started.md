@@ -76,7 +76,7 @@ cp config/search_config.sample.yml config/search_config.local.yml   # your title
 cp config/profile.sample.yml       config/profile.local.yml         # your CV/profile — the scoring source of truth
 ```
 
-> **Free-tier defaults — read this before adding titles or countries.** The sample is sized so JSearch's free tier (**200 requests/month**) lasts the whole month. Every title is searched in every country, on every page, about every 3rd day, so the monthly cost is roughly `titles × countries × pages × 11`. Add more and you can run out mid-month, after which new jobs stop arriving until the monthly reset ([ERR-017](ledgers/errors.md)).
+> **Free-tier defaults — read this before adding titles or countries.** The sample is sized so JSearch's free tier (**200 requests/month**) lasts the whole month. Every title is searched in every country, on every page, about every 3rd day, so the monthly cost is roughly `titles × countries × pages × 11`. Add more and you can run out mid-month, after which new jobs stop arriving until the monthly reset ([ERR-017](ledgers/errors.md)). That figure is for the scheduled runs at the default cadence; every run you trigger by hand on a fetch day spends another sweep's worth.
 >
 > **You're free to change any of it.** Cut something else to stay under 200, or move to a paid RapidAPI plan and raise the budget to match. Change the plan and the numbers together. The arithmetic and the knobs live in one place: the `budget:` block at the bottom of [`config/search_config.sample.yml`](../config/search_config.sample.yml).
 

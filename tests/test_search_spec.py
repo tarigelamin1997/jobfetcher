@@ -257,9 +257,10 @@ def test_unknown_targeting_key_is_loud():
 
 # ── free-tier arithmetic: the sample must actually FIT, not just claim to ───
 # The sample used to carry `# fits free 200/mo` beside `max_pages_per_query: 5` and
-# `request_budget_per_run: 70` — about 700 requests a month, 3.5x the free tier. Anyone copying
-# it would have run out within about a week and hit ERR-017. "Fits the free tier" is only true
-# if something fails when it stops being true; these tests are that something.
+# `request_budget_per_run: 70` — up to ~700-770 requests a month (the per-sweep cap times 10-11
+# sweeps), as much as 3.85x the free tier. Anyone copying it could have run out within the
+# first week or two and hit ERR-017. "Fits the free tier" is only true if something fails when
+# it stops being true; these tests are that something.
 
 
 def _worst_case_monthly_requests(spec: SearchSpec) -> tuple[int, int]:
@@ -321,3 +322,59 @@ def test_a_budget_below_the_sweep_cost_is_caught():
     d["targeting"]["countries"] = ["sa", "ae", "qa", "kw", "bh"]
     d["budget"] = {"max_pages_per_query": 1, "request_budget_per_run": 9}
     assert not _budget_lets_a_full_sweep_complete(SearchSpec.model_validate(d))
+
+
+def test_the_check_uses_the_worst_month_not_the_average():
+    # Examiner (PR #76): swapping ceil(31 / N) for the 30 // N average left every test above
+    # green, because the sample (150 vs 165) and the old-shape negative both sit far from the
+    # 200 line — nothing told "worst month" apart from "average". This spec sits exactly between
+    # them: 4 titles x 5 countries x 1 page = 20 per sweep, which is 200 in an average 10-sweep
+    # month (fits) but 220 in an 11-sweep month (does not). The check must reject it.
+    from jobfetcher.core.ingest import FETCH_EVERY_N_DAYS
+
+    assert FETCH_EVERY_N_DAYS == 3, "this boundary was chosen for cadence 3; recompute it"
+    d = _valid_spec_dict()
+    d["targeting"]["job_titles"] = [
+        "Data Engineer", "Data Platform Engineer", "Data Architect", "Analytics Engineer",
+    ]
+    d["targeting"]["countries"] = ["sa", "ae", "qa", "kw", "bh"]
+    d["budget"] = {"max_pages_per_query": 1, "request_budget_per_run": 20}
+    spec = SearchSpec.model_validate(d)
+    assert _worst_case_monthly_requests(spec) == (220, 200)
+    assert not _fits_free_tier(spec)
+
+
+def _live_cadence_from_terraform(text: str) -> int:
+    """The `JOBFETCHER_FETCH_EVERY_N_DAYS` value set on the Lambda in `terraform/lambda.tf`.
+
+    Exactly one assignment must exist: a moved, renamed or duplicated variable fails loudly
+    instead of letting this check silently stop checking anything."""
+    import re
+
+    matches = re.findall(r'JOBFETCHER_FETCH_EVERY_N_DAYS *= *"([0-9]+)"', text)
+    assert len(matches) == 1, (
+        f"expected exactly one JOBFETCHER_FETCH_EVERY_N_DAYS assignment in lambda.tf, "
+        f"found {len(matches)}"
+    )
+    return int(matches[0])
+
+
+def test_the_live_cadence_in_terraform_matches_the_one_the_arithmetic_uses():
+    # Examiner (PR #76, M1): the free-tier checks above use the build constant
+    # FETCH_EVERY_N_DAYS, but production runs whatever terraform/lambda.tf sets. Change that to
+    # "2" and this sample needs ~240 a month — and every test stayed green, because nothing read
+    # the knob that actually governs the Lambda. This ties the two together.
+    from jobfetcher.core.ingest import FETCH_EVERY_N_DAYS
+
+    tf = (Path(__file__).resolve().parents[1] / "terraform" / "lambda.tf").read_text(
+        encoding="utf-8"
+    )
+    assert _live_cadence_from_terraform(tf) == FETCH_EVERY_N_DAYS
+
+
+def test_a_drifted_terraform_cadence_is_caught():
+    # negative, through the same parser: a live cadence of 2 must not pass as the default of 3.
+    from jobfetcher.core.ingest import FETCH_EVERY_N_DAYS
+
+    drifted = '      JOBFETCHER_FETCH_EVERY_N_DAYS = "2"\n'
+    assert _live_cadence_from_terraform(drifted) != FETCH_EVERY_N_DAYS

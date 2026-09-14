@@ -71,15 +71,22 @@ digest_max_age_days: 90                # recommended: 90
 #
 #   These defaults:  3 titles × 5 countries × 1 page = 15 per sweep  ->  at most 165 a month.
 #
+#   That 165 is for the SCHEDULED runs at the default cadence of 3. Every run you trigger by
+#   hand on a fetch day sweeps again and spends another 15, and a lower cadence spends more
+#   (every 2nd day, this sample needs ~240). The live cadence is JOBFETCHER_FETCH_EVERY_N_DAYS
+#   in terraform/lambda.tf.
+#
 # Pages are the hidden multiplier. The adapter makes one API call per page and each call is one
 # billed request (18 one-page requests a day predicts the quota running out in ~11 days, and the
-# RapidAPI dashboard showed exactly that: ERR-017). So 5 pages instead of 1 multiplies the bill by 5.
+# RapidAPI dashboard showed exactly that: ERR-017). So 5 pages instead of 1 can multiply the bill
+# by up to 5 (less when a search has fewer results than 5 full pages).
 #
 # WANT MORE titles, countries or pages? Either cut something else to stay under 200, or move to a
 # paid RapidAPI plan and raise these numbers to match it. Change the plan and the numbers TOGETHER.
 #
-# Enforced, not just stated: tests/test_search_spec.py fails if this sample stops fitting.
+# Enforced, not just stated: tests/test_search_spec.py fails if this sample stops fitting at the
+# default cadence, or if the live cadence in terraform/lambda.tf drifts away from that default.
 budget:
   max_pages_per_query: 1         # ~10 results per page; each page is one billed request
   request_budget_per_run: 16     # hard ceiling per sweep. Keep it >= titles × countries × pages,
-                                 # or every sweep stops early and reports `budget_exhausted`.
+                                 # or sweeps can stop early and report `budget_exhausted`.
