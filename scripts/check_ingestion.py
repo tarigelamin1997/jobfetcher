@@ -35,8 +35,10 @@ dashboard.
 
 **And the mirror of that, which the first version of this script got wrong.** Having refused to
 cry wolf it could not bark at all: a pipeline returning `statusCode: 500` every day reported
-`OK`. A crashed run writes `{"statusCode": 500, "run_id", "run_date", "error"}` to the same
-`runs/` prefix with **no `ingest` key**, which the pre-#63 branch happily swallowed. That is the
+`OK`. A run that crashes before ingest finishes writes `{"statusCode": 500, "run_id",
+"run_date", "mode", "error"}` to the same `runs/` prefix with **no `ingest` key**, which the
+pre-#63 branch happily swallowed. (Since PR #77 a crash *after* ingest keeps its `ingest`
+block, and the verdict reports that sweep as well.) That is the
 ERR-010 shape (38 days of returned 500s) reproduced inside the tool built to catch it. So the
 FAIL conditions are now:
 
@@ -162,6 +164,19 @@ def verdict(
     status = summary.get("statusCode")
     if status == 500:
         err = summary.get("error", "(no error field)")
+        crashed_ingest = summary.get("ingest")
+        if isinstance(crashed_ingest, dict) and "fetch_stopped" in crashed_ingest:
+            # Since PR #77 a run that crashes AFTER ingest keeps its sweep's verdict. Judge that
+            # sweep with the same ladder rather than claim "nothing fetched — not a quota
+            # question": the digest's intake alert reads this same block, and the two must agree.
+            _, sweep = verdict(
+                {**summary, "statusCode": 200},
+                since=since, not_after=not_after, every_n_days=every_n_days,
+            )
+            return FAIL, (
+                f"{run_date}: the run FAILED after its sweep finished — statusCode 500: {err}. "
+                f"No digest for this run. The sweep itself: {sweep}"
+            )
         return FAIL, (
             f"{run_date}: the run FAILED — statusCode 500: {err}. Nothing fetched, nothing "
             "scored, no digest for this run. Not a quota question — check the CloudWatch logs "

@@ -351,9 +351,9 @@ def _intake_alert_for_digest(
     stop would show on day one and vanish on days two and three, and an alert that comes and
     goes is one the reader learns to dismiss.
 
-    Known limit: the look-back assumes today's cadence was also in force on the last sweep. A
-    cadence change (a Terraform apply — B-13) can miss one cycle. Walking further back was
-    rejected: it would read a crash on a NON-fetch day as a failed search.
+    Known limit: the look-back assumes today's cadence was also in force on the last sweep, so a
+    cadence change (a Terraform apply — B-13) can miss at most one cycle. A walk-back over
+    earlier days could close that, but the case is rare and one cycle long — not worth the code.
 
     Best-effort, like every other digest enhancement here: a failed read logs a warning and
     returns `None`. It never fails the run, and it never MANUFACTURES an alert out of a read

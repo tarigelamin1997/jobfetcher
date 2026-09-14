@@ -158,6 +158,17 @@ def test_a_recorded_early_stop_outranks_a_bare_crash():
     assert alert is not None and "429" in alert.what
 
 
+def test_a_crash_after_choosing_not_to_sweep_is_not_a_failed_search():
+    # Examiner pass 2 (N-A): since PR #77 a crash after ingest keeps its block. A 500 carrying
+    # `not_a_fetch_day` decided not to search, so it must not read as "the job search run failed"
+    # — reachable when the cadence changes and a look-back lands on an old non-fetch day.
+    skipped_then_crashed = {
+        "statusCode": 500, "mode": "", "error": "boom",
+        "ingest": {"fetch_stopped": SKIP_NOT_A_FETCH_DAY, "fetched": 0},
+    }
+    assert problem_on_day([skipped_then_crashed], run_date=CLEAN) is None
+
+
 # ── latest_fetch_day: where a non-fetch day looks back to ─────────────────────────
 @pytest.mark.parametrize("n", [2, 3, 4, 5, 7])
 def test_latest_fetch_day_agrees_with_is_fetch_day_exhaustively(n):

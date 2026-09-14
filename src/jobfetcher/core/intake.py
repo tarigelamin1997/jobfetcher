@@ -116,7 +116,8 @@ def problem_on_day(
 
     1. A healthy sweep that day wins — a successful retry fixed it — so `None`.
     2. Otherwise the first sweep that stopped early is reported.
-    3. Otherwise a daily run that CRASHED is reported, because it never recorded a sweep at all.
+    3. Otherwise a daily run that CRASHED before recording any ingest block is reported: it never
+       reached a sweep at all.
        This is the revoked-key case: the adapter raises on 401/403 and the run returns 500. It
        must be announced here because nothing else will — the digest still goes out on the two
        days between sweeps, so staleness never reaches its threshold, and the returned-500 alarm
@@ -135,7 +136,14 @@ def problem_on_day(
             if alert is None:
                 return None
             problems.append(alert)
-        elif summary.get("statusCode") == 500 and summary.get("mode") not in _NOT_A_SWEEP_RUN:
+        elif (
+            not isinstance(ingest, dict)
+            and summary.get("statusCode") == 500
+            and summary.get("mode") not in _NOT_A_SWEEP_RUN
+        ):
+            # Only a crash that recorded NO ingest block. Since PR #77 a crash after ingest keeps
+            # its block, so a 500 carrying a non-sweep block (`not_a_fetch_day`) decided not to
+            # search at all — announcing it as a failed search would be a false alarm.
             crashed = True
     if problems:
         return problems[0]
