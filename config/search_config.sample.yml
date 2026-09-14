@@ -16,6 +16,8 @@ secret_name: jobfetcher/jsearch  # SecretString JSON: {"api_key": "..."}
 aws_region: us-east-1            # where the secret + all jobfetcher infra live
 
 # ── Targeting — the user fills these (the four fields) ─────────────────────
+# Every title is searched in EVERY country, so each one you add multiplies the request
+# cost. See the free-tier arithmetic in the `budget:` block at the bottom of this file.
 targeting:
   job_titles:                    # -> JSearch `query` text (the role). Must be non-empty.
     - "Data Engineer"
@@ -27,7 +29,6 @@ targeting:
     - qa                         # Qatar
     - kw                         # Kuwait
     - bh                         # Bahrain
-    - om                         # Oman
   cities: []                     # -> gold filter on job_city.  [] = all cities in the country.
   states: []                     # -> gold filter on job_state. [] = none (usually null for GCC).
 
@@ -58,10 +59,34 @@ reassess_max_age_days: 45              # recommended: 45
 # filled, so the email stops resurfacing it forever. 0 = keep forever (no age cutoff). 0..365.
 digest_max_age_days: 90                # recommended: 90
 
-# ── Request-budget guardrails (free Basic = 200 req/mo) ──────────────────
+# ── Request budget — FREE-TIER-SAFE DEFAULTS (JSearch Basic = 200 requests/month) ──
+#
+# These defaults are sized so the FREE tier lasts the WHOLE month. They are not a limit on you:
+# change anything you like. But do the arithmetic first. Go over the quota and the API starts
+# refusing requests, and new jobs stop arriving until the monthly reset (ERR-017).
+#
+#   requests per sweep = job_titles × countries × max_pages_per_query
+#   sweeps per month   = about 10, at most 11 (the sweep runs every 3rd day: FETCH_EVERY_N_DAYS)
+#   requests per month = requests per sweep × 11  ->  must stay at or under 200 on the free tier
+#
+#   These defaults:  3 titles × 5 countries × 1 page = 15 per sweep  ->  at most 165 a month.
+#
+#   That 165 is for the SCHEDULED runs at the default cadence of 3. Every run you trigger by
+#   hand on a fetch day sweeps again and spends another 15, and a lower cadence spends more
+#   (every 2nd day, this sample needs ~240). The live cadence is JOBFETCHER_FETCH_EVERY_N_DAYS
+#   in terraform/lambda.tf.
+#
+# Pages are the hidden multiplier. The adapter makes one API call per page and each call is one
+# billed request (18 one-page requests a day predicts the quota running out in ~11 days, and the
+# RapidAPI dashboard showed exactly that: ERR-017). So 5 pages instead of 1 can multiply the bill
+# by up to 5 (less when a search has fewer results than 5 full pages).
+#
+# WANT MORE titles, countries or pages? Either cut something else to stay under 200, or move to a
+# paid RapidAPI plan and raise these numbers to match it. Change the plan and the numbers TOGETHER.
+#
+# Enforced, not just stated: tests/test_search_spec.py fails if this sample stops fitting at the
+# default cadence, or if the live cadence in terraform/lambda.tf drifts away from that default.
 budget:
-  max_pages_per_query: 5         # ~10 results/page, ~1 request/page
-  request_budget_per_run: 70     # hard ceiling for one sweep (fits free 200/mo)
-
-# Probe-confirm: does num_pages=N bill as N requests or 1?
-# /search has limited pagination depth; /search-v2 uses a cursor for deeper pages.
+  max_pages_per_query: 1         # ~10 results per page; each page is one billed request
+  request_budget_per_run: 16     # hard ceiling per sweep. Keep it >= titles × countries × pages,
+                                 # or sweeps can stop early and report `budget_exhausted`.
