@@ -149,9 +149,10 @@ class _ListingS3:
         assert len(self.list_calls) < 50, "the listing loop did not terminate"
         keys = sorted(k for k in self.objects if k.startswith(kw["Prefix"]))
         start = int(kw.get("ContinuationToken", 0))
-        page: dict[str, Any] = {
-            "Contents": [{"Key": k} for k in keys[start:start + self.page_size]]
-        }
+        chunk = keys[start:start + self.page_size]
+        # Real S3 OMITS `Contents` for an empty listing rather than sending [] — mirror that, so a
+        # reader regressing to `page["Contents"]` fails here instead of in production.
+        page: dict[str, Any] = {"Contents": [{"Key": k} for k in chunk]} if chunk else {}
         if self.truncated_without_token:
             page["IsTruncated"] = True
         elif start + self.page_size < len(keys):

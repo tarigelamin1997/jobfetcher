@@ -15,6 +15,7 @@ argument passed".
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 
@@ -314,12 +315,17 @@ class _FakeAuditStore:
         self.summaries_by_day = summaries_by_day or {}
         self.fail = fail
         self.read_days: list[date] = []
+        self.written: list[dict] = []
 
     def get_run_summaries(self, day):
         self.read_days.append(day)
         if self.fail:
             raise RuntimeError("AccessDenied")
         return self.summaries_by_day.get(day, [])
+
+    def put_run_summary(self, summary):
+        # JSON round-trip, like the real store's S3 object: what a later run reads back.
+        self.written.append(json.loads(json.dumps(summary, default=str)))
 
     def __getattr__(self, name):
         if name.startswith("put_"):  # the audit writes are not under test here
@@ -377,7 +383,7 @@ def test_a_quota_stop_on_a_fetch_day_leads_that_days_digest(
     assert out["statusCode"] == 200
     assert out["ingest"]["fetch_stopped"] == STOP_RATE_LIMITED
     alert = notified["intake_alert"]
-    assert alert is not None and "quota" in alert.what
+    assert alert is not None and "429" in alert.what
     assert audit.read_days == []   # judged from THIS run's sweep — no look-back read
     assert "INTAKE ALERT" in caplog.text
 
@@ -406,7 +412,7 @@ def test_the_days_between_sweeps_keep_the_last_sweeps_alert(
     assert out["ingest"]["fetch_stopped"] == "not_a_fetch_day"   # no requests today...
     assert audit.read_days == [LAST_SWEEP]                        # ...so it read the last sweep
     alert = notified["intake_alert"]
-    assert alert is not None and "quota" in alert.what
+    assert alert is not None and "429" in alert.what
 
 
 def test_an_unreadable_last_sweep_sends_the_digest_without_an_alert(
@@ -435,3 +441,93 @@ def test_no_audit_store_means_no_look_back_and_no_crash(
     assert out["statusCode"] == 200
     assert notified["intake_alert"] is None
     assert "could not determine intake health" not in caplog.text
+
+
+def test_the_look_back_judges_the_sweep_under_the_sweeps_date(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # Examiner S1: judging the look-back under TODAY's date survived mutation. A partial_errors
+    # pointer is where it shows — it must send the reader to the sweep's logs, not to today's run,
+    # which made no requests.
+    partial = [
+        {"ingest": {"fetch_stopped": "partial_errors", "fetch_failed_queries": 2, "fetched": 5}}
+    ]
+    audit = _FakeAuditStore({LAST_SWEEP: partial})
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _ExplodingSource(), audit_store=audit)
+    assert pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)["statusCode"] == 200
+    alert = notified["intake_alert"]
+    assert alert is not None
+    assert LAST_SWEEP.isoformat() in alert.where and DAY_AFTER_SWEEP not in alert.where
+
+
+class _RevokedKeySource(_CountingSource):
+    """What the real adapter does on HTTP 401/403: raise — loudly, by design."""
+
+    def fetch(self, spec, *, run_id):  # noqa: ARG002
+        from jobfetcher.adapters.jsearch_source import SourceError
+
+        raise SourceError("JSearch authentication failed (HTTP 403)")
+
+
+def _sweep_day_then_day_after(
+    monkeypatch, tmp_path, source, *, on_sweep_day=None, sweep_event=None
+):
+    """Run the REAL handler on the sweep day and capture the run summary it writes; then run the
+    day after against exactly that summary. Returns (sweep-day output, day-after intake_alert)."""
+    sweep_store = _FakeAuditStore()
+    pipe, _ = _wire_digest(monkeypatch, tmp_path, source, audit_store=sweep_store)
+    if on_sweep_day is not None:
+        on_sweep_day(pipe)
+    sweep_out = pipe.handler({"run_date": LAST_SWEEP.isoformat(), **(sweep_event or {})}, None)
+
+    next_store = _FakeAuditStore({LAST_SWEEP: sweep_store.written})
+    pipe, notified = _wire_digest(
+        monkeypatch, tmp_path, _ExplodingSource(), audit_store=next_store
+    )
+    assert pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)["statusCode"] == 200
+    return sweep_out, notified["intake_alert"]
+
+
+def test_a_revoked_key_on_the_sweep_day_is_announced_the_day_after(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # Examiner B1. The sweep-day run returns 500 with no sweep recorded; the next two digests
+    # still go out, so staleness never fires. Before the fix: no banner, every cycle.
+    sweep_out, alert = _sweep_day_then_day_after(monkeypatch, tmp_path, _RevokedKeySource())
+    assert sweep_out["statusCode"] == 500
+    assert alert is not None and "failed" in alert.what
+    assert LAST_SWEEP.isoformat() in alert.where
+
+
+def test_a_crash_after_a_quota_stop_keeps_the_quota_verdict(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # Examiner B1, second shape: the sweep recorded `rate_limited`, then scoring crashed. The 500
+    # summary used to drop the ingest block — and with it the only record of the stop.
+    def _boom(*a, **kw):  # noqa: ARG001
+        raise RuntimeError("DatabaseError: connection reset")
+
+    sweep_out, alert = _sweep_day_then_day_after(
+        monkeypatch, tmp_path, _QuotaSpentSource(),
+        on_sweep_day=lambda pipe: monkeypatch.setattr(pipe, "score_gold", _boom),
+    )
+    assert sweep_out["statusCode"] == 500
+    assert sweep_out["ingest"]["fetch_stopped"] == STOP_RATE_LIMITED   # the verdict survived...
+    assert alert is not None and "429" in alert.what                   # ...and reached the digest
+
+
+def test_a_crashed_reassess_on_a_sweep_day_is_not_a_failed_search(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # negative for the crash rule: a manual reassess makes no requests, so its 500 must not be
+    # announced as "the job search run failed". The 500 summary's `mode` is what tells them apart.
+    def _boom(*a, **kw):  # noqa: ARG001
+        raise RuntimeError("reassess blew up")
+
+    sweep_out, alert = _sweep_day_then_day_after(
+        monkeypatch, tmp_path, _ExplodingSource(),
+        on_sweep_day=lambda pipe: monkeypatch.setattr(pipe, "reassess", _boom),
+        sweep_event={"mode": "reassess"},
+    )
+    assert sweep_out["statusCode"] == 500 and sweep_out["mode"] == "reassess"
+    assert alert is None

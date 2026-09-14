@@ -92,8 +92,9 @@ QUOTA_RESET_DAY = 22
 
 # FIRST_CLEAN_CYCLE — the first quota cycle whose outcome tests the ERR-017 fix — is imported
 # from `core.intake` (its comment says why it is not simply "the last reset"). The digest's
-# intake alert and this check must share ONE baseline. Override with --first-clean-cycle when
-# the baseline moves (a plan or cadence change).
+# intake alert and this check must share ONE baseline. `--first-clean-cycle` overrides it for
+# THIS script only — the email keeps the constant — so when the baseline genuinely moves (a plan
+# or cadence change), change the constant in `core/intake.py` rather than reaching for the flag.
 
 PASS, EXPECTED, WARN, FAIL, UNKNOWN = "PASS", "EXPECTED", "WARN", "FAIL", "UNKNOWN"
 

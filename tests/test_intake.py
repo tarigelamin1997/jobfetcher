@@ -35,7 +35,10 @@ def _ingest(stopped, **extra):
 def test_a_rate_limit_in_a_clean_cycle_is_loud_and_points_at_the_dashboard():
     alert = sweep_problem(_ingest(STOP_RATE_LIMITED), run_date=CLEAN)
     assert isinstance(alert, IntakeAlert)
-    assert "quota" in alert.what and "RapidAPI dashboard" in alert.where
+    assert "HTTP 429" in alert.what and "RapidAPI dashboard" in alert.where
+    # Any 429 is recorded as rate_limited — the quota or a short rate cap — so the text names the
+    # refusal it knows about and the LIKELY cause, never a certainty it does not have.
+    assert "used up" not in alert.what
 
 
 def test_a_rate_limit_in_the_legacy_cycle_is_silent():
@@ -119,13 +122,40 @@ def test_a_successful_retry_the_same_day_clears_the_alert_in_either_order(order)
 
 def test_a_failed_sweep_with_no_successful_retry_is_reported():
     alert = problem_on_day([_BAD, _CRASHED], run_date=CLEAN)
-    assert alert is not None and "quota" in alert.what
+    assert alert is not None and "429" in alert.what
 
 
-@pytest.mark.parametrize("summaries", [[], [_CRASHED], ["junk", 42]])
-def test_a_day_with_no_recorded_sweep_is_unknown_not_alarming(summaries):
-    # A crashed run is announced by the returned-500 alarm; this rule does not guess about it.
+_REASSESS_CRASHED = {"statusCode": 500, "mode": "reassess", "error": "boom"}
+
+
+@pytest.mark.parametrize(
+    "summaries", [[], ["junk", 42], [_REASSESS_CRASHED]], ids=["empty", "junk", "reassess-crash"]
+)
+def test_a_day_with_nothing_bearing_on_intake_is_silent(summaries):
     assert problem_on_day(summaries, run_date=CLEAN) is None
+
+
+@pytest.mark.parametrize(
+    # `""` is what the handler really writes for the daily run: `resolve_mode` defaults to it.
+    "crash", [_CRASHED, {**_CRASHED, "mode": ""}], ids=["pre-77-build", "daily-run"]
+)
+def test_a_crashed_daily_run_on_a_fetch_day_is_announced(crash):
+    # Examiner B1: a revoked key makes the adapter raise, the run returns 500, and no sweep is
+    # ever recorded. Treating that as "unknown" left the next two digests silent, every cycle.
+    alert = problem_on_day([crash], run_date=CLEAN)
+    assert alert is not None and "failed" in alert.what
+    assert CLEAN.isoformat() in alert.where
+
+
+@pytest.mark.parametrize("order", [[_CRASHED, _OK], [_OK, _CRASHED]], ids=["crash-first", "ok-first"])
+def test_a_successful_retry_clears_a_crash_in_either_order(order):
+    assert problem_on_day(order, run_date=CLEAN) is None
+
+
+def test_a_recorded_early_stop_outranks_a_bare_crash():
+    # The specific cause beats "the run failed", whichever summary sorts first.
+    alert = problem_on_day([_CRASHED, _BAD], run_date=CLEAN)
+    assert alert is not None and "429" in alert.what
 
 
 # ── latest_fetch_day: where a non-fetch day looks back to ─────────────────────────

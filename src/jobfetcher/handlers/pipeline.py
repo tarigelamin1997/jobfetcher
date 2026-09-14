@@ -346,9 +346,14 @@ def _intake_alert_for_digest(
     succeeds, not only on the day it failed.
 
     On a fetch day the answer is this run's own sweep. On the days between sweeps this run made
-    no requests to judge, so the answer is the LAST fetch day's recorded run summaries: without
-    that look-back a quota stop would show on day one and vanish on days two and three, and an
-    alert that comes and goes is one the reader learns to dismiss.
+    no requests to judge, so the answer is the LAST fetch day's recorded run summaries — how its
+    sweep ended, or that its run crashed before recording one: without that look-back a quota
+    stop would show on day one and vanish on days two and three, and an alert that comes and
+    goes is one the reader learns to dismiss.
+
+    Known limit: the look-back assumes today's cadence was also in force on the last sweep. A
+    cadence change (a Terraform apply — B-13) can miss one cycle. Walking further back was
+    rejected: it would read a crash on a NON-fetch day as a failed search.
 
     Best-effort, like every other digest enhancement here: a failed read logs a warning and
     returns `None`. It never fails the run, and it never MANUFACTURES an alert out of a read
@@ -400,6 +405,9 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         # persist the run summary even when a stage fails before the store is built — and can
         # never hit UnboundLocalError. Stays None through smoke mode (no audit side effects).
         audit_store: S3AuditStore | None = None
+        # Bound here for the same reason: a run that crashes AFTER ingest must still record how
+        # its sweep ended, or the next two digests cannot announce it (Examiner B1, PR #77).
+        ingest_counts: dict[str, Any] | None = None
         env = dict(os.environ)
 
         # --- smoke mode (deploy gate): prove the Lambda reaches the DB AND the schema is at
@@ -711,12 +719,19 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         # never cries wolf. `mode` is resolved above, before the try, so it's always bound here.
         if mode not in ("smoke", "reassess"):
             rlog.error("PIPELINE_ALARM: unattended run returned statusCode=500")
-        error_summary = {
+        error_summary: dict[str, Any] = {
             "statusCode": 500,
             "run_id": run_id,
             "run_date": run_date.isoformat(),
+            # `mode` lets a reader tell a crashed daily run from a crashed manual reassess — the
+            # intake alert counts only the former as a failed sweep.
+            "mode": mode,
             "error": f"{type(exc).__name__}: {exc}",
         }
+        if ingest_counts is not None:
+            # The sweep finished before the crash: keep its verdict. Dropping it turned a quota
+            # stop followed by a DB error into three days without a banner (Examiner B1).
+            error_summary["ingest"] = ingest_counts
         if audit_store is not None:
             audit_store.put_run_summary(error_summary)  # non-fatal — the failed run's record
         return error_summary

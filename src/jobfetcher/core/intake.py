@@ -79,9 +79,11 @@ def sweep_problem(
     if stopped == STOP_RATE_LIMITED:
         if run_date < since:
             return None  # legacy cycle: the pre-fix daily sweep spent this quota, expected
+        # "Refused (HTTP 429)", not "quota used up": the adapter records ANY 429 — the monthly
+        # quota or a short rate cap — so the banner states what is known and the LIKELY cause.
         return IntakeAlert(
-            "Intake stopped: JSearch monthly quota used up",
-            "Check usage on the RapidAPI dashboard",
+            "JSearch refused requests (HTTP 429)",
+            "Likely the monthly quota: check usage on the RapidAPI dashboard",
         )
     if stopped == STOP_BUDGET_EXHAUSTED:
         return IntakeAlert(
@@ -102,23 +104,46 @@ def sweep_problem(
     )
 
 
+# Runs in these modes are not the daily sweep, so their crashes say nothing about intake.
+_NOT_A_SWEEP_RUN = frozenset({"reassess", "smoke"})
+
+
 def problem_on_day(
     summaries: list[Any], *, run_date: date, since: date = FIRST_CLEAN_CYCLE
 ) -> IntakeAlert | None:
-    """Fold every run summary written for ONE date. A healthy sweep that day wins — a successful
-    retry fixed it — otherwise the first problem is reported. No sweep recorded at all gives
-    `None`: a crashed run writes no ingest block, and announcing THAT is the returned-500
-    alarm's job, not this one's."""
+    """Fold every run summary written for ONE fetch day (the handler calls this only for a day
+    the cadence says was a fetch day). In order of precedence:
+
+    1. A healthy sweep that day wins — a successful retry fixed it — so `None`.
+    2. Otherwise the first sweep that stopped early is reported.
+    3. Otherwise a daily run that CRASHED is reported, because it never recorded a sweep at all.
+       This is the revoked-key case: the adapter raises on 401/403 and the run returns 500. It
+       must be announced here because nothing else will — the digest still goes out on the two
+       days between sweeps, so staleness never reaches its threshold, and the returned-500 alarm
+       is the signal INV-004 found ignored (Examiner B1, PR #77).
+    4. Nothing recorded, or only non-sweep runs (a crashed reassess): `None`. A 500 summary from
+       a build older than PR #77 carries no `mode` and is treated as a daily run."""
+    day = run_date.isoformat()
     problems: list[IntakeAlert] = []
+    crashed = False
     for summary in summaries:
-        ingest = summary.get("ingest") if isinstance(summary, dict) else None
-        if not is_sweep(ingest):
+        if not isinstance(summary, dict):
             continue
-        alert = sweep_problem(ingest, run_date=run_date, since=since)
-        if alert is None:
-            return None
-        problems.append(alert)
-    return problems[0] if problems else None
+        ingest = summary.get("ingest")
+        if is_sweep(ingest):
+            alert = sweep_problem(ingest, run_date=run_date, since=since)
+            if alert is None:
+                return None
+            problems.append(alert)
+        elif summary.get("statusCode") == 500 and summary.get("mode") not in _NOT_A_SWEEP_RUN:
+            crashed = True
+    if problems:
+        return problems[0]
+    if crashed:
+        return IntakeAlert(
+            f"The {day} job search run failed", f"Check the CloudWatch logs for the {day} run"
+        )
+    return None
 
 
 def latest_fetch_day(on_or_before: date, *, every_n_days: int) -> date | None:
