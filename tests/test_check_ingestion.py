@@ -225,8 +225,9 @@ def test_after_the_test_cycle_starts_a_stale_raw_prefix_says_so_plainly(monkeypa
 
 
 def _crashed(run_date: str, error: str = "OperationalError: could not connect"):
-    """Exactly the shape `handlers/pipeline.py` writes on a stage failure — statusCode 500 and
-    NO `ingest` key, to the same runs/ prefix a healthy run uses."""
+    """The shape `handlers/pipeline.py` writes when a stage fails BEFORE ingest finishes —
+    statusCode 500 and NO `ingest` key, to the same runs/ prefix a healthy run uses. (Since PR #77
+    a crash AFTER ingest also carries `mode` and its `ingest` block — see the tests below.)"""
     return {"statusCode": 500, "run_id": "deadbeef", "run_date": run_date, "error": error}
 
 
@@ -239,6 +240,38 @@ def test_a_crashed_run_is_a_FAIL_not_an_unknown_old_build():
     assert level == ci.FAIL
     assert "statusCode 500" in msg
     assert "predates PR #63" not in msg  # the misdiagnosis must be gone
+
+
+def test_a_crash_after_a_clean_cycle_quota_stop_still_reports_the_quota_stop():
+    # Examiner pass 2 (S3). Since PR #77 the 500 summary keeps its sweep's ingest block. The
+    # digest reports that 429; this check said "Nothing fetched ... Not a quota question" — so the
+    # one verdict deploy.md §2b runs it for was never printed. The level stays FAIL: the run died.
+    crashed = {**_crashed("2026-09-25"), "mode": "",
+               "ingest": {"fetch_stopped": ci.STOP_RATE_LIMITED, "fetched": 0}}
+    level, msg = ci.verdict(crashed, since=date(2026, 9, 22))
+    assert level == ci.FAIL
+    assert "statusCode 500" in msg and "rate-limited" in msg and "ERR-017" in msg
+    assert "Not a quota question" not in msg and "Nothing fetched" not in msg
+
+
+def test_a_crash_after_a_healthy_sweep_does_not_claim_nothing_was_fetched():
+    # negative pair: postings landed, then scoring died. FAIL, but not "nothing fetched".
+    crashed = {**_crashed("2026-09-25"), "mode": "",
+               "ingest": {"fetch_stopped": None, "fetched": 14}}
+    level, msg = ci.verdict(crashed, since=date(2026, 9, 22))
+    assert level == ci.FAIL
+    assert "statusCode 500" in msg and "Nothing fetched" not in msg
+
+
+def test_a_crash_on_a_non_fetch_day_is_a_plain_failure_not_a_finished_sweep():
+    # CodeRabbit on 472cad8: a 500 carrying `not_a_fetch_day` took the "after its sweep finished"
+    # branch — but no sweep ran that day. It stays FAIL (the run returned 500, which is a failure
+    # on any day), with the plain crash message instead.
+    crashed = {**_crashed("2026-09-26"), "mode": "",
+               "ingest": {"fetch_stopped": ci.SKIP_NOT_A_FETCH_DAY, "fetched": 0}}
+    level, msg = ci.verdict(crashed, since=date(2026, 9, 22))
+    assert level == ci.FAIL
+    assert "statusCode 500" in msg and "after its sweep finished" not in msg
     # The ERR-010 framing deliberately does NOT live here — one 500 is a fact, a streak is the
     # pattern. See `failure_streak` and its test; a per-run message that shouts "38 days!" at a
     # single Aurora resume is a check people learn to discount.

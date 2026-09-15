@@ -15,10 +15,13 @@ argument passed".
 """
 from __future__ import annotations
 
+import json
 import logging
+from datetime import date
 
 import pytest
 
+from jobfetcher.adapters.jsearch_source import STOP_RATE_LIMITED
 from tests.test_db_resume import _PROFILE_YML, _SEARCH_YML
 
 
@@ -285,3 +288,293 @@ def test_a_failed_staleness_read_degrades_instead_of_paging_the_operator(
     assert "PIPELINE_ALARM" not in caplog.text
     assert out["notify"]["days_since_last_digest"] is None   # unknown, and the key still there
     assert "UNKNOWN" in caplog.text
+
+
+# ------------------------------------------------ B-12: the intake alert reaches the digest
+# `core.intake` is pure and tested on its own. These prove the HANDLER feeds it the right
+# evidence — this run's own sweep on a fetch day, the last fetch day's run summaries otherwise —
+# and hands the verdict to notify. 2026-09-22 and 09-25 are fetch days inside the first clean
+# cycle (`toordinal() % 3 == 0`); 09-23 is the day after a sweep.
+CLEAN_FETCH_DAY = "2026-09-25"
+LAST_SWEEP = date(2026, 9, 22)
+DAY_AFTER_SWEEP = "2026-09-23"
+_QUOTA_SPENT = [{"ingest": {"fetch_stopped": STOP_RATE_LIMITED, "fetched": 0}}]
+
+
+class _QuotaSpentSource(_CountingSource):
+    def fetch(self, spec, *, run_id):  # noqa: ARG002
+        self.sweeps += 1
+        self.last_stop_reason = STOP_RATE_LIMITED
+        return iter(())
+
+
+class _FakeAuditStore:
+    """Serves canned run summaries per day, and records which days the handler read."""
+
+    def __init__(self, summaries_by_day=None, *, fail=False):
+        self.summaries_by_day = summaries_by_day or {}
+        self.fail = fail
+        self.read_days: list[date] = []
+        self.written: list[dict] = []
+
+    def get_run_summaries(self, day):
+        self.read_days.append(day)
+        if self.fail:
+            raise RuntimeError("AccessDenied")
+        return self.summaries_by_day.get(day, [])
+
+    def put_run_summary(self, summary):
+        # JSON round-trip, like the real store's S3 object: what a later run reads back.
+        self.written.append(json.loads(json.dumps(summary, default=str)))
+
+    def __getattr__(self, name):
+        if name.startswith("put_"):  # the audit writes are not under test here
+            return lambda *a, **kw: None  # noqa: ARG005
+        raise AttributeError(name)
+
+
+def _wire_digest(monkeypatch, tmp_path, source, *, audit_store):
+    """`_wire`, except the digest has NOT been sent, so the handler reaches notify — replaced by
+    a recorder of exactly what the handler passed it."""
+    pipe = _wire(monkeypatch, tmp_path, source)
+
+    class _Repo:
+        engine = object()
+
+        def upsert_profile(self, **kw):  # noqa: ARG002
+            pass
+
+        def get_profile(self, user_id):  # noqa: ARG002
+            from jobfetcher.core.profile import Profile
+
+            return {"profile": Profile.from_yaml_text(_PROFILE_YML).model_dump()}
+
+        def was_digest_sent(self, **kw):  # noqa: ARG002
+            return False
+
+        def get_last_digest_sent_at(self, **kw):  # noqa: ARG002
+            return None
+
+        def mark_digest_sent(self, **kw):  # noqa: ARG002
+            pass
+
+    import jobfetcher.handlers.capture as capture
+
+    notified: dict = {}
+
+    def _record_notify(**kw):
+        notified.update(kw)
+        return {"surfaced": 0, "below_threshold": 0, "sent": 1, "days_since_last_digest": None}
+
+    monkeypatch.setattr(pipe, "PostgresRepository", lambda url: _Repo())  # noqa: ARG005
+    monkeypatch.setattr(pipe, "S3AuditStore", lambda **kw: audit_store)  # noqa: ARG005
+    monkeypatch.setattr(capture, "build_capture_link", lambda env: None)  # noqa: ARG005
+    monkeypatch.setattr(pipe, "notify", _record_notify)
+    return pipe, notified
+
+
+def test_a_quota_stop_on_a_fetch_day_leads_that_days_digest(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    audit = _FakeAuditStore()
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _QuotaSpentSource(), audit_store=audit)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)
+    assert out["statusCode"] == 200
+    assert out["ingest"]["fetch_stopped"] == STOP_RATE_LIMITED
+    alert = notified["intake_alert"]
+    assert alert is not None and "429" in alert.what
+    # A problem on a fetch day is folded with today's earlier summaries (none here): one read.
+    assert audit.read_days == [date.fromisoformat(CLEAN_FETCH_DAY)]
+    assert "INTAKE ALERT" in caplog.text
+
+
+def test_a_healthy_fetch_day_sends_no_intake_alert(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # negative: the sweep searched everything, so the digest must look like an ordinary day.
+    src = _CountingSource()
+    audit = _FakeAuditStore()
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, src, audit_store=audit)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)
+    assert out["statusCode"] == 200 and src.sweeps == 1
+    assert "intake_alert" in notified and notified["intake_alert"] is None
+    assert audit.read_days == []   # a healthy sweep costs no S3 read
+    assert "INTAKE ALERT" not in caplog.text
+
+
+def test_the_days_between_sweeps_keep_the_last_sweeps_alert(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # The user's requirement: a banner EVERY day until it is fixed, not only on the sweep day.
+    audit = _FakeAuditStore({LAST_SWEEP: _QUOTA_SPENT})
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _ExplodingSource(), audit_store=audit)
+    out = pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)
+    assert out["statusCode"] == 200
+    assert out["ingest"]["fetch_stopped"] == "not_a_fetch_day"   # no requests today...
+    assert audit.read_days == [LAST_SWEEP]                        # ...so it read the last sweep
+    alert = notified["intake_alert"]
+    assert alert is not None and "429" in alert.what
+
+
+def test_an_unreadable_last_sweep_sends_the_digest_without_an_alert(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # negative: a read error must neither fail the run nor invent a warning.
+    audit = _FakeAuditStore(fail=True)
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _ExplodingSource(), audit_store=audit)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)
+    assert out["statusCode"] == 200
+    assert "PIPELINE_ALARM" not in caplog.text
+    assert notified["intake_alert"] is None
+    assert "could not determine intake health" in caplog.text
+
+
+def test_no_audit_store_means_no_look_back_and_no_crash(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # No store is already announced where it is constructed ("S3 audit store unavailable"), so
+    # the look-back must skip QUIETLY — not stumble into an AttributeError on None and log a
+    # second, misleading "could not determine intake health".
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _ExplodingSource(), audit_store=None)
+    with caplog.at_level("WARNING"):
+        out = pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)
+    assert out["statusCode"] == 200
+    assert notified["intake_alert"] is None
+    assert "could not determine intake health" not in caplog.text
+
+
+def test_the_look_back_judges_the_sweep_under_the_sweeps_date(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # Examiner S1: judging the look-back under TODAY's date survived mutation. A partial_errors
+    # pointer is where it shows — it must send the reader to the sweep's logs, not to today's run,
+    # which made no requests.
+    partial = [
+        {"ingest": {"fetch_stopped": "partial_errors", "fetch_failed_queries": 2, "fetched": 5}}
+    ]
+    audit = _FakeAuditStore({LAST_SWEEP: partial})
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _ExplodingSource(), audit_store=audit)
+    assert pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)["statusCode"] == 200
+    alert = notified["intake_alert"]
+    assert alert is not None
+    assert LAST_SWEEP.isoformat() in alert.where and DAY_AFTER_SWEEP not in alert.where
+
+
+class _RevokedKeySource(_CountingSource):
+    """What the real adapter does on HTTP 401/403: raise — loudly, by design."""
+
+    def fetch(self, spec, *, run_id):  # noqa: ARG002
+        from jobfetcher.adapters.jsearch_source import SourceError
+
+        raise SourceError("JSearch authentication failed (HTTP 403)")
+
+
+def _sweep_day_then_day_after(
+    monkeypatch, tmp_path, source, *, on_sweep_day=None, sweep_event=None
+):
+    """Run the REAL handler on the sweep day and capture the run summary it writes; then run the
+    day after against exactly that summary. Returns (sweep-day output, day-after intake_alert)."""
+    sweep_store = _FakeAuditStore()
+    pipe, _ = _wire_digest(monkeypatch, tmp_path, source, audit_store=sweep_store)
+    if on_sweep_day is not None:
+        on_sweep_day(pipe)
+    sweep_out = pipe.handler({"run_date": LAST_SWEEP.isoformat(), **(sweep_event or {})}, None)
+
+    next_store = _FakeAuditStore({LAST_SWEEP: sweep_store.written})
+    pipe, notified = _wire_digest(
+        monkeypatch, tmp_path, _ExplodingSource(), audit_store=next_store
+    )
+    assert pipe.handler({"run_date": DAY_AFTER_SWEEP}, None)["statusCode"] == 200
+    return sweep_out, notified["intake_alert"]
+
+
+def test_a_revoked_key_on_the_sweep_day_is_announced_the_day_after(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # Examiner B1. The sweep-day run returns 500 with no sweep recorded; the next two digests
+    # still go out, so staleness never fires. Before the fix: no banner, every cycle.
+    sweep_out, alert = _sweep_day_then_day_after(monkeypatch, tmp_path, _RevokedKeySource())
+    assert sweep_out["statusCode"] == 500
+    assert alert is not None and "failed" in alert.what
+    assert LAST_SWEEP.isoformat() in alert.where
+
+
+def test_a_crash_after_a_quota_stop_keeps_the_quota_verdict(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # Examiner B1, second shape: the sweep recorded `rate_limited`, then scoring crashed. The 500
+    # summary used to drop the ingest block — and with it the only record of the stop.
+    def _boom(*a, **kw):  # noqa: ARG001
+        raise RuntimeError("DatabaseError: connection reset")
+
+    sweep_out, alert = _sweep_day_then_day_after(
+        monkeypatch, tmp_path, _QuotaSpentSource(),
+        on_sweep_day=lambda pipe: monkeypatch.setattr(pipe, "score_gold", _boom),
+    )
+    assert sweep_out["statusCode"] == 500
+    assert sweep_out["ingest"]["fetch_stopped"] == STOP_RATE_LIMITED   # the verdict survived...
+    assert alert is not None and "429" in alert.what                   # ...and reached the digest
+
+
+def test_a_crashed_reassess_on_a_sweep_day_is_not_a_failed_search(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # negative for the crash rule: a manual reassess makes no requests, so its 500 must not be
+    # announced as "the job search run failed". The 500 summary's `mode` is what tells them apart.
+    def _boom(*a, **kw):  # noqa: ARG001
+        raise RuntimeError("reassess blew up")
+
+    sweep_out, alert = _sweep_day_then_day_after(
+        monkeypatch, tmp_path, _ExplodingSource(),
+        on_sweep_day=lambda pipe: monkeypatch.setattr(pipe, "reassess", _boom),
+        sweep_event={"mode": "reassess"},
+    )
+    assert sweep_out["statusCode"] == 500 and sweep_out["mode"] == "reassess"
+    assert alert is None
+
+
+# ------------------------------------------------ a retry on a fetch day (CodeRabbit on 472cad8)
+_TODAY = date.fromisoformat(CLEAN_FETCH_DAY)
+
+
+def test_a_retry_after_an_earlier_clean_sweep_today_does_not_alert(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # An earlier run today swept cleanly, then crashed (its 500 summary keeps the healthy block).
+    # The retry sweeps again and gets a 429 — plausibly because the first sweep spent the
+    # requests. Intake is fine, and tomorrow's look-back clears it, so it must not flash up today.
+    earlier = [{"statusCode": 500, "mode": "", "ingest": {"fetch_stopped": None, "fetched": 12}}]
+    audit = _FakeAuditStore({_TODAY: earlier})
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _QuotaSpentSource(), audit_store=audit)
+    assert pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)["statusCode"] == 200
+    assert audit.read_days == [_TODAY]
+    assert notified["intake_alert"] is None
+
+
+def test_a_retry_whose_earlier_run_never_swept_still_alerts(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # negative: the earlier run crashed before ingest, so nothing swept today — the 429 stands.
+    earlier = [{"statusCode": 500, "mode": "", "error": "OperationalError: could not connect"}]
+    audit = _FakeAuditStore({_TODAY: earlier})
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _QuotaSpentSource(), audit_store=audit)
+    assert pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)["statusCode"] == 200
+    alert = notified["intake_alert"]
+    assert alert is not None and "429" in alert.what
+
+
+def test_an_unreadable_day_on_a_fetch_day_keeps_this_runs_own_verdict(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # If today's earlier summaries cannot be read, judge this run alone: its 429 is known
+    # information, and dropping it would be the silent failure this feature exists to end.
+    audit = _FakeAuditStore(fail=True)
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _QuotaSpentSource(), audit_store=audit)
+    with caplog.at_level("WARNING"):
+        assert pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)["statusCode"] == 200
+    alert = notified["intake_alert"]
+    assert alert is not None and "429" in alert.what
+    assert "judging this run alone" in caplog.text

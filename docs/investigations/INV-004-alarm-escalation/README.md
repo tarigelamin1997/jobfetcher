@@ -85,7 +85,7 @@ A second SNS topic for escalations only (SMS, or an address that is not the same
 
 > **Recommended stopping point: rung 1.** It is `src`-only, uses a port method that already exists, needs no AWS change, and puts the signal in the one channel with a proven read rate. Rung 2 should be judged *after* rung 1 has run for a while — adding infra to fix an attention problem is what this dossier exists to warn against.
 
-**Explicitly sequenced before [B-12](../../ledgers/backlog.md):** the "green but empty" alarm is a good idea and should be built **after** escalation exists, not before. Added to today's system it becomes a fourth identical email in an inbox that has already ignored 29.
+**Explicitly sequenced before [B-12](../../ledgers/backlog.md):** the "green but empty" alarm is a good idea and should be built **after** escalation exists, not before. Added to today's system it becomes a fourth identical email in an inbox that has already ignored 29. **2026-09-14:** B-12 was built _without_ an alarm — as a one-line intake alert inside the digest, beside rung 1's staleness banner — so it adds no new email and no new channel.
 
 ## Validation gate
 
@@ -100,7 +100,7 @@ Behavioral, with a negative case. The negative case is the one that matters: an 
 
 ## Out of scope / rejected
 
-- **Adding the B-12 "green but empty" alarm now.** Deferred on this dossier's own evidence — sequence it after escalation.
+- **Adding the B-12 "green but empty" alarm now.** Deferred on this dossier's own evidence — sequence it after escalation. _(Still deferred: B-12's announcement was built into the digest instead, 2026-09-14.)_
 - **Changing the three existing alarms' thresholds/dimensions.** They work. The audit found no misconfiguration.
 - **Deleting or muting the `returned-500` alarm** because it was noisy. It was *correct*. The noise was the absence of escalation, not the alarm.
 - **A per-failure-mode alarm set.** Enumerating failure modes in advance is what missed ERR-017 entirely; one outcome-based signal (did a digest reach the human?) covers modes nobody has thought of.

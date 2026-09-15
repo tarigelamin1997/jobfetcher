@@ -80,6 +80,37 @@ class S3AuditStore:
             "application/json",
         )
 
+    # ------------------------------------------------------------------ reader (the intake alert)
+    def get_run_summaries(self, day: date) -> list[dict[str, Any]]:
+        """Every run summary written for `day` (`runs/{day}/*.json`), in key order, as dicts.
+
+        The one READ on this store, and deliberately NOT guarded like the writes: it raises on a
+        listing or read failure so the caller decides what an unreadable day means (the handler
+        treats it as "no intake alert" — a read error must never manufacture a warning). Bodies
+        that parse but are not JSON objects are skipped, and only `.json` keys count: a console
+        folder placeholder is not a summary. The Lambda role already holds `s3:ListBucket` and
+        `s3:GetObject` on this bucket (`terraform/iam.tf`), so this needs no IAM change."""
+        prefix = f"runs/{day.isoformat()}/"
+        keys: list[str] = []
+        token: str | None = None
+        while True:
+            kw: dict[str, Any] = {"Bucket": self._bucket, "Prefix": prefix}
+            if token:
+                kw["ContinuationToken"] = token
+            page = self._client.list_objects_v2(**kw)
+            keys += [o["Key"] for o in page.get("Contents", []) if o["Key"].endswith(".json")]
+            token = page.get("NextContinuationToken")
+            # Truncated-without-a-token must END the loop, not re-list page one forever.
+            if not page.get("IsTruncated") or not token:
+                break
+        summaries: list[dict[str, Any]] = []
+        for key in sorted(keys):
+            body = self._client.get_object(Bucket=self._bucket, Key=key)["Body"].read()
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                summaries.append(payload)
+        return summaries
+
     # ------------------------------------------------------------------ internals
     def _put_jsonl(self, prefix: str, records: list[dict[str, Any]]) -> str | None:
         """Batch `records` into one newline-delimited-JSON object. An **empty** batch writes

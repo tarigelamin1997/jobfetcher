@@ -35,8 +35,10 @@ dashboard.
 
 **And the mirror of that, which the first version of this script got wrong.** Having refused to
 cry wolf it could not bark at all: a pipeline returning `statusCode: 500` every day reported
-`OK`. A crashed run writes `{"statusCode": 500, "run_id", "run_date", "error"}` to the same
-`runs/` prefix with **no `ingest` key**, which the pre-#63 branch happily swallowed. That is the
+`OK`. A run that crashes before ingest finishes writes `{"statusCode": 500, "run_id",
+"run_date", "mode", "error"}` to the same `runs/` prefix with **no `ingest` key**, which the
+pre-#63 branch happily swallowed. (Since PR #77 a crash *after* ingest keeps its `ingest`
+block, and the verdict reports that sweep as well.) That is the
 ERR-010 shape (38 days of returned 500s) reproduced inside the tool built to catch it. So the
 FAIL conditions are now:
 
@@ -81,6 +83,7 @@ from jobfetcher.core.ingest import (  # noqa: E402
     SOURCE_MONTHLY_QUOTA,
     is_fetch_day,
 )
+from jobfetcher.core.intake import FIRST_CLEAN_CYCLE  # noqa: E402
 
 _BUCKET_ENV = "JOBFETCHER_DATA_BUCKET"
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -89,17 +92,11 @@ _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # the S3 audit trail showed a two-month cycle resetting on the 22nd and the dashboard agreed.
 QUOTA_RESET_DAY = 22
 
-# The first quota cycle running ENTIRELY on the fixed cadence — the first whose outcome actually
-# tests the ERR-017 capacity fix.
-#
-# WHY NOT SIMPLY "THE LAST RESET". Being rate-limited *mid-cycle* is ordinary once the month's
-# allowance is spent; that is what a quota is. It only proves something is wrong when it happens
-# in a cycle the fixed arithmetic was sized to fit. September 2026's allowance was burned by the
-# OLD daily sweep before the fix reached the live Lambda, so a 429 anywhere in that cycle says
-# nothing about the new behaviour. Judging against the last reset instead would FAIL on every
-# ordinary day between exhaustion and rollover — the false alarm that makes a check unreadable.
-# Override with --first-clean-cycle when the baseline moves (a plan or cadence change).
-FIRST_CLEAN_CYCLE = date(2026, 9, 22)
+# FIRST_CLEAN_CYCLE — the first quota cycle whose outcome tests the ERR-017 fix — is imported
+# from `core.intake` (its comment says why it is not simply "the last reset"). The digest's
+# intake alert and this check must share ONE baseline. `--first-clean-cycle` overrides it for
+# THIS script only — the email keeps the constant — so when the baseline genuinely moves (a plan
+# or cadence change), change the constant in `core/intake.py` rather than reaching for the flag.
 
 PASS, EXPECTED, WARN, FAIL, UNKNOWN = "PASS", "EXPECTED", "WARN", "FAIL", "UNKNOWN"
 
@@ -167,6 +164,25 @@ def verdict(
     status = summary.get("statusCode")
     if status == 500:
         err = summary.get("error", "(no error field)")
+        crashed_ingest = summary.get("ingest")
+        # A crash on a day that decided NOT to sweep has no sweep to report, so it takes the plain
+        # message below — still FAIL, because a returned 500 is a failure on any day.
+        if (
+            isinstance(crashed_ingest, dict)
+            and "fetch_stopped" in crashed_ingest
+            and crashed_ingest.get("fetch_stopped") != SKIP_NOT_A_FETCH_DAY
+        ):
+            # Since PR #77 a run that crashes AFTER ingest keeps its sweep's verdict. Judge that
+            # sweep with the same ladder rather than claim "nothing fetched — not a quota
+            # question": the digest's intake alert reads this same block, and the two must agree.
+            _, sweep = verdict(
+                {**summary, "statusCode": 200},
+                since=since, not_after=not_after, every_n_days=every_n_days,
+            )
+            return FAIL, (
+                f"{run_date}: the run FAILED after its sweep finished — statusCode 500: {err}. "
+                f"No digest for this run. The sweep itself: {sweep}"
+            )
         return FAIL, (
             f"{run_date}: the run FAILED — statusCode 500: {err}. Nothing fetched, nothing "
             "scored, no digest for this run. Not a quota question — check the CloudWatch logs "
