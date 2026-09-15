@@ -165,7 +165,13 @@ def verdict(
     if status == 500:
         err = summary.get("error", "(no error field)")
         crashed_ingest = summary.get("ingest")
-        if isinstance(crashed_ingest, dict) and "fetch_stopped" in crashed_ingest:
+        # A crash on a day that decided NOT to sweep has no sweep to report, so it takes the plain
+        # message below — still FAIL, because a returned 500 is a failure on any day.
+        if (
+            isinstance(crashed_ingest, dict)
+            and "fetch_stopped" in crashed_ingest
+            and crashed_ingest.get("fetch_stopped") != SKIP_NOT_A_FETCH_DAY
+        ):
             # Since PR #77 a run that crashes AFTER ingest keeps its sweep's verdict. Judge that
             # sweep with the same ladder rather than claim "nothing fetched — not a quota
             # question": the digest's intake alert reads this same block, and the two must agree.

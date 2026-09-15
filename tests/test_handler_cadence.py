@@ -384,7 +384,8 @@ def test_a_quota_stop_on_a_fetch_day_leads_that_days_digest(
     assert out["ingest"]["fetch_stopped"] == STOP_RATE_LIMITED
     alert = notified["intake_alert"]
     assert alert is not None and "429" in alert.what
-    assert audit.read_days == []   # judged from THIS run's sweep — no look-back read
+    # A problem on a fetch day is folded with today's earlier summaries (none here): one read.
+    assert audit.read_days == [date.fromisoformat(CLEAN_FETCH_DAY)]
     assert "INTAKE ALERT" in caplog.text
 
 
@@ -393,11 +394,13 @@ def test_a_healthy_fetch_day_sends_no_intake_alert(
 ):
     # negative: the sweep searched everything, so the digest must look like an ordinary day.
     src = _CountingSource()
-    pipe, notified = _wire_digest(monkeypatch, tmp_path, src, audit_store=_FakeAuditStore())
+    audit = _FakeAuditStore()
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, src, audit_store=audit)
     with caplog.at_level("WARNING"):
         out = pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)
     assert out["statusCode"] == 200 and src.sweeps == 1
     assert "intake_alert" in notified and notified["intake_alert"] is None
+    assert audit.read_days == []   # a healthy sweep costs no S3 read
     assert "INTAKE ALERT" not in caplog.text
 
 
@@ -531,3 +534,47 @@ def test_a_crashed_reassess_on_a_sweep_day_is_not_a_failed_search(
     )
     assert sweep_out["statusCode"] == 500 and sweep_out["mode"] == "reassess"
     assert alert is None
+
+
+# ------------------------------------------------ a retry on a fetch day (CodeRabbit on 472cad8)
+_TODAY = date.fromisoformat(CLEAN_FETCH_DAY)
+
+
+def test_a_retry_after_an_earlier_clean_sweep_today_does_not_alert(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # An earlier run today swept cleanly, then crashed (its 500 summary keeps the healthy block).
+    # The retry sweeps again and gets a 429 — plausibly because the first sweep spent the
+    # requests. Intake is fine, and tomorrow's look-back clears it, so it must not flash up today.
+    earlier = [{"statusCode": 500, "mode": "", "ingest": {"fetch_stopped": None, "fetched": 12}}]
+    audit = _FakeAuditStore({_TODAY: earlier})
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _QuotaSpentSource(), audit_store=audit)
+    assert pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)["statusCode"] == 200
+    assert audit.read_days == [_TODAY]
+    assert notified["intake_alert"] is None
+
+
+def test_a_retry_whose_earlier_run_never_swept_still_alerts(
+    monkeypatch, tmp_path, pkg_logger_restored
+):
+    # negative: the earlier run crashed before ingest, so nothing swept today — the 429 stands.
+    earlier = [{"statusCode": 500, "mode": "", "error": "OperationalError: could not connect"}]
+    audit = _FakeAuditStore({_TODAY: earlier})
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _QuotaSpentSource(), audit_store=audit)
+    assert pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)["statusCode"] == 200
+    alert = notified["intake_alert"]
+    assert alert is not None and "429" in alert.what
+
+
+def test_an_unreadable_day_on_a_fetch_day_keeps_this_runs_own_verdict(
+    monkeypatch, tmp_path, pkg_logger_restored, caplog
+):
+    # If today's earlier summaries cannot be read, judge this run alone: its 429 is known
+    # information, and dropping it would be the silent failure this feature exists to end.
+    audit = _FakeAuditStore(fail=True)
+    pipe, notified = _wire_digest(monkeypatch, tmp_path, _QuotaSpentSource(), audit_store=audit)
+    with caplog.at_level("WARNING"):
+        assert pipe.handler({"run_date": CLEAN_FETCH_DAY}, None)["statusCode"] == 200
+    alert = notified["intake_alert"]
+    assert alert is not None and "429" in alert.what
+    assert "judging this run alone" in caplog.text

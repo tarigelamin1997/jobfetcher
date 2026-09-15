@@ -345,7 +345,9 @@ def _intake_alert_for_digest(
     """Whether today's digest must lead with an intake alert (B-12) — on EVERY day until a sweep
     succeeds, not only on the day it failed.
 
-    On a fetch day the answer is this run's own sweep. On the days between sweeps this run made
+    On a fetch day the answer is this run's own sweep — folded with the day's earlier summaries
+    when it shows a problem, since an earlier run may already have swept cleanly and then
+    crashed or deferred. On the days between sweeps this run made
     no requests to judge, so the answer is the LAST fetch day's recorded run summaries — how its
     sweep ended, or that its run crashed before recording one: without that look-back a quota
     stop would show on day one and vanish on days two and three, and an alert that comes and
@@ -363,6 +365,22 @@ def _intake_alert_for_digest(
         fetch_day = latest_fetch_day(run_date, every_n_days=every_n_days)
         if fetch_day == run_date:
             alert = sweep_problem(ingest_counts, run_date=run_date)
+            if alert is not None and audit_store is not None:
+                # A retry on a fetch day: an EARLIER run today may already have swept cleanly and
+                # then crashed or deferred, making this run's 429 the retry's, not intake's. Fold
+                # this run's block with the day's recorded summaries — a healthy sweep wins, as
+                # tomorrow's look-back would judge it — so the banner does not flash up for a day.
+                try:
+                    earlier = audit_store.get_run_summaries(run_date)
+                except Exception as exc:  # noqa: BLE001 — judge this run alone
+                    rlog.warning(
+                        "could not read today's earlier summaries — judging this run alone: %s",
+                        exc,
+                    )
+                else:
+                    alert = problem_on_day(
+                        [*earlier, {"ingest": ingest_counts}], run_date=run_date
+                    )
         elif fetch_day is None or audit_store is None:
             return None
         else:

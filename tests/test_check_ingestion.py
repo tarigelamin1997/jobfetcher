@@ -261,6 +261,17 @@ def test_a_crash_after_a_healthy_sweep_does_not_claim_nothing_was_fetched():
     level, msg = ci.verdict(crashed, since=date(2026, 9, 22))
     assert level == ci.FAIL
     assert "statusCode 500" in msg and "Nothing fetched" not in msg
+
+
+def test_a_crash_on_a_non_fetch_day_is_a_plain_failure_not_a_finished_sweep():
+    # CodeRabbit on 472cad8: a 500 carrying `not_a_fetch_day` took the "after its sweep finished"
+    # branch — but no sweep ran that day. It stays FAIL (the run returned 500, which is a failure
+    # on any day), with the plain crash message instead.
+    crashed = {**_crashed("2026-09-26"), "mode": "",
+               "ingest": {"fetch_stopped": ci.SKIP_NOT_A_FETCH_DAY, "fetched": 0}}
+    level, msg = ci.verdict(crashed, since=date(2026, 9, 22))
+    assert level == ci.FAIL
+    assert "statusCode 500" in msg and "after its sweep finished" not in msg
     # The ERR-010 framing deliberately does NOT live here — one 500 is a fact, a streak is the
     # pattern. See `failure_streak` and its test; a per-run message that shouts "38 days!" at a
     # single Aurora resume is a check people learn to discount.
