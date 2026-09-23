@@ -155,7 +155,9 @@ So **~280 scored jobs are unreachable from the email** — the still-open overfl
 
 ## B-10 · The real running cost is DeepSeek, not AWS — and it is unmeasured per run 💰
 
-**Logged:** 2026-09-02, from the ERR-010 backlog drain. **Status:** open — figures established, no instrumentation built. Requested by Tarig as a thing to be *aware of*, not to build yet.
+**Logged:** 2026-09-02, from the ERR-010 backlog drain. **Status:** open, **partly instrumented 2026-09-23** (built and reviewed, awaiting merge and a deploy planned for 2026-09-24). [INV-005](../investigations/INV-005-silent-llm-credit-exhaustion/README.md) rung 2 builds the balance half of (b)/(c), shaped differently from both: the daily run (not smoke) reads `GET /user/balance` once, after scoring, records it in the run summary as `llm_balance_usd` / `llm_balance_error`, and the **digest** (not an alarm) warns under $2.00 and announces an empty account. **Still not built: (a), per-run `usage` totals**, so the cost per run is still inferred from balance deltas rather than measured. (d) is untouched. Requested by Tarig as a thing to be *aware of*; the credit warning was built because the account reached $0.54 with a fetch day two days out ([ERR-019](errors.md)).
+
+**Known limits of the balance read, recorded rather than fixed:** (1) the `statusCode: 500` run summary does **not** carry `llm_balance_usd` / `llm_balance_error`, because a crash happens before or instead of the read. This matches the existing error-summary idiom, which carries only what had finished (`mode`, `ingest`). (2) `core/credit.py::_dollars` raises `decimal.InvalidOperation` for a balance of magnitude ≥ ~1e26. The handler's guard catches it, so the digest sends without a credit banner and the run stays `200`. A real balance that size is not a realistic input. (3) The read is only as fresh as DeepSeek's settlement: straight after a run it reads high (the 16% lag below), so the warning can arrive slightly late and never falsely early.
 
 **What.** The architecture's cost story has always been about AWS ("Aurora scale-to-0 ⇒ ~$0 idle"). That framing is now wrong in the way that matters: **AWS is the cheap part.** The binding constraint on whether this tool runs tomorrow is the DeepSeek balance, and nothing in the pipeline measures or reports it.
 
@@ -186,7 +188,7 @@ Multiply by the [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduati
 
 **So-what (candidates — none chosen).** (a) Report `usage` totals per run in the run summary and the S3 audit — the API already returns prompt/completion/reasoning counts per call, so this is accumulation, not new data. (b) A balance check in the `{"mode":"smoke"}` gate, failing or warning under a threshold — the deploy gate already exists and this is one HTTP call. (c) A CloudWatch alarm on a published balance metric — closes the "empty account" failure class properly, and is the only option that catches it *before* a run dies. (d) Reconsider `reasoning_effort` with the cost visible.
 
-**Connections:** [ERR-011](errors.md) / [ERR-014](errors.md) (both were balance failures wearing other costumes) · [ADR-0037](../adr/0037-per-task-reasoning-budgets.md) (the effort setting that drives the cost) · [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md) (the 3× resample multiplier) · [B-9](#) (the retry tail also spends).
+**Connections:** [ERR-011](errors.md) / [ERR-014](errors.md) (both were balance failures wearing other costumes) · [ADR-0037](../adr/0037-per-task-reasoning-budgets.md) (the effort setting that drives the cost) · [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md) (the 3× resample multiplier) · [B-9](#b-9--a-retrying-llm-call-can-still-outlive-the-deadline-guard) (the retry tail also spends) · [INV-005](../investigations/INV-005-silent-llm-credit-exhaustion/README.md) (the balance read and the digest's credit banner).
 
 > **How this feeds the roadmap:** when the current program closes and P2 reopens, these entries are ranked (leverage = capability ÷ complexity) alongside the [roadmap](../03-roadmap.md) candidates (M2 dedup, M3 Step Functions, near-miss M4, CV tailoring). A graduated entry becomes a labeled release; a rejected one stays here with the reasoning.
 
@@ -278,3 +280,33 @@ Every one of them **passed in isolation**. Ten minutes went into diagnosing a de
 **Why it matters.** Not correctness — CI runs one job against its own service container, so CI is unaffected. It matters because a **false failure that looks like a real one** is expensive in exactly the way this repo keeps paying for ([ERR-013](errors.md): the right method with the wrong instrument). Anyone running the suite while CI runs, or in two terminals, will misdiagnose.
 
 **Next.** Cheapest honest fix is a line in [`tests/README.md`](../../tests/README.md) saying the suite is single-writer. A real fix (per-worker schemas, or a transaction rollback fixture) is only worth it if parallel integration runs ever become something we actually want — no evidence of that yet, so **not proposed**.
+
+## B-16 · A revoked key or a missing model is also silent: counted per item, never announced
+
+**Logged:** 2026-09-23, from [INV-005](../investigations/INV-005-silent-llm-credit-exhaustion/README.md) (Mechanism Q2 and Out of scope). **Status:** open, a candidate, not a commitment.
+
+**What.** A 401 (`LlmAuthError`, e.g. a revoked or rotated DeepSeek key) and a 404 (`LlmModelNotFoundError`, e.g. a renamed model) get no sentinel. `_prepare_silver` catches them as `LlmError`, logs a WARNING per item and counts them as `skipped`; `_score_task` does the same and counts them as `failed`. So the run returns `200` and the digest sends with no banner, which is the ERR-019 shape through a different door. The INV-005 credit banner does **not** cover it: it keys on `billing_blocked`, which only a 402 sets.
+
+**Why it waited.** The fix is not the same as INV-005's. Announcing a rejected key needs a new run-wide classification: new sentinels, new summary keys, and a change to the per-item isolation semantics that ERR-006 set. INV-005's rule was "include only if the fix is identical", so it was left out. **One seam already exists:** the balance read uses the same key, so a revoked key shows up in the run summary as `llm_balance_error: "http_401"`. That is forensic evidence only; nothing reads it.
+
+**Next.** A run-wide "key rejected" count plus a blocking `CreditAlert`-shaped banner, reusing `core/credit.py` and the banner order. Note that DeepSeek's 401 body echoes the key's last four characters, and `complete()` currently puts that body into `LlmAuthError`, which `_prepare_silver` logs per item. Whoever builds this should decide whether that log line is acceptable.
+
+## B-17 · A posting whose dissection was 402'd is never retried, so it is lost to silver unless re-fetched
+
+**Logged:** 2026-09-23, from [INV-005](../investigations/INV-005-silent-llm-credit-exhaustion/README.md) Evidence 5b. **Status:** open. A real data gap, deliberately left out of INV-005 because a fix touches ingest semantics and repository reads.
+
+**What.** Scoring retries by itself: `get_gold_candidates` reads every `gold_candidate`, and `mark_scored` runs only on success, so a 402'd score is re-attempted by every run until the account is funded. **Dissection does not.** `ingest()` dissects only what *this* run fetched, and a non-fetch day fetches nothing. A posting whose dissection was refused stays bronze-only, and it comes back only if a later sweep happens to fetch it again. There is no bronze → silver backfill (`grep -rn "unsilvered\|backfill" src/` finds nothing relevant).
+
+**Why it matters.** Every fetch day that coincides with an empty account loses its intake for good, unless the posting is still being returned by the query on a later sweep. The 2026-08-25 → 09-02 episode ([ERR-019](errors.md)) dissected nothing for 9 days; how many of those postings a later sweep re-fetched was not measured. It also makes the credit banner's *counter* rule flicker (blocked on the fetch day, 0 on the two days after), which INV-005 closed with the balance rule rather than by fixing this.
+
+**Next.** A bounded "bronze without silver" re-dissect pass (keyset-paginated, like every bulk read), run when the LLM is healthy. It needs its own dossier: which postings qualify, how far back, and how it shares the deadline guard with scoring.
+
+## B-18 · `urllib` forwards the `Authorization` header when a redirect goes to another host
+
+**Logged:** 2026-09-23, from the INV-005 Examiner pass (NIT 8). **Status:** open, low priority. Pre-existing, not introduced by INV-005.
+
+**What.** `OpenAICompatLlmClient` builds its requests with `urllib.request` and the default opener, whose redirect handler follows a 3xx and carries the request's headers, including `Authorization: Bearer <key>`, to whatever host the `Location` names. That has been true of `complete()` since ADR-0017. `read_balance()` (INV-005) uses the same pattern, so it inherits it.
+
+**Why it matters, and why it is low.** The key would only leak if the configured `base_url` (DeepSeek, over HTTPS) itself answered with a redirect to a host it does not own, so exploiting it needs the provider or its TLS to be compromised first. It is still the kind of hole that is cheap to close before it is needed, and the key is the one credential that spends money.
+
+**Next.** A custom redirect handler that refuses cross-host redirects (or strips `Authorization` on them), shared by both call sites, plus a test that a 302 to another host does not carry the header.

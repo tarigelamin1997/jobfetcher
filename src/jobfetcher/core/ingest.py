@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from ..adapters.s3_audit import S3AuditStore
     from ..adapters.s3_raw import RawStore
     from ..adapters.s3_reports import ReportStore
+    from .credit import CreditAlert
     from .dissector import Dissector
     from .intake import IntakeAlert
     from .models import DissectedPosting, ScoreResult
@@ -1168,6 +1169,7 @@ def notify(
     report_store: "ReportStore | None" = None,
     capture_link: "CaptureLink | None" = None,
     intake_alert: "IntakeAlert | None" = None,
+    credit_alert: "CreditAlert | None" = None,
 ) -> dict[str, int | None]:
     """Step-6 notification: load the profile (its **runtime** threshold) → read the scored
     shortlist (surfaced + below count) → render the daily digest → send it.
@@ -1202,6 +1204,8 @@ def notify(
     **The intake alert (B-12)** is decided by the handler (`core.intake`), which knows the fetch
     cadence and can read earlier run summaries; `notify` only threads it into the render, so the
     banner and the ⚠ subject reach the email. `None` = intake healthy, nothing rendered.
+    `credit_alert` (INV-005, `core.credit`) is threaded the same way: the LLM account is empty
+    or running low. `None` = nothing rendered.
 
     Returns `{surfaced, below_threshold, sent, days_since_last_digest}` (`sent` is 1 — a send
     failure raises before we get here). `days_since_last_digest` is `None` on a first-ever run
@@ -1259,7 +1263,7 @@ def notify(
     subject, html_body, text_body = render_digest(
         items, below, threshold=threshold, date=the_date, since=since,
         full_list_url=full_list_url, capture_link=capture_link, stale_days=stale_days,
-        intake_alert=intake_alert,
+        intake_alert=intake_alert, credit_alert=credit_alert,
     )
     # A send failure propagates (NotifierError) — the v0 surface is the email; a failed send is
     # a failed run, not a swallowed warning (mirrors the loud DB-failure stance in score_gold).

@@ -1,0 +1,15 @@
+# CloudWatch /aws/lambda/jobfetcher-dev-pipeline, filter-pattern '"Insufficient Balance"', window 2026-07-25 -> 2026-09-23 (read 2026-09-23)
+# events per UTC day (posting ids redacted):
+2026-08-25 124
+2026-08-26 132
+2026-08-27 133
+2026-08-28 132
+2026-08-29 146
+2026-08-30 130
+2026-08-31 137
+2026-09-01 120
+2026-09-02 618
+total 1672
+first: [WARNING]	2026-08-25T06:02:27.980Z	92009260-7bb0-4f7b-905f-68995ed046e0	dissection failed for jsearch:<id> (run_id=d1f89821): HTTP 402: {"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}
+2026-09-02 first: [WARNING]	2026-09-02T08:58:32.859Z	db2e2984-7452-4a11-9e7a-9a7a6fc5dd9e	scoring failed for jsearch:<id> (run_id=drain002): 402 Payment Required: {"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}
+2026-09-02 span: 2026-09-02T08:58:32.860000 -> 2026-09-02T08:58:55.366000 (618 events)

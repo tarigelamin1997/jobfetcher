@@ -1,0 +1,36 @@
+{
+  "statusCode": 200,
+  "run_id": "4e18a4b1",
+  "run_date": "2026-09-23",
+  "partial": false,
+  "ingest": {
+    "fetched": 0,
+    "bronzed": 0,
+    "silvered": 0,
+    "skipped": 0,
+    "already": 0,
+    "deferred": 0,
+    "billing_blocked": 0,
+    "fetch_stopped": "not_a_fetch_day",
+    "fetch_failed_queries": 0
+  },
+  "gold": {
+    "silver": 0,
+    "gold": 0,
+    "dropped": 0
+  },
+  "score": {
+    "gold": 35,
+    "scored": 35,
+    "surfaced": 2,
+    "failed": 0,
+    "deferred": 0,
+    "billing_blocked": 0
+  },
+  "notify": {
+    "surfaced": 267,
+    "below_threshold": 1006,
+    "sent": 1,
+    "days_since_last_digest": 2
+  }
+}

@@ -8,12 +8,13 @@
 
 ## 1 · Full-stack architecture (target)
 
-The complete two-plane design (high-level). **What's live today is a subset — `v0.12.0`, running fully unattended** (daily 06:00 UTC EventBridge cron → one Lambda → fetch → dissect → gold → 7-factor score (+ shadow subscores/`code_total`, **boundary-resampled** near the cutoff, v0.11) → SES card-digest + a presigned S3 full-list report, on Aurora SLv2 via the RDS Data API + S3; **concurrent** dissect/score with a deadline guard; **config read from S3 at runtime**; a **`{"mode":"reassess"}` replay** path and a **`{"mode":"smoke"}` deploy gate**; **`score_event` + `application_event` lineage**; **3 CloudWatch alarms → SNS → email** (which fired for 38 days without being acted on — [B-5](ledgers/backlog.md)); Terraform state in an S3 backend; **full S3 audit persistence** (every stage's results → S3 JSONL: `silver/`/`gold/`/`scores/`/`runs/`, v0.12); a **local Streamlit control panel** (browse/curate/config, v0.12); and a **public outcome-capture endpoint** — a second Lambda behind a Function URL with `authorization_type = "NONE"`, where **the auth is an HMAC token, not the network**, so one click from the inbox records an outcome ([ADR-0035](adr/0035-outcome-capture-endpoint.md), shipped 2026-07-20; **the project's only internet-facing write surface**); deployed + live-validated); the analytical plane + the other operational boxes arrive by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
+The complete two-plane design (high-level). **What's live today is a subset — `v0.12.0`, running fully unattended** (daily 06:00 UTC EventBridge cron → one Lambda → fetch → dissect → gold → 7-factor score (+ shadow subscores/`code_total`, **boundary-resampled** near the cutoff, v0.11) → SES card-digest + a presigned S3 full-list report, on Aurora SLv2 via the RDS Data API + S3; **concurrent** dissect/score with a deadline guard; **config read from S3 at runtime**; a **`{"mode":"reassess"}` replay** path and a **`{"mode":"smoke"}` deploy gate**; **`score_event` + `application_event` lineage**; **3 CloudWatch alarms → SNS → email** (which fired for 38 days without being acted on — [B-5](ledgers/backlog.md)); Terraform state in an S3 backend; **full S3 audit persistence** (every stage's results → S3 JSONL: `silver/`/`gold/`/`scores/`/`runs/`, v0.12); a **local Streamlit control panel** (browse/curate/config, v0.12); a **one-call DeepSeek balance read** after scoring that lets the digest lead with an out-of-credit or low-credit banner ([INV-005](investigations/INV-005-silent-llm-credit-exhaustion/README.md), built 2026-09-23, deploy planned 2026-09-24); and a **public outcome-capture endpoint** — a second Lambda behind a Function URL with `authorization_type = "NONE"`, where **the auth is an HMAC token, not the network**, so one click from the inbox records an outcome ([ADR-0035](adr/0035-outcome-capture-endpoint.md), shipped 2026-07-20; **the project's only internet-facing write surface**); deployed + live-validated); the analytical plane + the other operational boxes arrive by migration. The **ingestion medallion is detailed in §2 below**; the LLM is **provider-agnostic** ([ADR-0012](adr/0012-model-agnostic-llm.md) · [ADR-0017](adr/0017-llm-transport-openai-compatible-deepseek.md)) and v0 runs on **DeepSeek** via the OpenAI-compatible API. Discussed in [02-architecture](02-architecture.md).
 
 ```mermaid
 flowchart TB
   subgraph EXT["External"]
     JS["JSearch API<br/>(Google-for-Jobs)"]
+    DS["DeepSeek API<br/>(LLM · prepaid balance)"]
     NO["Notion"]
     US["You (email)"]
   end
@@ -58,6 +59,8 @@ flowchart TB
   end
 
   JS -->|paginated pull| BR
+  SI & SC -->|"LLM calls (OpenAI-compatible)"| DS
+  ORC -.->|"GET /user/balance, once per run after scoring<br/>feeds the digest's credit banner (INV-005)"| DS
   SI <--> PG
   SC <--> PG
   S3 -->|config read at runtime| CF

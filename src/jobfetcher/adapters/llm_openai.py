@@ -10,18 +10,24 @@ Stdlib `urllib` only — no HTTP dependency.
 Transient provider failures (429 / 5xx / connection errors) are retried with exponential
 backoff + full jitter, per `LlmConfig.max_retries` (ERR-006: one DeepSeek 503 must not kill
 a run). Auth and model-not-found errors always fail fast — retrying them is pure waste.
+
+`read_balance()` (INV-005) is an optional capability of THIS adapter, not of the `LlmClient`
+port: `/user/balance` is DeepSeek-specific, so the handler reaches it via `getattr` and a
+client without it simply reports nothing (ADR-0012/0017).
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import math
 import os
 import random
 import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..config import LlmConfig
 from ..core.ports import LlmAuthError, LlmBillingError, LlmError, LlmModelNotFoundError
@@ -33,6 +39,22 @@ _ENV_KEY = "DEEPSEEK_API_KEY"
 # HTTP statuses worth retrying: rate limit + server-side/transient. Everything else 4xx is a
 # request problem that a retry cannot fix.
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# The balance read is best-effort and measured at 0.57–0.81 s (INV-005 Evidence 6): one try,
+# a short timeout, and a failure costs the digest a forecast — never the run.
+_BALANCE_TIMEOUT_S = 5.0
+
+
+class LlmBalance(NamedTuple):
+    """One provider balance reading. `usd is None` means UNKNOWN, and `error` says why, as a
+    short code (`timeout`, `http_401`, `bad_json`, `no_usd`, `no_key`, `error:<ExceptionClass>`).
+
+    The code is all a failure ever carries: DeepSeek's 401 body echoes the key's last four
+    characters, so a response body or header must never reach a log line or the run summary."""
+
+    usd: float | None
+    available: bool | None
+    error: str | None
 
 
 def _resolve_api_key(config: LlmConfig) -> str:
@@ -131,6 +153,64 @@ class OpenAICompatLlmClient:
                 "re-prompting at the same budget cannot help"
             )
         return content
+
+    def read_balance(self, *, timeout_s: float = _BALANCE_TIMEOUT_S) -> LlmBalance:
+        """The account's USD balance from `GET {base_url}/user/balance` (INV-005). NEVER raises.
+
+        One try, no retry: this only forecasts the digest's low-credit banner, and a retry
+        would add latency to the daily run for a reading that can wait a day. Every failure is
+        a short code in `error` — never a response body, never a header (see `LlmBalance`).
+        A non-DeepSeek host answers 404, recorded as `http_404`."""
+        try:
+            key = self._key()
+        except LlmAuthError:
+            return LlmBalance(None, None, "no_key")
+        except Exception as exc:  # noqa: BLE001 — e.g. Secrets Manager unreachable
+            return LlmBalance(None, None, f"error:{type(exc).__name__}")
+        req = urllib.request.Request(
+            f"{self.config.base_url.rstrip('/')}/user/balance",
+            headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            with contextlib.suppress(Exception):  # closing is courtesy, never a failure
+                e.close()  # release the connection; the body is NOT read
+            return LlmBalance(None, None, f"http_{e.code}")
+        except TimeoutError:
+            return LlmBalance(None, None, "timeout")
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, TimeoutError):
+                return LlmBalance(None, None, "timeout")
+            return LlmBalance(None, None, f"error:{type(e).__name__}")
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            return LlmBalance(None, None, f"error:{type(exc).__name__}")
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001 — incl. RecursionError on a deeply nested body
+            return LlmBalance(None, None, "bad_json")
+        if not isinstance(data, dict):
+            return LlmBalance(None, None, "bad_json")
+        infos = data.get("balance_infos")
+        # Amounts arrive as STRINGS, in a list keyed by currency (Evidence 6).
+        for info in infos if isinstance(infos, list) else []:
+            if isinstance(info, dict) and info.get("currency") == "USD":
+                amount = info.get("total_balance")
+                if isinstance(amount, bool):
+                    break  # float(True) is 1.0 — a JSON bool is not an amount
+                try:
+                    usd = float(amount)
+                except (TypeError, ValueError):
+                    break
+                if not math.isfinite(usd):
+                    break  # "NaN" parses as a float and would compare False to everything
+                available = data.get("is_available")
+                return LlmBalance(
+                    usd, available if isinstance(available, bool) else None, None
+                )
+        return LlmBalance(None, None, "no_usd")
 
     def _request_with_retries(self, req: urllib.request.Request) -> dict:
         """One HTTP round-trip, retrying ONLY transient failures (429/5xx/connection) with
