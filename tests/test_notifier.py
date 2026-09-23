@@ -1082,3 +1082,123 @@ def test_staleness_is_the_same_for_one_instant_in_two_timezones():
     assert digest_staleness_days(instant, today=date(2026, 9, 5)) == digest_staleness_days(
         shifted, today=date(2026, 9, 5)
     )
+
+
+# --------------------------------------------------------------------------- INV-005: the credit alert
+# An empty LLM account used to produce the ordinary "no new matches" email. These prove the part
+# the user sees: where the credit line sits among the other escalations, and that the one-helper
+# rule (`_with_banners`) carries it on BOTH render paths.
+
+
+def _out_of_credit():
+    from jobfetcher.core.credit import CreditAlert
+
+    return CreditAlert(
+        "The LLM account is out of credit: 3 postings could not be processed (HTTP 402)",
+        "Top up the DeepSeek account. Nothing else clears this; the next run resumes scoring",
+        True,
+    )
+
+
+def _low_credit():
+    from jobfetcher.core.credit import CreditAlert
+
+    return CreditAlert(
+        "LLM credit low: $0.54 left (≈34 postings)",
+        "Top up the DeepSeek account before the next job search",
+        False,
+    )
+
+
+@pytest.mark.parametrize(("items", "below"), [_NO_MATCHES, _MATCHES], ids=["zero-match", "main"])
+def test_a_blocking_credit_alert_leads_everything_on_both_paths(items, below):
+    # VG-e: a present failure outranks intake, and a cause outranks the staleness symptom.
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, text = render_digest(
+        items, below, threshold=60, date=date(2026, 9, 25), stale_days=6,
+        intake_alert=_quota_alert(), credit_alert=_out_of_credit(),
+    )
+    credit, intake = _out_of_credit(), _quota_alert()
+    assert subject.startswith(f"⚠ {credit.what} | ")
+    assert subject.count("⚠") == 1
+    assert text.splitlines()[0] == f"⚠ {credit.what}. {credit.where}."
+    assert text.index(credit.what) < text.index(intake.what) < text.index("WARNING:")
+    assert html.index("out of credit") < html.index("RapidAPI") < html.index("days since your")
+
+
+@pytest.mark.parametrize(("items", "below"), [_NO_MATCHES, _MATCHES], ids=["zero-match", "main"])
+def test_a_low_credit_forecast_follows_intake(items, below):
+    # VG-e: a forecast does not outrank a present intake failure — in the subject or the body.
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, text = render_digest(
+        items, below, threshold=60, date=date(2026, 9, 25),
+        intake_alert=_quota_alert(), credit_alert=_low_credit(),
+    )
+    assert _intake_present(subject, html, text)            # intake still leads the subject
+    assert subject.count("⚠") == 1 and "credit" not in subject
+    assert text.index("RapidAPI") < text.index("LLM credit low: $0.54 left (≈34 postings)")
+    assert html.index("RapidAPI") < html.index("LLM credit low")
+
+
+@pytest.mark.parametrize(("items", "below"), [_NO_MATCHES, _MATCHES], ids=["zero-match", "main"])
+def test_a_low_credit_forecast_alone_leads_the_subject(items, below):
+    from jobfetcher.core.notifier import render_digest
+
+    subject, html, text = render_digest(
+        items, below, threshold=60, date=date(2026, 9, 25), credit_alert=_low_credit()
+    )
+    assert subject.startswith("⚠ LLM credit low: $0.54 left (≈34 postings) | JobFetcher — ")
+    assert text.splitlines()[0] == (
+        "⚠ LLM credit low: $0.54 left (≈34 postings). "
+        "Top up the DeepSeek account before the next job search."
+    )
+    assert "LLM credit low: $0.54 left" in html
+
+
+@pytest.mark.parametrize(("items", "below"), [_NO_MATCHES, _MATCHES], ids=["zero-match", "main"])
+def test_omitting_the_credit_alert_is_the_same_as_passing_none(items, below):
+    # negative: the default path and an explicit `credit_alert=None` render identically, and a
+    # quiet day carries no banner at all. (Byte-identity with the pre-INV-005 intake render is
+    # proven by the unmodified B-12 tests above, not here.)
+    from jobfetcher.core.notifier import render_digest
+
+    kw = {"threshold": 60, "date": date(2026, 9, 25), "intake_alert": _quota_alert()}
+    assert render_digest(items, below, **kw) == render_digest(
+        items, below, credit_alert=None, **kw
+    )
+    subject, html, text = render_digest(items, below, threshold=60, date=date(2026, 9, 25),
+                                        credit_alert=None)
+    assert "⚠" not in subject and "⚠" not in text and "#fce8e6" not in html
+
+
+def test_the_credit_alert_is_escaped_in_the_html():
+    from jobfetcher.core.credit import CreditAlert
+    from jobfetcher.core.notifier import render_digest
+
+    _, html, _ = render_digest(
+        [], 0, threshold=60, date=date(2026, 9, 25),
+        credit_alert=CreditAlert("<b>x</b>", "a & b", True),
+    )
+    assert "<b>x</b>" not in html and "&lt;b&gt;x&lt;/b&gt;" in html and "a &amp; b" in html
+
+
+def test_notify_actually_wires_the_credit_alert_into_the_email_it_sends():
+    # THE SEAM (VG-j): the handler's verdict reaches nobody unless notify passes it on.
+    repo = _FakeRepo(threshold=60, surfaced=[], below=0, last_sent=_SINCE)
+    notifier = _FakeNotifier()
+    notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+           run_date=date(2026, 6, 21), credit_alert=_out_of_credit())
+    sent = notifier.sent[0]
+    assert sent["subject"].startswith(f"⚠ {_out_of_credit().what}")
+    assert _out_of_credit().where in sent["html"] and _out_of_credit().where in sent["text"]
+
+
+def test_notify_without_a_credit_alert_sends_no_credit_banner():
+    repo = _FakeRepo(threshold=60, surfaced=[], below=0, last_sent=_SINCE)
+    notifier = _FakeNotifier()
+    notify(run_id="r", repo=repo, notifier=notifier, recipient_email="to@x.com",
+           run_date=date(2026, 6, 21))
+    sent = notifier.sent[0]
+    assert "⚠" not in sent["subject"] and "DeepSeek" not in sent["text"]

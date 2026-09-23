@@ -347,3 +347,165 @@ def test_default_config_sends_neither_key(monkeypatch):
     body = _capture_body(monkeypatch, LlmConfig())
     assert "thinking" not in body
     assert "reasoning_effort" not in body
+
+
+# --------------------------------------------------------------------------- INV-005: read_balance
+# A best-effort forecast for the digest: ONE GET, a short timeout, and it NEVER raises. Every
+# failure is a short code — never a body or a header, because DeepSeek's 401 body echoes the
+# key's last four characters.
+_BALANCE_OK = {
+    "is_available": True,
+    "balance_infos": [
+        {"currency": "CNY", "total_balance": "3.90", "granted_balance": "0.00",
+         "topped_up_balance": "3.90"},
+        {"currency": "USD", "total_balance": "0.54", "granted_balance": "0.00",
+         "topped_up_balance": "0.54"},
+    ],
+}
+
+
+class _RawResp(_FakeResp):
+    def __init__(self, raw: bytes):
+        self._b = raw
+
+
+def _balance_with(monkeypatch, fake):
+    calls = []
+
+    def _u(req, timeout=0):
+        calls.append({"url": req.full_url, "method": req.get_method(), "timeout": timeout,
+                      "auth": req.get_header("Authorization"), "data": req.data})
+        return fake(req, timeout)
+
+    monkeypatch.setattr(llm_openai.urllib.request, "urlopen", _u)
+    return _client().read_balance(), calls
+
+
+def test_read_balance_parses_the_usd_entry_with_one_get(monkeypatch):
+    balance, calls = _balance_with(monkeypatch, lambda req, t: _FakeResp(_BALANCE_OK))
+    assert balance == llm_openai.LlmBalance(0.54, True, None)   # USD, not the CNY entry
+    assert len(calls) == 1
+    assert calls[0]["method"] == "GET" and calls[0]["data"] is None
+    assert calls[0]["url"] == "https://api.deepseek.com/user/balance"
+    assert calls[0]["timeout"] == 5.0
+    assert calls[0]["auth"] == "Bearer test-key"
+
+
+def test_read_balance_reports_an_unavailable_account(monkeypatch):
+    payload = {**_BALANCE_OK, "is_available": False}
+    balance, _ = _balance_with(monkeypatch, lambda req, t: _FakeResp(payload))
+    assert balance.available is False and balance.usd == 0.54
+
+
+@pytest.mark.parametrize("code", [401, 403, 404, 500, 503])
+def test_read_balance_http_error_is_a_code_and_is_not_retried(monkeypatch, code):
+    # negative: best-effort means ONE try — a 503 here is not worth the daily run's latency.
+    balance, calls = _balance_with(
+        monkeypatch, lambda req, t: _raise_http(code, "Your api key: ****-key is invalid")(req)
+    )
+    assert balance == llm_openai.LlmBalance(None, None, f"http_{code}")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [urllib.error.URLError(TimeoutError("timed out")), TimeoutError("read timed out")],
+    ids=["connect-timeout", "read-timeout"],
+)
+def test_read_balance_timeout_is_a_code(monkeypatch, exc):
+    def _boom(req, t):
+        raise exc
+
+    balance, _ = _balance_with(monkeypatch, _boom)
+    assert balance == llm_openai.LlmBalance(None, None, "timeout")
+
+
+def test_read_balance_connection_error_is_its_class_name(monkeypatch):
+    def _boom(req, t):
+        raise urllib.error.URLError(ConnectionRefusedError("refused"))
+
+    balance, _ = _balance_with(monkeypatch, _boom)
+    assert balance == llm_openai.LlmBalance(None, None, "error:URLError")
+
+
+@pytest.mark.parametrize(
+    ("raw", "error"),
+    [
+        (b"<html>502 Bad Gateway</html>", "bad_json"),
+        (b"[1, 2]", "bad_json"),
+        (json.dumps({"is_available": True, "balance_infos": [
+            {"currency": "CNY", "total_balance": "3.90"}]}).encode(), "no_usd"),
+        (json.dumps({"is_available": True}).encode(), "no_usd"),
+        (json.dumps({"balance_infos": {"currency": "USD"}}).encode(), "no_usd"),
+        (json.dumps({"balance_infos": [{"currency": "USD", "total_balance": "abc"}]}).encode(),
+         "no_usd"),
+        (json.dumps({"balance_infos": [{"currency": "USD", "total_balance": "NaN"}]}).encode(),
+         "no_usd"),
+        (json.dumps({"balance_infos": [{"currency": "USD"}]}).encode(), "no_usd"),
+        (json.dumps({"balance_infos": [{"currency": "USD", "total_balance": True}]}).encode(),
+         "no_usd"),
+        (b"[" * 100_000, "bad_json"),
+    ],
+    ids=["html", "not-an-object", "cny-only", "no-infos", "infos-not-a-list", "junk-amount",
+         "nan-amount", "no-amount", "bool-amount", "recursion-bomb"],
+)
+def test_read_balance_unusable_body_is_unknown_not_zero(monkeypatch, raw, error):
+    # negative: an unreadable reading must be UNKNOWN (usd None), never 0.0 — a 0.0 would
+    # announce an empty account on a day it is merely unreadable.
+    balance, _ = _balance_with(monkeypatch, lambda req, t: _RawResp(raw))
+    assert balance == llm_openai.LlmBalance(None, None, error)
+
+
+def test_read_balance_without_a_key_makes_no_request(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(llm_openai, "_resolve_api_key", lambda config: "")
+    monkeypatch.setattr(
+        llm_openai.urllib.request, "urlopen",
+        lambda *a, **kw: pytest.fail("no key, so no request"),  # noqa: ARG005
+    )
+    assert OpenAICompatLlmClient(LlmConfig()).read_balance() == llm_openai.LlmBalance(
+        None, None, "no_key"
+    )
+
+
+def test_read_balance_never_raises_when_the_secret_lookup_does(monkeypatch):
+    def _denied(config):
+        raise PermissionError("AccessDenied on secret arn:aws:...:jobfetcher/deepseek")
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(llm_openai, "_resolve_api_key", _denied)
+    balance = OpenAICompatLlmClient(LlmConfig()).read_balance()
+    assert balance == llm_openai.LlmBalance(None, None, "error:PermissionError")
+
+
+def test_read_balance_error_codes_never_carry_the_body_or_the_key(monkeypatch, caplog):
+    # VG-g at the adapter: DeepSeek's real 401 echoes the key's last four characters.
+    monkeypatch.setattr(
+        llm_openai.urllib.request, "urlopen",
+        _raise_http(401, '{"error":{"message":"Authentication Fails, Your api key: '
+                         '****1234 is invalid"}}'),
+    )
+    with caplog.at_level("DEBUG"):
+        balance = OpenAICompatLlmClient(LlmConfig(), api_key="sk-SENTINEL-abcd1234").read_balance()  # gitleaks:allow
+    assert balance.error == "http_401"
+    for leaked in ("SENTINEL", "1234"):
+        assert leaked not in repr(balance)
+        assert leaked not in caplog.text
+
+
+def test_read_balance_closes_an_http_error_without_reading_it(monkeypatch):
+    class _Body(io.BytesIO):
+        reads = 0
+
+        def read(self, *a):
+            _Body.reads += 1
+            return super().read(*a)
+
+    body = _Body(b'{"error":"Your api key: ****-key is invalid"}')
+
+    def _u(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 401, "err", None, body)
+
+    monkeypatch.setattr(llm_openai.urllib.request, "urlopen", _u)
+    assert _client().read_balance().error == "http_401"
+    assert body.closed and _Body.reads == 0

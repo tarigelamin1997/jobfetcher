@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
 
+    from .credit import CreditAlert
     from .intake import IntakeAlert
     from .ports import ShortlistItem
 
@@ -262,13 +263,14 @@ def _staleness_banner(stale_days: int | None) -> tuple[str, str]:
     return msg, html
 
 
-def _intake_banner(alert: "IntakeAlert | None") -> tuple[str, str]:
+def _alert_banner(alert: "IntakeAlert | CreditAlert | None") -> tuple[str, str]:
     """`(text, html)`: ONE short line — what failed, and where to look — or `("", "")`.
 
     Short on purpose: the email's job is to say intake broke and point at the place to look,
     not to diagnose; the run summary and the logs hold the detail. Unlike staleness there is no
     threshold to wait for — `core.intake` returns an alert only for a sweep that really ended
-    early, so this renders on every digest until a sweep succeeds."""
+    early, so this renders on every digest until a sweep succeeds. The LLM credit alert
+    (INV-005) has the same `what` + `where` shape and renders through here too."""
     if alert is None:
         return "", ""
     text = f"⚠ {alert.what}. {alert.where}."
@@ -288,23 +290,29 @@ def _with_banners(
     *,
     stale_days: int | None,
     intake_alert: "IntakeAlert | None",
+    credit_alert: "CreditAlert | None" = None,
 ) -> tuple[str, str, str]:
-    """Put both escalations on one render path: returns `(subject, text_body, banner_html)`.
+    """Put every escalation on one render path: returns `(subject, text_body, banner_html)`.
 
     ONE helper for both of `render_digest`'s return paths — two hand-kept copies is how the main
-    path's staleness banner once went untested (Examiner B3). The intake banner leads: it names
-    the cause, staleness is a symptom. In the subject, `⚠` appears exactly once and WHAT failed
-    comes first, because the inbox list is where triage happens (INV-004)."""
-    intake_text, intake_html = _intake_banner(intake_alert)
+    path's staleness banner once went untested (Examiner B3). Order: a BLOCKING credit alert,
+    then intake, then a low-credit forecast, then staleness — a present failure outranks a
+    forecast, and a cause outranks a symptom (INV-004, INV-005). In the subject, `⚠` appears
+    exactly once and the first alert's WHAT comes first, because the inbox list is where triage
+    happens."""
+    blocking = credit_alert if credit_alert is not None and credit_alert.blocking else None
+    forecast = credit_alert if credit_alert is not None and not credit_alert.blocking else None
+    rendered = [_alert_banner(a) for a in (blocking, intake_alert, forecast) if a is not None]
     stale_text, stale_html = _staleness_banner(stale_days)
-    if intake_alert is not None:
-        subject = f"⚠ {intake_alert.what} | {subject}"
+    lead = blocking or intake_alert or forecast
+    if lead is not None:
+        subject = f"⚠ {lead.what} | {subject}"
     elif stale_text:
         subject = f"⚠ {subject}"
-    banners = "\n".join(t for t in (intake_text, stale_text) if t)
+    banners = "\n".join(t for t in (*(text for text, _ in rendered), stale_text) if t)
     if banners:
         text_body = f"{banners}\n\n{text_body}"
-    return subject, text_body, intake_html + stale_html
+    return subject, text_body, "".join(html for _, html in rendered) + stale_html
 
 
 def render_digest(
@@ -318,13 +326,16 @@ def render_digest(
     capture_link: "CaptureLink | None" = None,
     stale_days: int | None = None,
     intake_alert: "IntakeAlert | None" = None,
+    credit_alert: "CreditAlert | None" = None,
 ) -> tuple[str, str, str]:
     """Render `(subject, html_body, text_body)` for the daily digest.
 
     `intake_alert` (B-12) is the handler's verdict on the last JSearch sweep (`core.intake`):
     when present, the digest opens with one short line — what failed, where to look — and the
-    subject leads with it. `stale_days` is the other escalation (INV-004). Both render on BOTH
-    return paths, zero-match included.
+    subject leads with it. `credit_alert` (INV-005) is the same kind of line for the LLM
+    account (`core.credit`): a blocking one leads, a low-credit forecast follows intake.
+    `stale_days` is the other escalation (INV-004). All render on BOTH return paths, zero-match
+    included.
 
     `items` are the surfaced matches (already `score >= threshold`, ordered by score DESC by the
     Repository); `below_count` is how many scored matches fell below the threshold (the footer).
@@ -396,7 +407,8 @@ def render_digest(
         # the banners matter most here: they separate a quiet week from a broken intake, and
         # from having received nothing at all for 38 days.
         subject, text_body, banner_html = _with_banners(
-            subject, text_body, stale_days=stale_days, intake_alert=intake_alert
+            subject, text_body, stale_days=stale_days, intake_alert=intake_alert,
+            credit_alert=credit_alert,
         )
         html_body = _html_shell(day, banner_html + f'<p style="color:#3c4043;">{escape(line)}</p>')
         return subject, html_body, text_body
@@ -463,7 +475,8 @@ def render_digest(
     else:
         footer_html = f'<p style="color:#80868b;font-size:13px;margin:8px 0 0;">{escape(footer)}</p>'
     subject, text_body, banner_html = _with_banners(
-        subject, text_body, stale_days=stale_days, intake_alert=intake_alert
+        subject, text_body, stale_days=stale_days, intake_alert=intake_alert,
+        credit_alert=credit_alert,
     )
     html_body = _html_shell(day, banner_html + summary + new_html + open_html + footer_html)
     return subject, html_body, text_body

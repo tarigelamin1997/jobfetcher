@@ -1,0 +1,32 @@
+{
+  "statusCode": 200,
+  "run_id": "drain002",
+  "run_date": "2026-09-02",
+  "partial": false,
+  "ingest": {
+    "fetched": 0,
+    "bronzed": 0,
+    "silvered": 0,
+    "skipped": 0,
+    "already": 0,
+    "deferred": 0,
+    "billing_blocked": 0
+  },
+  "gold": {
+    "silver": 0,
+    "gold": 0,
+    "dropped": 0
+  },
+  "score": {
+    "gold": 618,
+    "scored": 0,
+    "surfaced": 0,
+    "failed": 618,
+    "deferred": 0
+  },
+  "notify": {
+    "surfaced": 0,
+    "below_threshold": 0,
+    "sent": 0
+  }
+}

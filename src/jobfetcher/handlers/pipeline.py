@@ -35,7 +35,7 @@ from sqlalchemy import text
 
 from ..adapters.filter_deterministic import DeterministicFilterStrategy
 from ..adapters.jsearch_source import JSearchSourceAdapter
-from ..adapters.llm_openai import OpenAICompatLlmClient
+from ..adapters.llm_openai import LlmBalance, OpenAICompatLlmClient
 from ..adapters.repository_postgres import PostgresRepository
 from ..adapters.s3_audit import S3AuditStore
 from ..adapters.s3_config import read_config_text
@@ -43,6 +43,7 @@ from ..adapters.s3_raw import S3RawStore
 from ..adapters.s3_reports import S3ReportStore
 from ..adapters.ses_notifier import SesNotifier
 from ..config import LlmConfig
+from ..core.credit import CreditAlert, credit_problem
 from ..core.dissector import Dissector
 from ..core.ingest import (
     DEFAULT_MAX_WORKERS,
@@ -398,6 +399,66 @@ def _intake_alert_for_digest(
     return alert
 
 
+def _read_llm_balance(client: Any, *, rlog: Any) -> LlmBalance:
+    """The scoring account's balance, read ONCE per daily run, after scoring (INV-005 rung 2).
+
+    After scoring, not at the start: DeepSeek's balance settles late and only ever reads HIGH
+    (B-10), so a read taken here already reflects most of today's spend and can under-warn a
+    little, never false-alarm. A read at the start would miss today's spend entirely.
+
+    An optional capability of the concrete adapter, reached via `getattr` like the sweep's
+    `last_stop_reason` (INV-003): the `LlmClient` port has no balance, and a client without one
+    records `unsupported`. Never raises — a failed read costs the digest its forecast, never the
+    run — and never logs more than the adapter's short error code, because DeepSeek's 401 body
+    echoes the key's last four characters."""
+    read = getattr(client, "read_balance", None)
+    if not callable(read):
+        balance = LlmBalance(None, None, "unsupported")
+    else:
+        try:
+            balance = read()
+            if not isinstance(balance, LlmBalance):  # a malformed reading is a failed read
+                raise TypeError(type(balance).__name__)
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            balance = LlmBalance(None, None, f"error:{type(exc).__name__}")
+    if balance.usd is None:
+        rlog.warning(
+            "LLM balance unknown (%s) — no low-credit forecast in today's digest; a run blocked "
+            "by HTTP 402 is still announced from its own counts",
+            balance.error,
+        )
+    else:
+        rlog.info("LLM balance: $%.2f", balance.usd)
+    return balance
+
+
+def _credit_alert_for_digest(
+    ingest_counts: dict[str, Any],
+    score_counts: dict[str, Any],
+    balance: LlmBalance,
+    *,
+    rlog: Any,
+) -> CreditAlert | None:
+    """Whether today's digest must lead with (or carry) an LLM credit alert (INV-005).
+
+    Best-effort, like the intake alert: it never fails the send. A run that was actually
+    blocked (`billing_blocked > 0`) is announced from its own counts even when the balance read
+    failed; a failed read on its own announces nothing."""
+    try:
+        alert = credit_problem(ingest_counts, score_counts, balance)
+    except Exception as exc:  # noqa: BLE001 — the alert is an enhancement; never fail the send
+        rlog.warning(
+            "could not determine LLM credit for the digest — it sends WITHOUT a credit alert, "
+            "which is NOT the same as the account being funded: %s",
+            type(exc).__name__,
+        )
+        return None
+    if alert is not None:
+        # WARNING, for the log trail: the same words the user reads at the top of the email.
+        rlog.warning("LLM CREDIT ALERT in today's digest: %s. %s.", alert.what, alert.where)
+    return alert
+
+
 def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[str, Any]:
     """The one v0 Lambda. Returns a `{statusCode, run_id, ...stage counts}` summary.
 
@@ -520,9 +581,9 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             OpenAICompatLlmClient(_dissect_llm_config()), model_id=_DISSECT_MODEL
         )
         strategy = resolve_filter_strategy(env)  # H-3: deterministic (default) | llm
-        scorer = Scorer(
-            OpenAICompatLlmClient(_score_llm_config()), model_id=_SCORE_MODEL
-        )
+        # Kept by name: its account's balance is read once after scoring (INV-005).
+        score_llm = OpenAICompatLlmClient(_score_llm_config())
+        scorer = Scorer(score_llm, model_id=_SCORE_MODEL)
         notifier = SesNotifier()
 
         # --- reassess mode (ADR-0023): replay scoring over the already-scored postings against
@@ -634,6 +695,10 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
             audit_store=audit_store,
         )
         rlog.info("stage=score done %s", score_counts)
+        # INV-005: after scoring (the reading then reflects today's spend), before notify, and
+        # on every normal run — partial and already-sent included — so the summary always says
+        # what the account held, or why it is unknown.
+        llm_balance = _read_llm_balance(score_llm, rlog=rlog)
 
         # --- notify: send-once guard (VG4). Skip entirely if the digest already went out today,
         # or if this run is PARTIAL (deadline deferred work) — an early digest would trip the
@@ -704,6 +769,10 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 ingest_counts, run_date=run_date, every_n_days=every_n,
                 audit_store=audit_store, rlog=rlog,
             )
+            # INV-005: an empty or low LLM account, in the digest the user already reads.
+            credit_alert = _credit_alert_for_digest(
+                ingest_counts, score_counts, llm_balance, rlog=rlog
+            )
             notify_counts = notify(
                 run_id=run_id,
                 repo=repo,
@@ -721,6 +790,8 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
                 capture_link=capture_link,
                 # B-12: what broke in intake + where to look (None → no banner).
                 intake_alert=intake_alert,
+                # INV-005: the LLM account is empty or running low (None → no banner).
+                credit_alert=credit_alert,
             )
             # Mark sent ONLY after a successful send (notify raises on a failed send, so we never
             # get here on failure — the guard is not written, the next run re-sends).
@@ -763,6 +834,9 @@ def handler(event: dict[str, Any] | None = None, context: Any = None) -> dict[st
         "gold": gold_counts,
         "score": score_counts,
         "notify": notify_counts,
+        # INV-005: `null` usd always comes with the reason (the INV-003 lesson).
+        "llm_balance_usd": llm_balance.usd,
+        "llm_balance_error": llm_balance.error,
     }
     if audit_store is not None:
         audit_store.put_run_summary(summary)  # v0.12.0 — the per-run procedure record (non-fatal)
