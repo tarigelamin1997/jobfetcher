@@ -420,7 +420,7 @@ The pipeline ingested on **28 of 62 days** while returning `statusCode: 200` eve
 
 **Announcement (built 2026-09-14; deployed 2026-09-23).** A sweep that ends early — or a sweep-day run that crashes before recording one — is no longer only diagnosable: the daily digest opens with a one-line alert naming what failed and where to look, on every day until a sweep succeeds — including the days between sweeps, which read back the last sweep day's run summaries. It keys on `fetch_stopped`, never on "no new postings", because that is also what a quiet week looks like. Deliberately not a fourth alarm ([INV-004](investigations/INV-004-alarm-escalation/README.md)); tracked as [B-12](ledgers/backlog.md), the same shape as [B-5](ledgers/backlog.md).
 
-### INV-005 / ERR-019 — the LLM account's credit, announced in the digest (built 2026-09-23; deploy planned 2026-09-24)
+### INV-005 / ERR-019 — the LLM account's credit, announced in the digest (built 2026-09-23; deployed 2026-09-23)
 
 An empty prepaid DeepSeek account turns every LLM call into **HTTP 402**. The pipeline already typed, counted (`billing_blocked`) and logged that, but nothing read the count: the run returned `200` and the digest read "no new matches". It happened for 9 days from 2026-08-25, hidden behind ERR-010 ([ERR-019](ledgers/errors.md), [INV-005](investigations/INV-005-silent-llm-credit-exhaustion/README.md)).
 
