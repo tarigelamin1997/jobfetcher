@@ -8,9 +8,10 @@ reads (INV-004). *So-what:* the user learns intake broke on the day it breaks, a
 after until a sweep succeeds.
 
 **It keys on how the last sweep ENDED, never on whether new postings arrived.** Re-fetching a
-posting we already have writes nothing — `upsert_bronze` is `on_conflict_do_nothing` and
-`put_raw` skips existing keys — so "no new jobs landed" is what an ordinary quiet market week
-looks like too. An alert built on it would cry wolf; one built on `fetch_stopped` does not.
+posting we already have adds nothing new: `upsert_bronze` is `on_conflict_do_nothing` and
+silver skips a known posting (`already`). Only the `raw/` snapshot is written again, under the
+new day's key. So "no new jobs" is what an ordinary quiet market week looks like too. An alert
+built on it would cry wolf; one built on `fetch_stopped` does not.
 
 Pure: no I/O. The handler supplies today's ingest block on a fetch day, or the last fetch day's
 run summaries otherwise, so the alert does not flicker off for the two days between sweeps.

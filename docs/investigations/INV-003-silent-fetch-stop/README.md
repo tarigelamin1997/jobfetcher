@@ -4,7 +4,7 @@ title: A run that fetches nothing is indistinguishable from a run with nothing t
 status: fixed           # open | verifying | verified | handoff-ready | in-progress | fixed | killed
 severity: non-crucial   # rungs 1–2 (src-only observability). Rung 3 adds live infra → crucial.
 logged: 2026-09-04
-updated: 2026-09-04
+updated: 2026-09-23
 source: live-stack review during the ERR-016 documentation audit, 2026-09-04; not reported by any alarm
 ---
 
@@ -12,7 +12,7 @@ source: live-stack review during the ERR-016 documentation audit, 2026-09-04; no
 
 # INV-003 · A silent fetch stop reports success
 
-**Status:** `fixed` (rungs 1–2 + the capacity fix; rung 3 built 2026-09-14 as the digest intake alert, open until live-proven — [B-12](../../ledgers/backlog.md)) · **Severity:** `non-crucial` (rungs 1–2) · **Owner of the fix:** _(a Surgeon, once handed off)_
+**Status:** `fixed` (rungs 1–2 + the capacity fix, **live-proven 2026-09-22**: 119 postings fetched in the first clean quota cycle, `runs/2026-09-22/19c08edf.json`; rung 3 built 2026-09-14 as the digest intake alert, open until live-proven — [B-12](../../ledgers/backlog.md)) · **Severity:** `non-crucial` (rungs 1–2) · **Owner of the fix:** _(a Surgeon, once handed off)_
 
 > The pipeline has ingested **zero** postings for three consecutive days while returning `statusCode: 200`, emailing a digest every morning, and holding all three CloudWatch alarms in `OK`.
 
@@ -182,6 +182,6 @@ Behavioral, with a negative case. **The negative case is the whole point** — i
 - **Key files + decisions.** [`adapters/jsearch_source.py`](../../../src/jobfetcher/adapters/jsearch_source.py) (`STOP_RATE_LIMITED` / `STOP_BUDGET_EXHAUSTED`, reset per sweep) · [`core/ingest.py`](../../../src/jobfetcher/core/ingest.py) (`FETCH_EVERY_N_DAYS`, `SOURCE_MONTHLY_QUOTA`, `is_fetch_day`, `next_fetch_day`, `skip_fetch`) · [`handlers/pipeline.py`](../../../src/jobfetcher/handlers/pipeline.py) (the gate + `$JOBFETCHER_FETCH_EVERY_N_DAYS` override). `ingest` reads the stop reason via `getattr`, so the `SourceAdapter` port is unchanged and any adapter omitting it still works.
 - **Links:** PR #62 (this dossier) · PR #63 (legibility) · PR #64 (cadence) · [ERR-017](../../ledgers/errors.md) · [B-12](../../ledgers/backlog.md).
 - **⚠️ Two things a later phase must know.**
-  1. **The code is merged but the deployed Lambda still runs the 2026-09-02 build.** A `build_lambda.py` + `terraform apply` is outstanding, and **nothing can be live-validated until the quota resets ~2026-09-22** — until then every run fetches zero regardless.
+  1. ~~**The code is merged but the deployed Lambda still runs the 2026-09-02 build.**~~ **Resolved:** deployed 2026-09-04, with the Examiner fixes on 2026-09-05 16:25 UTC, and **live-proven 2026-09-22**, the first quota cycle the fixed sweep was sized for. `runs/2026-09-22/19c08edf.json` shows `fetched 119 → silvered 119`, and `raw/jsearch/2026-09-22/` holds 119 objects, the first landing since 2026-09-01. On 2026-09-23 the next run (`runs/2026-09-23/4e18a4b1.json`) scored the 35 deferred postings and sent the digest. `scripts/check_ingestion.py` → exit 0. The sweep ended `partial_errors` (1 of 15 queries died on an upstream error), so 119 is a floor.
   2. **This is diagnosable, not announced.** A `200` with `fetched: 0` still trips no alarm; it takes someone looking. That is B-12, and it is the same shape as B-5. **Update 2026-09-14:** built to be announced in the daily digest (awaiting deploy) — a one-line intake alert on every day until a sweep succeeds, including after a sweep-day crash. Open until a real early stop has put the banner in a delivered digest. Still no alarm, deliberately ([INV-004](../INV-004-alarm-escalation/README.md)).
 - **Extending later.** Raise `FETCH_EVERY_N_DAYS` and the RapidAPI plan **together** — the arithmetic is the point, and the skip message computes it live from the spec, so it stays honest on its own. `$JOBFETCHER_FETCH_EVERY_N_DAYS` overrides the cadence (1 or less = every day; the integration suite pins it there so tests never depend on the calendar). **Correction, 2026-09-05:** this line used to say "without a redeploy", and that was wrong in a way worth keeping on the record. Terraform manages the Lambda's `environment.variables` as a **whole map**, so a value set in the console survived only until the next `terraform apply` silently removed it — a documented escape hatch that stopped working with nothing announcing it (B-13). The variable is now declared in `terraform/lambda.tf`, which makes Terraform its owner: change it **there**, and redeploy. A console edit is still a legitimate emergency lever, but it is temporary by construction and must be followed by the same edit in IaC.

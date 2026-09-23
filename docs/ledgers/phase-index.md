@@ -27,7 +27,7 @@ Read-only AWS calls as `jobfetcher-dev` (us-east-1). Every row below is a doc cl
 | 7 S3 prefixes (`raw` `config` `reports` `runs` `silver` `gold` `scores`) | ✅ all present |
 | `wait_for_db_resume` ([ERR-009](errors.md)) | ✅ **observed working** — 3 resume waits against the 90 s budget in the 2026-09-03 run, then a clean pass |
 
-**⚠️ Superseded in part (2026-09-04):** this check also surfaced [ERR-017](errors.md) — the pipeline had been ingesting on only ~11 days a month while reporting success. Fixed in PRs #62–#64: the sweep now runs every 3rd day (the Lambda still runs daily) and the run summary records `fetch_stopped`. **The deployed Lambda still runs the 2026-09-02 build**, and live proof waits for the ~2026-09-22 quota reset.
+**⚠️ Superseded in part (2026-09-04):** this check also surfaced [ERR-017](errors.md) — the pipeline had been ingesting on only ~11 days a month while reporting success. Fixed in PRs #62–#64: the sweep now runs every 3rd day (the Lambda still runs daily) and the run summary records `fetch_stopped`. Deployed 2026-09-04, with the Examiner fixes on 2026-09-05. **Live-proven 2026-09-22**: 119 postings fetched in the first clean quota cycle (`runs/2026-09-22/19c08edf.json`).
 
 **Corrected by this check:** the account holds **four** Secrets Manager secrets, not the two the docs named — Terraform also owns `jobfetcher/capture-token` and the `rds!cluster-…` master password (`manage_master_user_password = true`), which both Lambdas read via `$DB_SECRET_ARN`.
 

@@ -88,7 +88,7 @@ def test_an_unknown_stop_reason_is_loud_not_silently_healthy():
 @pytest.mark.parametrize("fetched", [140, 0])
 def test_a_completed_sweep_is_healthy_whether_or_not_new_jobs_came_back(fetched):
     # THE design decision. The alert keys on how the sweep ENDED, never on whether new postings
-    # arrived: re-fetching a known posting writes nothing, so an ordinary quiet week also looks
+    # arrived: re-fetching a known posting adds nothing new, so an ordinary quiet week also looks
     # like "nothing new" — and must not raise an alert.
     assert sweep_problem({"fetch_stopped": None, "fetched": fetched}, run_date=CLEAN) is None
 
