@@ -249,10 +249,12 @@ def fetch_to_bronze(
     the `(bronze_id, raw_job, query_country)` triples for the silver pass.
 
     `bronze_id = f"{source}:{source_job_id}"`. **The same id is landed at most once per run**
-    (C2: a `set` dedups ids seen across the title×country matrix) and the S3 put + upsert are
-    **skipped entirely when that bronze row already exists** (C4: bronze is immutable — a
-    cross-run re-fetch must not overwrite the raw snapshot). A posting with no `job_id` is
-    skipped (can't form a stable id)."""
+    (C2: a `set` dedups ids seen across the title×country matrix). **Nothing already landed
+    is overwritten** (C4: bronze is immutable): `put_raw` skips a key that exists, and
+    `upsert_bronze` does nothing on conflict. The raw key is dated by the run, though, so a
+    posting re-fetched on a *later* day gets a second snapshot under that day's prefix. The
+    bronze row keeps its first `s3_raw_key`. A posting with no `job_id` is skipped (can't form
+    a stable id)."""
     landed: list[tuple[str, dict[str, Any], str | None]] = []
     seen: set[str] = set()
     for raw_job in source_adapter.fetch(spec, run_id=run_id):

@@ -56,8 +56,9 @@ class S3RawStore:
         """Write `payload` as pretty JSON to `raw/{source}/{date}/{source_job_id}.json`.
 
         **Idempotent + immutable (C4):** if the object already exists it is NOT overwritten —
-        bronze is an immutable snapshot, so a cross-run re-fetch returns the existing key
-        without re-putting. The existence check is a single cheap `head_object`.
+        bronze is an immutable snapshot, so a same-day re-run returns the existing key without
+        re-putting. The key is dated, so a re-fetch on a later day writes a new snapshot under
+        that day. The existence check is a single cheap `head_object`.
 
         The id segment is percent-encoded (`/` and other separators escaped) so an id like
         `abc/def` lands as one flat object, never nested S3 prefixes. Deterministic; the DB
