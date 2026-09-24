@@ -26,6 +26,7 @@ from jobfetcher.handlers.pipeline import (
     resolve_run_id,
     resolve_search_config_path,
 )
+from jobfetcher.core.ingest import DEFAULT_MAX_WORKERS
 
 
 # --------------------------------------------------------------------------- DB URL
@@ -164,9 +165,9 @@ def test_expected_migration_head_matches_migrations_directory():
 
 # --------------------------------------------------------------------------- H-2 knobs
 def test_resolve_max_workers_default_and_override():
-    assert resolve_max_workers({}) == 8
+    assert resolve_max_workers({}) == 16
     assert resolve_max_workers({"PIPELINE_MAX_WORKERS": "4"}) == 4
-    assert resolve_max_workers({"PIPELINE_MAX_WORKERS": "  16 "}) == 16
+    assert resolve_max_workers({"PIPELINE_MAX_WORKERS": "  32 "}) == 32
 
 
 def test_resolve_max_workers_rejects_junk_and_zero():
@@ -177,6 +178,44 @@ def test_resolve_max_workers_rejects_junk_and_zero():
         resolve_max_workers({"PIPELINE_MAX_WORKERS": "0"})
 
 
+def _live_workers_from_terraform(text: str) -> int:
+    """The `PIPELINE_MAX_WORKERS` value set on the Lambda in `terraform/lambda.tf`.
+
+    Exactly one assignment must exist: a moved, renamed or duplicated variable fails loudly
+    instead of letting this check silently stop checking anything."""
+    import re
+
+    matches = re.findall(r'\bPIPELINE_MAX_WORKERS *= *"([0-9]+)"', text)
+    assert len(matches) == 1, (
+        f"expected exactly one PIPELINE_MAX_WORKERS assignment in lambda.tf, found {len(matches)}"
+    )
+    return int(matches[0])
+
+
+def test_the_live_worker_count_in_terraform_matches_the_code_default():
+    # The env var OVERRIDES the constant at runtime, so a stale lambda.tf would silently run a
+    # different ceiling than the one the code (and its docs) claim — the B-7 shape. Changing the
+    # worker count means changing both, deliberately.
+    from pathlib import Path
+
+    tf = (Path(__file__).resolve().parents[1] / "terraform" / "lambda.tf").read_text(
+        encoding="utf-8"
+    )
+    assert _live_workers_from_terraform(tf) == DEFAULT_MAX_WORKERS
+
+
+def test_the_terraform_worker_parser_reads_what_is_there_and_refuses_ambiguity():
+    # negative cases for the pin above: it must read the real value (not just "not 16"),
+    # and a missing, duplicated or prefixed-lookalike variable must fail loudly.
+    assert _live_workers_from_terraform('      PIPELINE_MAX_WORKERS = "8"\n') == 8
+    with pytest.raises(AssertionError):
+        _live_workers_from_terraform('      LOG_LEVEL = "INFO"\n')
+    with pytest.raises(AssertionError):
+        _live_workers_from_terraform('PIPELINE_MAX_WORKERS = "8"\nPIPELINE_MAX_WORKERS = "16"\n')
+    with pytest.raises(AssertionError):
+        _live_workers_from_terraform('      X_PIPELINE_MAX_WORKERS = "9"\n')
+
+
 def test_resolve_deadline_from_lambda_context():
     class _Ctx:
         def get_remaining_time_in_millis(self):
@@ -184,14 +223,14 @@ def test_resolve_deadline_from_lambda_context():
 
     deadline = resolve_deadline(_Ctx())
     assert deadline is not None
-    assert not deadline.expired  # 900s - 60s margin is comfortably in the future
+    assert not deadline.expired  # 900s - 200s margin is comfortably in the future
 
 
 def test_resolve_deadline_expired_when_context_nearly_out_of_time():
     # negative: less remaining time than the safety margin → the deadline is already expired
     class _Ctx:
         def get_remaining_time_in_millis(self):
-            return 5_000  # 5s left < the 60s margin
+            return 5_000  # 5s left < the 200s margin
 
     deadline = resolve_deadline(_Ctx())
     assert deadline is not None and deadline.expired
