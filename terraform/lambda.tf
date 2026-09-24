@@ -35,9 +35,9 @@ resource "aws_lambda_function" "pipeline" {
 
   timeout = 900 # 15 min (max) — each posting is an LLM dissect/score + a Data-API write
   # (~30s over the network), so the daily batch needs real headroom (vs the Aurora cold-resume too).
-  # H-2: dissect/score run up to $PIPELINE_MAX_WORKERS (default 8) concurrent LLM calls, and the
-  # handler's deadline guard stops new work ~60s before this timeout (partial runs resume).
-  memory_size = 1024 # Lambda CPU scales with memory — 8 worker threads + TLS need the headroom
+  # H-2: dissect/score run up to $PIPELINE_MAX_WORKERS (default 16) concurrent LLM calls, and the
+  # handler's deadline guard stops new work 200 s before this timeout (partial runs resume).
+  memory_size = 1024 # Lambda CPU scales with memory — worker threads + TLS need the headroom (164 MB used at 8)
 
   # Config only — NO secret VALUES. The handler fetches secret values at runtime
   # via the Data API / Secrets Manager using the names/ARNs below; the search spec + profile
@@ -65,9 +65,16 @@ resource "aws_lambda_function" "pipeline" {
       # defaults to INFO when unset; this entry just makes the knob IaC-visible.
       LOG_LEVEL = "INFO"
       # H-2 concurrency: the size of the dissect/score ThreadPoolExecutor — how many LLM calls
-      # are in flight at once INSIDE ONE INVOCATION (not a number of invocations). Back to the
-      # code default of 8 now that the ERR-010 backlog is drained; the daily 10-30 job run
-      # needs nothing more, and a high value is standing risk for no benefit.
+      # are in flight at once INSIDE ONE INVOCATION (not a number of invocations). It is a
+      # CEILING, not a fixed fan-out: the pool runs min(this, jobs waiting), so a quiet day
+      # makes no extra calls and costs nothing extra.
+      #
+      # 16, raised from 8 on 2026-09-24. 8 was set after the ERR-010 drain on the belief that
+      # "the daily 10-30 job run needs nothing more"; the 2026-09-22 sweep (first after a
+      # ~3-week intake gap) disproved it: 91 gold, 56 scored, 35 deferred -> partial, no digest
+      # that day. Measured ~55-79 s per score per worker (flat from 8 to 80 workers), so 16
+      # fits ~100-150 scores in the budget vs the 91 observed. Signal to raise again:
+      # `score.deferred > 0` + `partial: true` in runs/*.json and a WARNING log line (nothing alerts on it - B-20).
       #
       # BEFORE RAISING THIS AGAIN, read ERR-014. DeepSeek's concurrency limit is NOT the
       # documented 500 — it is scaled to the account's REMAINING BALANCE, and it is reported
@@ -78,7 +85,7 @@ resource "aws_lambda_function" "pipeline" {
       #
       # For reference, the 2026-09-02 drain ran 618 scorings at 80 workers in ~10 min for
       # $8.23 — see backlog B-10 for the cost model.
-      PIPELINE_MAX_WORKERS = "8"
+      PIPELINE_MAX_WORKERS = "16"
       # ERR-017 / INV-003: how often the JSearch SWEEP runs. The Lambda still fires DAILY (the
       # dead-man alarm watches a 24h window and cannot be widened); this throttles only the
       # source calls, because the free tier is 200 requests/MONTH and one sweep costs

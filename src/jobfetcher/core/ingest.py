@@ -206,7 +206,7 @@ def next_fetch_day(
 
 # LLM calls are pure I/O — this many run concurrently per stage (H-2). DB writes always stay
 # on the main thread (the Data-API dialect's thread-safety is deliberately not relied on).
-DEFAULT_MAX_WORKERS = 8
+DEFAULT_MAX_WORKERS = 16
 
 # Presigned full-list-report link lifetime (B-1). A daily email only needs same-day
 # reachability; a link signed with the Lambda role's temporary creds is capped at the session

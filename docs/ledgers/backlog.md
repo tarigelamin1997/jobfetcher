@@ -322,3 +322,15 @@ Every one of them **passed in isolation**. Ten minutes went into diagnosing a de
 **So-what.** The cheapest fix is documentation: make `pre-commit install` a required setup step in `docs/getting-started.md`, with a one-line check that it took (`.git/hooks/pre-commit` exists), and reword the VG7 row to "enforced in CI; mirrored locally where the hook is installed". Do not promote the local hook to a gate. It is only as armed as each clone makes it, and `git commit --no-verify` skips it. CI stays the enforced gate.
 
 **Connections:** [ERR-015](errors.md) · [B-11](#b-11--the-tree-is-84-files-from-ruff-format-clean-and-the-gate-that-claimed-to-check-it-never-ran) · [ERR-018](errors.md) (a review gate that reported success without running) · `.pre-commit-config.yaml` · the CI `secret-scan` job.
+
+## B-20 · A run that runs out of time is announced by nothing
+
+**Logged:** 2026-09-24, from the 2026-09-22 run. **Status:** open, **accepted**. The capacity half is fixed (worker ceiling 8 → 16, see the [CHANGELOG](../../CHANGELOG.md)); the visibility half is deliberately not built.
+
+**What.** When the deadline guard stops a run, the leftovers are counted `deferred`, the summary says `partial: true`, and the handler returns **`200`**. No alarm covers it: the Lambda Errors alarm needs a crash or a hard timeout (which the guard exists to prevent), and `returned-500` needs a `500`. And because a partial run **skips notify**, the one day it happens is the one day no digest arrives. The next digest arrives normally, and the INV-004 staleness banner only appears at 3 days, so a one-day gap explains itself nowhere. The only records are `runs/{date}/*.json` (`score.deferred > 0`) and one WARNING log line ("stage=notify skipped — partial run"), and nothing reads either.
+
+**Why it waited.** Tarig judged a one-day delay minor: the sweep looks back 30 days and postings stay open for weeks. Raising the ceiling to 16 removes most partial runs on the loads measured (91 gold was the worst, on a catch-up day). A missing email was considered as the signal and rejected as unreliable: [ERR-010](errors.md) ran 38 days without a digest and was found by a code review, not by the missing emails.
+
+**So-what (when it earns it).** If `partial: true` recurs at 16, send the digest anyway on a deadline-partial run with a banner ("N jobs did not fit in today's run; if this repeats, raise `PIPELINE_MAX_WORKERS`"), reusing the B-12 / INV-005 banner path. The design point to settle first is the send-once guard: the next day's run must still send the catch-up results.
+
+**Connections:** [INV-004](../investigations/INV-004-alarm-escalation/README.md) (staleness banner threshold) · [B-9](#b-9--a-retrying-llm-call-can-still-outlive-the-deadline-guard) (the one way the guard can still time out) · [ERR-014](errors.md) (the concurrency ceiling) · `terraform/lambda.tf` `PIPELINE_MAX_WORKERS`
