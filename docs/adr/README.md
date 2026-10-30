@@ -9,7 +9,7 @@ These are the **foundational** decisions made during the design session — the 
 | [0001](0001-evolutionary-architecture.md) | Evolutionary architecture: minimal v0 + bottleneck-driven migrations | Accepted |
 | [0002](0002-tool-minimalism-wins.md) | Tool-minimalism is the gate; DE-depth is the tiebreaker | Accepted |
 | [0003](0003-postgres-over-dynamodb.md) | PostgreSQL as the operational store (over DynamoDB) | Accepted |
-| [0004](0004-warehouse-strategy.md) | Analytics: dbt-on-Postgres default; Snowflake conditional (over Databricks) | Accepted |
+| [0004](0004-warehouse-strategy.md) | Analytics: dbt-on-Postgres default; Snowflake conditional (over Databricks) | Accepted · under review (Databricks adopted 2026-10-30; ADR-0040 pending INV-007) |
 | [0005](0005-dedup-cluster-and-surface.md) | Deduplication: cluster-and-surface, never hide | Accepted |
 | [0006](0006-cv-renderer.md) | CV rendering without LibreOffice-in-Lambda | Accepted |
 | [0007](0007-self-hosted-distribution.md) | Self-hosted / open-source distribution (not SaaS) | Accepted |

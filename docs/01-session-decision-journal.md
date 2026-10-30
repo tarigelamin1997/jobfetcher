@@ -495,3 +495,56 @@ Where it goes: **80–85% of scoring spend is reasoning tokens that are then dis
 
 The through-line of §20/§26/§35 — *intellectual honesty over a convenient story* — held, and cost something this time. This record contains a wrong measurement, a wrong conclusion drawn from it, two failed deploys, and a fix that reproduced the very bug it was fixing one stage over. **That is the useful half.**
 
+## 37. Skills that grow, jobs that move, and the Databricks reversal
+
+*(2026-10-29 → 2026-10-30. A design discussion, no code. It produced backlog [B-21 → B-24](ledgers/backlog.md), amendments D21–D22 to [SPEC-001](specs/SPEC-001-autonomous-apply.md), and the INV-007 investigation. ADR-0004 is under review.)*
+
+### 37.1 The request, and how much of it already existed
+
+Tarig's idea: a job scored low should move to medium, and then high, as he acquires skills and uploads proof of them. The top stage should trigger a tailored CV and, eventually, auto-apply. His first sketch was a Databricks medallion re-assessing every ~3 days, using Databricks ML on S3.
+
+Most of the mechanism was already built. The medallion has run on S3 + Postgres since v0. The stages are `fit_category` (`misaligned → stretch → near_miss → strong_fit`). Re-scoring against a changed profile is `{"mode":"reassess"}` ([ADR-0023](adr/0023-reassess-replay.md)), each score's provenance is `score_event.profile_hash` ([ADR-0025](adr/0025-score-event-lineage.md)), and honest graduations badge only moves the profile caused ([ADR-0031](adr/0031-boundary-self-consistency-honest-graduations.md)). The gaps were narrower: nothing *triggers* reassess, a proof has nowhere to go, and nothing asks which skill to learn next.
+
+**A terminology correction worth keeping:** bronze, silver and gold describe how refined the *data* is. A job's fit is an attribute of a gold row, and its movement is an event log. Putting strong-fit jobs "in gold" would mix data quality with business state.
+
+### 37.2 Decisions
+
+| Topic | Decision | Rejected |
+|---|---|---|
+| Re-score trigger | On a profile-hash change, preferring non-fetch days; fix B-4 first (B-21) | A fixed 3-day timer: it re-scores noise (B-3's 15 false graduations) at ~$50/month for no signal |
+| Proof of a skill | **The AI decides**, inside code-enforced caps: proof type caps the level, a quote is required, one step at a time, every decision recorded, Undo in the digest (B-23) | A human approval step (Claude's recommendation, declined) · an AI without caps |
+| What-if | Count first (free), then simulate the top 2–3 skills; simulated scores never touch real history (B-22) | Counting only (says a skill *appears*, not that it *moves* a job) · simulating blind |
+| Surge brakes | Undo by cause · a longer window on a surge · hold moves no profile change explains (SPEC-001 D22) | A per-job veto as the only brake · per-company spreading |
+| Who gets auto-apply | Tarig only, even with other users (SPEC-001 D21) | Offering it to invited users |
+| First users | A few people Tarig invites (B-24) | Public sign-up · a paid product, for now |
+| Platform | **Databricks is adopted** for the next phase | Keeping ADR-0004's rejection |
+| Order | Investigate both (INV-007, INV-006) before choosing | Pausing SPEC-001 · finishing it first |
+
+### 37.3 The Databricks reversal
+
+ADR-0004 rejected Databricks on two premises: **one user** and **~30 rows a day**, which make Spark unconvincing, and **the Spark/Delta signal belongs in OrderFlow**. Claude argued the same case again this session. It is still true that the daily scoring workload is LLM-bound, not compute-bound: a few hundred HTTP calls that Spark cannot speed up.
+
+Two premises changed. **Real users**: a few invited people, where ADR-0004 assumed one. And **Tarig's own depth**: he works with Databricks and is close to the Data Engineer Associate and Professional certifications, so its absence here hides a skill rather than avoiding an untested one. His call is that Databricks is essential for the product to reach real users. Decision rights put architecture with him, and it was taken.
+
+What carries over from the old position is the discipline, not the verdict. **Every Databricks feature used must map to a named user problem**: "use all of its capabilities" would read as a feature tour, and a feature tour is what the defensibility rubric exists to stop. The strongest candidate is a Vector Search pre-filter, because it attacks the cost that actually grows with users: LLM calls per user × job. The facts the reversal still needs are a cost floor (today's idle bill is ~$0), the search quota per user, and the migration shape. They go to INV-007 before ADR-0040 is written.
+
+### 37.4 What the data said along the way
+
+A rough keyword count over the 2026-07-08 export (258 jobs with extracted skills, 48 of them `strong_fit` or `near_miss`):
+
+| Skill | All jobs | Close jobs |
+|---|---|---|
+| SQL | 110 | 27 |
+| Azure | 84 | 8 |
+| Spark / PySpark | 53 | 2 |
+| AWS | 53 | 8 |
+| Databricks | 31 | 1 |
+
+The count first read as a skills gap. Then the live `profile.local.yml` turned out to list **no Databricks, Spark or Delta at all**, so the scorer had been marking those skills as gaps for a candidate who has them. **The profile undersold the candidate, and the scores were probably wrong, not the market.** It is the cheapest fix in the session (edit, push, reassess) and the clearest case for B-21: nothing re-scored those jobs on its own.
+
+### 37.5 So-what
+
+- **Most of a new idea can be already built.** The first move was to map it onto what exists; the real gaps were a trigger, a place for proof, and a question nobody asked.
+- **Automation compounds judgment.** An AI promotion feeds a re-score, which feeds graduations, which feed auto-apply. The brakes in SPEC-001 D22 exist because a single profile edit, or a model update nobody made on purpose, could otherwise turn into dozens of applications under Tarig's name.
+- **A reversal is recorded, not hidden.** ADR-0004's reasoning was sound for its premises; the premises changed. ADR-0040 will say which ones.
+

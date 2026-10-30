@@ -62,6 +62,8 @@ The order reflects: value-first · dependency-respecting · capability-arrives-w
 
 **Future migrations (v1.x / v2.0)** — built *only if/when* a real bottleneck justifies each: **Debezium CDC** (batch→streaming, when volume/latency demands), **multi-user** (v2.0, the `user_id` dimension), **feedback hub**, **BI dashboard** over marts (the v0.12.0 local Streamlit control panel is a first local step toward this), **Snowflake** (if Postgres analytics becomes a real bottleneck), **MWAA/Airflow** (if Step Functions can't express the DAG). Each is a documented scale-path today, not a plan.
 
+> **Under investigation (2026-10-30):** Tarig has adopted **Databricks** for the next phase, aimed at **a few invited users**: a reversal of [ADR-0004](adr/0004-warehouse-strategy.md), which is under review. Before any build, INV-007 measures the cost floor, the search quota per user and the migration shape ([B-24](ledgers/backlog.md), [journal §37](01-session-decision-journal.md#37-skills-that-grow-jobs-that-move-and-the-databricks-reversal)); ADR-0040 records the decision. The skill-growth features (B-21 → B-23) wait on it, so they are built once, on the target platform. The table above is not rewritten until then.
+
 **Semver:** a **minor** bump (`v0.x.0`) per migration / real capability; a **patch** bump (`v0.x.y`) for small fixes + improvements between migrations (a bug fix or a tiny wiring doesn't need a whole minor). **This patch-versioning rule was formally adopted at `v0.3.0` and first exercised by `v0.3.1`** (the `employment_types` fix). **`v1.0.0` at M8** (feature-complete single-user) → v1.x for additive future migrations, v2.0 for breaking changes (e.g. multi-user). Light CI from v0; CD hardening at M8.
 
 ---
