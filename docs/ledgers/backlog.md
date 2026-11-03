@@ -334,3 +334,62 @@ Every one of them **passed in isolation**. Ten minutes went into diagnosing a de
 **So-what (when it earns it).** If `partial: true` recurs at 16, send the digest anyway on a deadline-partial run with a banner ("N jobs did not fit in today's run; if this repeats, raise `PIPELINE_MAX_WORKERS`"), reusing the B-12 / INV-005 banner path. The design point to settle first is the send-once guard: the next day's run must still send the catch-up results.
 
 **Connections:** [INV-004](../investigations/INV-004-alarm-escalation/README.md) (staleness banner threshold) · [B-9](#b-9--a-retrying-llm-call-can-still-outlive-the-deadline-guard) (the one way the guard can still time out) · [ERR-014](errors.md) (the concurrency ceiling) · `terraform/lambda.tf` `PIPELINE_MAX_WORKERS`
+
+## B-21 · A job changes stage only when someone remembers to run reassess
+
+**Logged:** 2026-10-30, from a design discussion with Tarig about jobs moving up as his skills grow ([journal §37](../01-session-decision-journal.md#37-skills-that-grow-jobs-that-move-and-the-databricks-reversal)). **Status:** open, direction decided, not built. Where it runs waits on INV-007.
+
+**What.** Re-scoring against a changed profile exists (`{"mode":"reassess"}`, [ADR-0023](../adr/0023-reassess-replay.md)), and every score already records the profile that produced it (`score_event.profile_hash`, [ADR-0025](../adr/0025-score-event-lineage.md)). But reassess is manual. ADR-0023 rejected re-scoring on every run and named "auto-trigger only when a profile-hash change is detected" as the refinement. It was never built. The live profile shows the cost: `config/profile.local.yml` lists no Databricks, Spark or Delta at all. In the 2026-07-08 export, Databricks appears in 31 of 258 jobs with extracted skills but only 1 of the 48 `strong_fit` + `near_miss` jobs. Those scores are probably understated, and nothing re-scores them on its own.
+
+**Why a timer was rejected.** Tarig's first idea was to re-assess every ~3 days. A score only changes when the profile or the JD does. Re-scoring an unchanged profile buys noise (B-3: 15 false graduations under an unchanged hash) and costs roughly $5 a full pass (an estimate: ~300 postings at ~$0.013, a fifth of them 3× at the boundary). Every 3 days that is about $50/month, several times today's whole bill (B-10).
+
+**So-what.** Trigger on a **profile-hash change**: the daily run compares the current hash with the latest `score_event` hash and re-scores when they differ, preferably on a non-fetch day, when the LLM budget is idle. **[B-4](#b-4--full-backlog-reassess-is-deadline-partial-resample-throughput--observed-2026-07-11) first:** reassess is ordered by `posting_id`, so a deadline-partial pass never reaches the newest postings, and an automatic trigger would silently leave them unscored. A large re-stage then spreads across days on the B-4 cursor. Downstream, a re-stage can push many jobs over the auto-apply threshold at once. SPEC-001 D22 holds the brakes for that.
+
+**Connections:** [ADR-0023](../adr/0023-reassess-replay.md) · [ADR-0031](../adr/0031-boundary-self-consistency-honest-graduations.md) (honest graduations) · B-4 · B-22 · B-23 · [SPEC-001](../specs/SPEC-001-autonomous-apply.md) D22.
+
+## B-22 · No way to ask "what if I learned X?"
+
+**Logged:** 2026-10-30, same discussion. **Status:** open, direction decided, not built.
+
+**What.** Silver already extracts every skill a JD asks for, with its requirement level and the JD phrase as evidence, and the scorer writes `gaps` per job. Nothing adds them up. A rough keyword count over the 2026-07-08 export shows what that would say: Spark appears in 53 of 258 jobs but 2 of the 48 close ones; Azure in 84 (33%), more than AWS's 53.
+
+**Why it matters.** Re-staging old jobs mostly tells you about postings that are already filled: a posting lives for weeks, and a skill takes longer to learn. The forward-looking question is more useful: *which skill would move the most jobs up?*
+
+**So-what (decided: count, then simulate).** (1) **Count:** a free tally over silver `skills` for the jobs near the threshold. It needs a skill-name canon first ("Spark" = "PySpark" = "Apache Spark"), a slice of M5's `dim_skill` pulled forward. (2) **Simulate:** re-score those jobs under a hypothetical profile for the top 2–3 skills. That costs well under a dollar, and it tells you whether a skill *changes the outcome* rather than just *appears*. **Simulated scores live in their own store**: never in `score_event`, the digest or the apply queue, or they would fake graduations and could trigger applications. The sample is Tarig's own searches (3 titles × 5 countries), not the market; the output must say so.
+
+**Connections:** M5 / [ADR-0011](../adr/0011-dimensional-analytical-model.md) (`dim_skill`) · M6 (skill-demand tracker) · B-21 · B-23 · INV-007 (where it runs).
+
+## B-23 · Proof of a skill has nowhere to go
+
+**Logged:** 2026-10-30, same discussion. **Status:** open, direction decided, not built.
+
+**What.** `ProfileSkill` is a name, a self-rated `level` and `years` (`core/profile.py`). A certificate or a finished project changes the profile only when Tarig edits the YAML by hand, and nothing records why a level changed. The scorer never sees a proof, only the profile text, so a proof matters only through the profile change it causes. That change is also what SPEC-001's CV tailoring may claim (§5.2: a `learning` skill never enters the core-skills line).
+
+**Decided: the AI judges the proof, inside limits enforced in code** (Tarig's call; Claude recommended a human approval step):
+- the proof type caps the level: a course certificate supports "certified", a built project at most "proficient (project)", and only job use supports experience;
+- the AI must quote the line in the proof that shows the skill, or nothing changes (the silver `evidence` rule);
+- one level step at a time;
+- every decision is recorded: proof, model, before/after, quote;
+- the next digest leads with the promotion and a signed **Undo** link, a new public-endpoint action that gets a security review like [ADR-0035](../adr/0035-outcome-capture-endpoint.md);
+- scores change immediately; jobs it moves up wait out the undo window before reaching the apply queue (SPEC-001 D22-A, cause `promotion:<id>`).
+
+**Open, for the build:** one home for skills. Today the profile drives scoring, and SPEC-001's master CV drives tailoring; a promotion must update both, or they disagree. Proof files go to private S3 next to the profile, never into the repo. DeepSeek would see certificates (name, credential IDs), consistent with SPEC-001 D4.
+
+**Connections:** B-21 (a promotion changes the hash) · B-22 · [SPEC-001](../specs/SPEC-001-autonomous-apply.md) §5 · `core/profile.py`.
+
+## B-24 · The tool has one user built into every layer
+
+**Logged:** 2026-10-30, same discussion. **Status:** open. **Dossier:** INV-007 (planned: Databricks platform + invited-users readiness).
+
+**What.** Tarig wants the next phase to have real users, starting with **a few people he invites**, on Databricks ([journal §37](../01-session-decision-journal.md#37-skills-that-grow-jobs-that-move-and-the-databricks-reversal)). What breaks first has nothing to do with the platform:
+- **Search quota.** JSearch's free tier is 200 requests a month; one sweep is 15, already rationed to every 3rd day for one user ([ERR-017](errors.md)). A second user does not fit.
+- **AI cost scales per user**: ~$5–14/month each at today's rate (B-10).
+- **Other people's CVs are personal data**: consent, deletion and storage under Saudi PDPL (and GDPR for any EU user). The privacy rules today assume one person.
+- **Logins.** There is one public endpoint, authorised by an HMAC token; there are no accounts.
+- **Email** to strangers needs a sender domain (B-2).
+- **`user_id`** is threaded nowhere: the roadmap's v2.0, a breaking change.
+- **Auto-apply stays Tarig-only** (SPEC-001 D21).
+
+**So-what.** INV-007 measures the cost floor, the quota cost per user and the migration shape before anything is built, and maps each Databricks feature to one of these problems. A feature that maps to none is cut.
+
+**Connections:** [ADR-0004](../adr/0004-warehouse-strategy.md) (under review) · B-2 · B-10 · ERR-017 · roadmap v2.0 (multi-user) · [SPEC-001](../specs/SPEC-001-autonomous-apply.md) D21.

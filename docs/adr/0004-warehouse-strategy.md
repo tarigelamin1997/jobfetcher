@@ -1,7 +1,7 @@
 # ADR-0004 — Analytics: dbt-on-Postgres default; Snowflake conditional (over Databricks)
 
 ## Status
-Accepted
+Accepted · **under review since 2026-10-30**: Tarig has adopted Databricks for the next phase (invited users). The reversal is recorded in [journal §37](../01-session-decision-journal.md#37-skills-that-grow-jobs-that-move-and-the-databricks-reversal) and will be decided in ADR-0040 after INV-007.
 
 ## Context
 The portfolio's flagged gap is **SQL / warehouse modeling + dbt**. The instinct was to add a real warehouse (Snowflake) for the analytics plane. But the tool's data is tiny (~10–30 rows/day) — at this scale a dedicated warehouse is a *portfolio/skill* choice, not a data need — and we already run Postgres ([ADR-0003]), which can host the entire medallion via dbt for $0 extra. Tool-minimalism ([ADR-0002]) gates this.
